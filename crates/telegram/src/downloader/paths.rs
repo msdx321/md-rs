@@ -74,7 +74,10 @@ pub(super) fn build_media_paths(
     let fname = format!("{stem}.{ext}");
     let final_path = truncate_filename(&dir.join(&fname), 230);
 
-    let temp_path = final_path.with_extension(format!("{ext}.part"));
+    let temp_path = cfg
+        .temp_path
+        .join(final_path.strip_prefix(&cfg.save_path)?)
+        .with_extension(format!("{ext}.part"));
 
     Ok((temp_path, final_path))
 }

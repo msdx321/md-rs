@@ -36,7 +36,7 @@ struct ChatOutcome {
 }
 
 pub(super) struct DownloadRuntime {
-    pub(super) file_ids: Arc<Mutex<HashSet<String>>>,
+    pub(super) file_ids: Arc<Mutex<HashMap<String, u64>>>,
     pub(super) dl_sem: Arc<Semaphore>,
     pub(super) mp: Arc<MultiProgress>,
     pub(super) web_state: Arc<ApiState>,
@@ -99,8 +99,13 @@ pub(super) async fn run_check_cycle(
                     if let Some(data) = data_chats.get_mut(&chat_id) {
                         data.last_read_message_id = data.last_read_message_id.max(outcome.last_id);
                     }
-                    persist_state(&runtime.web_state.database, &runtime.file_ids, data_chats)
-                        .await?;
+                    persist_state(
+                        &runtime.web_state.database,
+                        &runtime.file_ids,
+                        data_chats,
+                        runtime.web_state.history_cutoff(),
+                    )
+                    .await?;
                     info!(
                         "chat {}: scan complete - last_read advanced to {}, {} id(s) pending retry",
                         chat_cfg.chat_id,

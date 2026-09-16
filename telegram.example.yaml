@@ -1,8 +1,3 @@
 api_id: 0
 api_hash: your_api_hash
 chat: []
-media_types: [audio, document, photo, video, voice]
-save_path: downloads/telegram
-max_download_task: 5
-download_connections: 4
-check_interval_secs: 900

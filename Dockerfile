@@ -38,5 +38,5 @@ VOLUME ["/data"]
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl --fail --silent --output /dev/null "http://127.0.0.1:${MEDIA_PORT}/" || exit 1
+    CMD curl --fail --silent --output /dev/null "http://$(cat /tmp/md-rs-http-address)/" || exit 1
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/md-rs"]

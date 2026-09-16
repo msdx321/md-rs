@@ -4,7 +4,9 @@ use std::path::PathBuf;
 /// User-editable configuration loaded from `config/telegram.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub api_id: i32,
+    #[serde(default)]
     pub api_hash: String,
     #[serde(default)]
     pub chat: Vec<ChatConfig>,
@@ -12,8 +14,10 @@ pub struct Config {
     pub media_types: Vec<String>,
     #[serde(default)]
     pub file_formats: FileFormats,
-    #[serde(default = "default_save_path")]
+    #[serde(skip)]
     pub save_path: PathBuf,
+    #[serde(skip)]
+    pub temp_path: PathBuf,
     #[serde(default = "default_file_path_prefix")]
     pub file_path_prefix: Vec<String>,
     #[serde(default = "default_file_name_prefix")]
@@ -24,12 +28,6 @@ pub struct Config {
     pub max_download_task: usize,
     #[serde(default = "default_download_connections")]
     pub download_connections: usize,
-    #[serde(default = "default_web_host")]
-    pub web_host: String,
-    #[serde(default = "default_web_port")]
-    pub web_port: u16,
-    #[serde(default = "default_check_interval_secs")]
-    pub check_interval_secs: u64,
     #[serde(default = "default_date_format")]
     pub date_format: String,
 }
@@ -43,14 +41,12 @@ impl Default for Config {
             media_types: default_media_types(),
             file_formats: FileFormats::default(),
             save_path: default_save_path(),
+            temp_path: "temp/telegram".into(),
             file_path_prefix: default_file_path_prefix(),
             file_name_prefix: default_file_name_prefix(),
             file_name_prefix_split: default_file_name_prefix_split(),
             max_download_task: default_max_download_task(),
             download_connections: default_download_connections(),
-            web_host: default_web_host(),
-            web_port: default_web_port(),
-            check_interval_secs: default_check_interval_secs(),
             date_format: default_date_format(),
         }
     }
@@ -112,18 +108,6 @@ fn default_file_name_prefix_split() -> String {
 
 fn default_date_format() -> String {
     "%Y_%m".into()
-}
-
-fn default_web_host() -> String {
-    "0.0.0.0".into()
-}
-
-fn default_web_port() -> u16 {
-    5000
-}
-
-fn default_check_interval_secs() -> u64 {
-    15 * 60
 }
 
 fn default_all() -> Vec<String> {

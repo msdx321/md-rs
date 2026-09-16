@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, Default)]
 pub struct AppData {
     pub chat: Vec<ChatData>,
-    pub downloaded_file_ids: Vec<String>,
+    pub downloaded_file_ids: Vec<(String, u64)>,
 }
 
 #[derive(Debug, Clone, Default)]

@@ -50,7 +50,7 @@ pub(super) async fn import(tx: &Connection, telegram: Option<&Path>) -> anyhow::
             let data: TelegramData = read_yaml(Path::new(path))?;
             for id in data.downloaded_file_ids {
                 tx.execute(
-                    "INSERT OR IGNORE INTO telegram_files(file_id) VALUES (?)",
+                    "INSERT OR IGNORE INTO telegram_files(file_id,downloaded_at) VALUES (?,unixepoch()*1000)",
                     [id],
                 )
                 .await?;

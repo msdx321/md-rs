@@ -14,14 +14,10 @@ pub struct ListingLink {
 /// Runtime configuration, loaded from `config/jav.yaml`.
 ///
 /// Every field has a default so a missing or partial file still boots; the
-/// web UI writes the whole struct back after an edit.
+/// YAML saves omit default values; the web API returns the complete model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    // ── web server ────────────────────────────────────────────────────────
-    pub web_host: String,
-    pub web_port: u16,
-
     // ── site access ───────────────────────────────────────────────────────
     /// Base URL of the site, without a trailing slash.
     pub site_base: String,
@@ -61,15 +57,11 @@ pub struct Config {
     pub min_duration_secs: f64,
     /// How many listing pages to scan when looking for candidates.
     pub max_pages: usize,
-    pub daily_enabled: bool,
-    /// Local time of day for the daily run, `HH:MM`.
-    pub daily_time: String,
-    /// Run the daily job once immediately after startup.
-    pub run_on_start: bool,
-
     // ── download ──────────────────────────────────────────────────────────
+    #[serde(skip)]
     pub save_path: PathBuf,
     /// HLS work directory, separate from completed downloads.
+    #[serde(skip)]
     pub temp_path: PathBuf,
     /// How many videos may download at the same time.
     pub concurrent_videos: usize,
@@ -82,8 +74,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            web_host: "0.0.0.0".into(),
-            web_port: 8080,
             site_base: "https://missav.ai".into(),
             // The ranking lives in the sort query: MissAV has no view count in
             // the markup, so the server's ordering *is* the ranking.
@@ -99,9 +89,6 @@ impl Default for Config {
             title_filter_regex: false,
             min_duration_secs: 600.0,
             max_pages: 2,
-            daily_enabled: true,
-            daily_time: "03:30".into(),
-            run_on_start: false,
             save_path: PathBuf::from("downloads/jav"),
             temp_path: PathBuf::from("temp"),
             concurrent_videos: 1,

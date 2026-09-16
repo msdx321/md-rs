@@ -6,7 +6,7 @@ use grammers_client::Client;
 use grammers_client::media::Media;
 use indicatif::{MultiProgress, ProgressBar};
 use log::{debug, info, warn};
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::FxHashMap as HashMap;
 use tokio::sync::Mutex;
 
 use crate::api::ApiState;
@@ -26,7 +26,7 @@ pub(crate) async fn download_media_inner(
     client: &Client,
     msg: &grammers_client::message::Message,
     cfg: &Config,
-    file_ids: &Arc<Mutex<HashSet<String>>>,
+    file_ids: &Arc<Mutex<HashMap<String, u64>>>,
     mp: &MultiProgress,
     web_state: &Arc<ApiState>,
     shutdown: &Shutdown,
@@ -44,8 +44,9 @@ pub(crate) async fn download_media_inner(
         _ => String::new(),
     };
     if !fid.is_empty() {
-        let cache = file_ids.lock().await;
-        if cache.contains(&fid) {
+        let mut cache = file_ids.lock().await;
+        cache.retain(|_, time| *time > web_state.history_cutoff());
+        if cache.contains_key(&fid) {
             debug!("msg={msg_id}: already downloaded (file_unique_id), skipped");
             return Ok(false);
         }
@@ -55,16 +56,31 @@ pub(crate) async fn download_media_inner(
     let (temp_path, final_path) = build_media_paths(msg, &media, cfg)?;
 
     // Already fully downloaded?
-    if tokio::fs::try_exists(&final_path).await? {
-        debug!("msg={msg_id}: file already exists, skipped");
-        let mut cache = file_ids.lock().await;
-        if !fid.is_empty() {
-            cache.insert(fid);
+    match tokio::fs::metadata(&final_path).await {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_file(),
+                "download destination is not a file: {}",
+                final_path.display()
+            );
+            debug!("msg={msg_id}: file already exists, marking complete");
+            if !fid.is_empty() {
+                file_ids.lock().await.insert(fid, crate::api::now_millis());
+            }
+            let size = metadata.len();
+            web_state
+                .download_started(msg_id, &final_path, size, size)
+                .await;
+            web_state.download_finished(msg_id, size, true).await;
+            return Ok(true);
         }
-        return Ok(false);
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
 
     tokio::fs::create_dir_all(temp_path.parent().unwrap_or(Path::new("."))).await?;
+
+    media_migration::relocate_partial(&final_path, &temp_path, &web_state.database).await?;
 
     let total = match &media {
         Media::Photo(p) => p.size().unwrap_or(0) as u64,

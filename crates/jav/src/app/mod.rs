@@ -102,6 +102,7 @@ impl Default for SchedulerStatus {
 
 pub struct AppCtx {
     cfg: RwLock<Config>,
+    common: watch::Receiver<media_config::app::Config>,
     client: wreq::Client,
     /// Live `cf_clearance` cookie, shared with every `Fetcher`.
     cookies: Arc<CookieStore>,
@@ -123,18 +124,19 @@ pub struct AppCtx {
 }
 
 impl AppCtx {
-    pub async fn new(cfg: Config, database: Database) -> anyhow::Result<Self> {
+    pub async fn new(
+        cfg: Config,
+        database: Database,
+        common: watch::Receiver<media_config::app::Config>,
+    ) -> anyhow::Result<Self> {
         let client = build_client()?;
         let ledger = Repository::load(database.clone()).await?;
         let (events, _) = broadcast::channel(256);
-        let scheduler = SchedulerStatus {
-            enabled: cfg.daily_enabled,
-            daily_time: cfg.daily_time.clone(),
-            ..Default::default()
-        };
+        let scheduler = SchedulerStatus::default();
         let (cookies, browser) = build_cookie_plumbing(&cfg, &database).await?;
         Ok(Self {
             cfg: RwLock::new(cfg),
+            common,
             client,
             cookies,
             browser: RwLock::new(browser),
@@ -155,7 +157,11 @@ impl AppCtx {
 
     /// Snapshot of the current configuration.
     pub fn config(&self) -> Config {
-        self.cfg.read().expect("config lock poisoned").clone()
+        let mut config = self.cfg.read().expect("config lock poisoned").clone();
+        let common = self.common.borrow();
+        config.save_path = common.jav_download_path.clone();
+        config.temp_path = common.temp_path.clone();
+        config
     }
 
     /// Persist settings and apply changes to the live cookie/browser state.
@@ -190,11 +196,6 @@ impl AppCtx {
             let credentials =
                 credentials_changed.then(|| (cfg.cookie.clone(), cfg.user_agent.clone()));
             self.cookies.reconfigure(&mut gate, minter, credentials);
-        }
-        {
-            let mut scheduler = self.scheduler.lock().expect("scheduler lock poisoned");
-            scheduler.enabled = cfg.daily_enabled;
-            scheduler.daily_time = cfg.daily_time.clone();
         }
         *self.cfg.write().expect("config lock poisoned") = cfg;
         self.status_events.send_replace(());
@@ -237,6 +238,26 @@ impl AppCtx {
 
     // ── dedup ledger ─────────────────────────────────────────────────────
 
+    pub fn history_retention_days(&self) -> u32 {
+        self.common.borrow().history_retention_days
+    }
+
+    pub async fn prune_history(&self) -> anyhow::Result<()> {
+        let days = self.history_retention_days();
+        self.ledger.prune_history(days).await?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+        self.tasks
+            .lock()
+            .expect("tasks lock poisoned")
+            .retain(|_, task| {
+                !task.is_terminal()
+                    || chrono::DateTime::parse_from_rfc3339(&task.updated_at)
+                        .is_ok_and(|time| time > cutoff)
+            });
+        self.status_events.send_replace(());
+        Ok(())
+    }
+
     pub fn state_snapshot(&self) -> State {
         self.ledger.snapshot()
     }
@@ -258,7 +279,10 @@ impl AppCtx {
     }
 
     pub async fn clear_history(&self) -> anyhow::Result<usize> {
-        let removed = self.ledger.clear_history().await?;
+        let removed = self
+            .ledger
+            .clear_history(self.history_retention_days())
+            .await?;
         self.status_events.send_replace(());
         Ok(removed)
     }
@@ -525,9 +549,13 @@ mod tests {
     fn ctx() -> AppCtx {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let db = Database::open(":memory:").await.unwrap();
-            AppCtx::new(Config::default(), db)
-                .await
-                .expect("context builds")
+            AppCtx::new(
+                Config::default(),
+                db,
+                watch::channel(media_config::app::Config::default()).1,
+            )
+            .await
+            .expect("context builds")
         })
     }
 

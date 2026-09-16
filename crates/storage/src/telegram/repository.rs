@@ -4,9 +4,12 @@ use crate::Database;
 pub async fn load(db: &Database) -> anyhow::Result<AppData> {
     let conn = db.connection().await;
     let mut data = AppData::default();
-    let mut rows = conn.query("SELECT file_id FROM telegram_files", ()).await?;
+    let mut rows = conn
+        .query("SELECT file_id,downloaded_at FROM telegram_files", ())
+        .await?;
     while let Some(row) = rows.next().await? {
-        data.downloaded_file_ids.push(row.get(0)?);
+        data.downloaded_file_ids
+            .push((row.get(0)?, u64::try_from(row.get::<i64>(1)?)?));
     }
     let mut rows = conn
         .query(
@@ -38,10 +41,10 @@ pub async fn save(db: &Database, data: &AppData) -> anyhow::Result<()> {
     let tx = db.transaction().await?;
     tx.execute("DELETE FROM telegram_files", ()).await?;
     tx.execute("DELETE FROM telegram_retries", ()).await?;
-    for id in &data.downloaded_file_ids {
+    for (id, downloaded_at) in &data.downloaded_file_ids {
         tx.execute(
-            "INSERT INTO telegram_files(file_id) VALUES (?)",
-            [id.as_str()],
+            "INSERT INTO telegram_files(file_id,downloaded_at) VALUES (?,?)",
+            (id.as_str(), i64::try_from(*downloaded_at)?),
         )
         .await?;
     }

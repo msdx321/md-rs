@@ -38,3 +38,32 @@ async fn import_progress(conn: &Connection, temp_path: &Path, key: &str) -> anyh
     .await?;
     Ok(n)
 }
+
+/// Move the old adjacent partial file and its resume checkpoint into shared temp storage.
+pub async fn relocate_partial(
+    final_path: &Path,
+    temp_path: &Path,
+    database: &media_storage::Database,
+) -> anyhow::Result<()> {
+    let mut old = final_path.as_os_str().to_owned();
+    old.push(".part");
+    let old = PathBuf::from(old);
+    if old == temp_path || temp_path.exists() || !old.exists() {
+        return Ok(());
+    }
+    let offset = resume_offset(&old, database).await?;
+    // Keep the original until both the new file and checkpoint are durable.
+    fs::copy(&old, temp_path)?;
+    fs::File::open(temp_path)?.sync_all()?;
+    media_storage::telegram::checkpoints::write_progress(temp_path, offset, database).await?;
+    fs::remove_file(&old)?;
+    media_storage::telegram::checkpoints::delete(&old, database).await?;
+    let mut sidecar = old.as_os_str().to_owned();
+    sidecar.push(".progress");
+    match fs::remove_file(sidecar) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}

@@ -58,6 +58,7 @@ wreq = "0.16"
 wreq-util = "0.2"
 
 [dependencies]
+serde_json.workspace = true
 media-runtime.workspace = true
 media-config.workspace = true
 media-migration.workspace = true

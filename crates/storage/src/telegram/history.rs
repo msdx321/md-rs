@@ -1,6 +1,8 @@
 use crate::{Connection, Database};
 
-pub const RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+pub fn retention_ms(days: u32) -> u64 {
+    u64::from(days) * 24 * 60 * 60 * 1000
+}
 
 pub struct CompletedDownload {
     pub msg_id: i32,
@@ -10,9 +12,9 @@ pub struct CompletedDownload {
     pub completed_at: u64,
 }
 
-pub async fn load(db: &Database, now: u64) -> anyhow::Result<Vec<CompletedDownload>> {
+pub async fn load(db: &Database, now: u64, days: u32) -> anyhow::Result<Vec<CompletedDownload>> {
     let conn = db.connection().await;
-    delete_expired(&conn, now).await?;
+    delete_expired(&conn, now, days).await?;
     let mut rows = conn.query("SELECT message_id,file_name,path,bytes,completed_at FROM telegram_history ORDER BY completed_at,id", ()).await?;
     let mut history = Vec::new();
     while let Some(row) = rows.next().await? {
@@ -32,10 +34,10 @@ pub async fn insert(conn: &Connection, item: &CompletedDownload) -> anyhow::Resu
     Ok(())
 }
 
-pub async fn delete_expired(conn: &Connection, now: u64) -> anyhow::Result<()> {
+pub async fn delete_expired(conn: &Connection, now: u64, days: u32) -> anyhow::Result<()> {
     conn.execute(
         "DELETE FROM telegram_history WHERE completed_at<=?",
-        [i64::try_from(now.saturating_sub(RETENTION_MS))?],
+        [i64::try_from(now.saturating_sub(retention_ms(days)))?],
     )
     .await?;
     Ok(())

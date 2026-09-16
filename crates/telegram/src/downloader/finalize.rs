@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use log::info;
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::FxHashMap as HashMap;
 use tokio::sync::Mutex;
 
 use crate::api::ApiState;
@@ -23,14 +23,27 @@ unsafe extern "C" {
 pub(super) async fn finalize_download(
     msg_id: i32,
     fid: &str,
-    file_ids: &Arc<Mutex<HashSet<String>>>,
+    file_ids: &Arc<Mutex<HashMap<String, u64>>>,
     temp_path: &Path,
     final_path: &Path,
     actual: u64,
     web_state: &Arc<ApiState>,
 ) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(final_path.parent().unwrap_or(Path::new("."))).await?;
-    tokio::fs::rename(temp_path, final_path).await?;
+    match tokio::fs::rename(temp_path, final_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            // Stage on the destination disk so a failed copy is never a completed file.
+            let mut staging = final_path.as_os_str().to_owned();
+            staging.push(".part");
+            let staging = std::path::PathBuf::from(staging);
+            tokio::fs::copy(temp_path, &staging).await?;
+            tokio::fs::File::open(&staging).await?.sync_all().await?;
+            tokio::fs::rename(&staging, final_path).await?;
+            tokio::fs::remove_file(temp_path).await?;
+        }
+        Err(error) => return Err(error.into()),
+    }
     clear_progress(temp_path, &web_state.database).await?;
 
     if !fid.is_empty() {
@@ -39,11 +52,11 @@ pub(super) async fn finalize_download(
             // HashSet order is arbitrary, so this evicts a random entry
             // (not truly the oldest). Fine for a dedup cache: the worst
             // case is a one-off re-download of the evicted file.
-            if let Some(evicted) = cache.iter().next().cloned() {
+            if let Some(evicted) = cache.keys().next().cloned() {
                 cache.remove(&evicted);
             }
         }
-        cache.insert(fid.to_string());
+        cache.insert(fid.to_string(), crate::api::now_millis());
     }
 
     info!(

@@ -54,6 +54,16 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
         return;
     }
 
+    // A listing or manual request may already supply the final title. Adopt
+    // that output before contacting the source, even if the source is offline.
+    let known_path = cfg
+        .save_path
+        .join(format!("{id} - {}.mp4", sanitize_filename(&card.title)));
+    if let Some((path, size)) = existing_output(&known_path) {
+        finish_completed(&ctx, &card, &card.title, &path, size).await;
+        return;
+    }
+
     // ── resolve ──────────────────────────────────────────────────────────
     let resolved =
         match stream::resolve_stream(&fetch, &card.url, &cfg.resolution, cfg.min_duration_secs)
@@ -88,6 +98,7 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
         return;
     }
     let final_path = save_path.join(&file_name);
+    let ts_path = final_path.with_extension("ts");
     let temp_dir = cfg.temp_path.join(format!("temp_{id}"));
 
     ctx.update_task(&id, |t| {
@@ -98,13 +109,10 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
 
     // Already on disk from an earlier run or a crash after merge. Without
     // ffmpeg the merge produces a `.ts`, so both extensions are checked.
-    let ts_path = final_path.with_extension("ts");
-    for existing in [&final_path, &ts_path] {
-        if is_non_empty(existing) {
-            log::info!("[{id}] output already exists at {}", existing.display());
-            finish_completed(&ctx, &card, &title, existing, 0).await;
-            return;
-        }
+    if let Some((path, size)) = existing_output(&final_path) {
+        log::info!("[{id}] output already exists at {}", path.display());
+        finish_completed(&ctx, &card, &title, &path, size).await;
+        return;
     }
 
     if let Err(e) = migrate_segments(&save_path.join(format!("temp_{id}")), &temp_dir).await {
@@ -221,6 +229,15 @@ fn is_non_empty(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn existing_output(path: &Path) -> Option<(PathBuf, u64)> {
+    [path.to_path_buf(), path.with_extension("ts")]
+        .into_iter()
+        .find_map(|path| {
+            let metadata = std::fs::metadata(&path).ok()?;
+            metadata.is_file().then_some((path, metadata.len()))
+        })
+}
+
 async fn finish_completed(
     ctx: &Arc<AppCtx>,
     card: &VideoCard,
@@ -244,6 +261,9 @@ async fn finish_completed(
     }
     ctx.update_task(&card.id, |t| {
         t.state = TaskState::Completed;
+        t.title = title.to_string();
+        t.downloaded_bytes = size;
+        t.total_bytes = size;
         t.phase = "completed".into();
         if t.total_segments == 0 {
             t.total_segments = 1;

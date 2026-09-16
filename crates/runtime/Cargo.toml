@@ -9,4 +9,6 @@ license = "MIT"
 axum.workspace = true
 futures-util.workspace = true
 log.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+chrono.workspace = true
+media-config.workspace = true

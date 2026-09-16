@@ -87,10 +87,10 @@ async fn status(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
 fn status_snapshot(ctx: &AppCtx) -> Value {
     let cfg = ctx.config();
     let state = ctx.state_snapshot();
-    let completed = state.records.iter().filter(|r| r.is_completed()).count();
-    let failed = state.records.iter().filter(|r| !r.is_completed()).count();
-    let total_bytes: u64 = state
-        .records
+    let history = state.history(ctx.history_retention_days());
+    let completed = history.iter().filter(|r| r.is_completed()).count();
+    let failed = history.iter().filter(|r| !r.is_completed()).count();
+    let total_bytes: u64 = history
         .iter()
         .filter(|r| r.is_completed())
         .map(|r| r.size)
@@ -114,6 +114,7 @@ fn status_snapshot(ctx: &AppCtx) -> Value {
         "save_path": cfg.save_path,
         "top_n": cfg.listing_links().iter().map(|link| link.daily_quota).sum::<usize>(),
         "links": cfg.listing_links(),
+        "history_retention_days": ctx.history_retention_days(),
         "downloaded": completed,
         "failed_records": failed,
         "downloaded_bytes": total_bytes,
@@ -171,19 +172,11 @@ async fn put_config(
             "min_duration_secs must be nonnegative",
         ));
     }
-    if cfg.web_port == 0 {
-        return Err(ApiError::bad_request("web_port must be 1..=65535"));
-    }
     if cfg.segment_concurrency == 0 || cfg.segment_concurrency > 32 {
         return Err(ApiError::bad_request("segment_concurrency must be 1..=32"));
     }
     if cfg.concurrent_videos == 0 || cfg.concurrent_videos > 8 {
         return Err(ApiError::bad_request("concurrent_videos must be 1..=8"));
-    }
-    if chrono::NaiveTime::parse_from_str(cfg.daily_time.trim(), "%H:%M").is_err() {
-        return Err(ApiError::bad_request(
-            "daily_time must be a valid HH:MM time",
-        ));
     }
 
     cfg.title_matcher()
@@ -453,9 +446,11 @@ async fn resume_all(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
 
 async fn list_history(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
     let state = ctx.state_snapshot();
+    let records = state.history(ctx.history_retention_days());
     Json(json!({
-        "records": state.history(),
-        "count": state.records.len(),
+        "history_retention_days": ctx.history_retention_days(),
+        "count": records.len(),
+        "records": records,
     }))
 }
 

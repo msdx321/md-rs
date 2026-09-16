@@ -6,7 +6,7 @@ mod shutdown;
 mod state;
 
 use std::sync::{Arc, atomic::Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Context;
 use grammers_client::Client;
@@ -15,7 +15,7 @@ use grammers_session::storages::SqliteSession;
 use grammers_session::types::PeerRef;
 use indicatif::MultiProgress;
 use log::{debug, info};
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::FxHashMap as HashMap;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 
 use crate::api::{ApiState, ChatRequest, ChatTarget};
@@ -34,7 +34,10 @@ pub(crate) async fn run_downloader(
     web_state: Arc<ApiState>,
     download_rx: &mut mpsc::Receiver<ChatRequest>,
     shutdown: Shutdown,
+    schedule: tokio::sync::watch::Receiver<media_config::app::Config>,
 ) -> anyhow::Result<()> {
+    cfg.save_path = schedule.borrow().telegram_download_path.clone();
+    cfg.temp_path = schedule.borrow().temp_path.join("telegram");
     web_state.set_status("running").await;
 
     let data = crate::storage::load(&web_state.database).await?;
@@ -62,7 +65,7 @@ pub(crate) async fn run_downloader(
         .await;
     info!("Authorized - ready");
 
-    let file_ids: Arc<Mutex<HashSet<String>>> =
+    let file_ids: Arc<Mutex<HashMap<String, u64>>> =
         Arc::new(Mutex::new(data.downloaded_file_ids.into_iter().collect()));
 
     let mut data_chats: HashMap<String, ChatData> = data
@@ -85,13 +88,24 @@ pub(crate) async fn run_downloader(
 
     let mut settings_rx = web_state.settings_changed.subscribe();
     let started = Instant::now();
+    let mut timer = media_runtime::schedule::Timer::new(
+        schedule.clone(),
+        media_runtime::schedule::Module::Telegram,
+    );
+    let mut scan_due = false;
     let mut cycle_no: u64 = 0;
     loop {
         if web_state.cancelling.load(Ordering::Relaxed) {
             let _cancellation = web_state.download_cancel.lock().await;
             while download_rx.try_recv().is_ok() {}
             cancellation::discard_pending(&web_state.database, &mut data_chats).await?;
-            persist_state(&web_state.database, &file_ids, &data_chats).await?;
+            persist_state(
+                &web_state.database,
+                &file_ids,
+                &data_chats,
+                web_state.history_cutoff(),
+            )
+            .await?;
             web_state.cancelling.store(false, Ordering::Relaxed);
             web_state
                 .set_status("Cancelled. Partial files and retry data deleted.")
@@ -118,6 +132,8 @@ pub(crate) async fn run_downloader(
         {
             let _edit = web_state.config_update.lock().await;
             cfg = FILE.load_optional()?.unwrap_or(cfg);
+            cfg.save_path = schedule.borrow().telegram_download_path.clone();
+            cfg.temp_path = schedule.borrow().temp_path.join("telegram");
             for (chat_id, cursor) in crate::storage::cursors::apply(&web_state.database).await? {
                 let chat = data_chats
                     .entry(chat_id.clone())
@@ -130,50 +146,63 @@ pub(crate) async fn run_downloader(
         }
         runtime.dl_sem = Arc::new(Semaphore::new(cfg.max_download_task));
         std::fs::create_dir_all(&cfg.save_path)?;
-        cycle_no += 1;
-        let cycle_started = Instant::now();
-        let completed =
-            run_check_cycle(&client, &mut cfg, &runtime, &mut data_chats, &work_shutdown).await?;
+        if scan_due {
+            scan_due = false;
+            cycle_no += 1;
+            let cycle_started = Instant::now();
+            let completed =
+                run_check_cycle(&client, &mut cfg, &runtime, &mut data_chats, &work_shutdown)
+                    .await?;
 
-        // Persist after every cycle (full or interrupted) so SQLite tracks
-        // the live file-id cache and per-chat retry sets even on shutdown.
-        persist_state(&web_state.database, &file_ids, &data_chats).await?;
-        debug!(
-            "cycle {cycle_no}: persisted state to SQLite ({} file ids, {} chats pending)",
-            file_ids.lock().await.len(),
-            data_chats
-                .values()
-                .map(|c| c.ids_to_retry.len())
-                .sum::<usize>()
-        );
+            // Persist after every cycle (full or interrupted) so SQLite tracks
+            // the live file-id cache and per-chat retry sets even on shutdown.
+            persist_state(
+                &web_state.database,
+                &file_ids,
+                &data_chats,
+                web_state.history_cutoff(),
+            )
+            .await?;
+            debug!(
+                "cycle {cycle_no}: persisted state to SQLite ({} file ids, {} chats pending)",
+                file_ids.lock().await.len(),
+                data_chats
+                    .values()
+                    .map(|c| c.ids_to_retry.len())
+                    .sum::<usize>()
+            );
 
-        if shutdown.is_cancelled() {
-            break;
+            if shutdown.is_cancelled() {
+                break;
+            }
+            if !completed || work_shutdown.is_cancelled() {
+                continue;
+            }
+            info!(
+                "cycle {cycle_no} complete in {:.1}s",
+                cycle_started.elapsed().as_secs_f64()
+            );
+            timer.finished();
         }
-        if !completed || work_shutdown.is_cancelled() {
-            continue;
-        }
-        info!(
-            "cycle {cycle_no} complete in {:.1}s - sleeping {}s (Ctrl+C to shut down)",
-            cycle_started.elapsed().as_secs_f64(),
-            cfg.check_interval_secs
-        );
         web_state
-            .set_status(&format!(
-                "waiting {}s before next check",
-                cfg.check_interval_secs
+            .set_status(&timer.next.map_or_else(
+                || "Schedule disabled".into(),
+                |next| format!("Next scan: {}", next.format("%Y-%m-%d %H:%M")),
             ))
             .await;
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = work_shutdown.cancelled() => continue,
             _ = settings_rx.changed() => {},
-            _ = tokio::time::sleep(Duration::from_secs(cfg.check_interval_secs)) => {}
+            due = timer.tick() => { scan_due = due; }
             request = download_rx.recv() => {
                 cfg = FILE.load_optional()?.unwrap_or(cfg);
+            cfg.save_path = schedule.borrow().telegram_download_path.clone();
+            cfg.temp_path = schedule.borrow().temp_path.join("telegram");
                 runtime.dl_sem = Arc::new(Semaphore::new(cfg.max_download_task));
                 std::fs::create_dir_all(&cfg.save_path)?;
                 match request {
+                    Some(ChatRequest::Scan) => { scan_due = true; }
                     Some(ChatRequest::Once(target, message_id)) => {
                         let label = target.label();
                         web_state.set_status("running").await;
@@ -191,7 +220,7 @@ pub(crate) async fn run_downloader(
                         .await
                         {
                             Ok(chat_id) => {
-                                persist_state(&web_state.database, &file_ids, &data_chats).await?;
+                                persist_state(&web_state.database, &file_ids, &data_chats, web_state.history_cutoff()).await?;
                                 web_state
                                     .set_request_status(&format!(
                                         "Finished downloading message {message_id} from {label} as {chat_id}"

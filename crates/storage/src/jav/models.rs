@@ -56,10 +56,22 @@ impl State {
         self.records.len() != before
     }
 
-    /// Newest first, for the history table.
-    pub fn history(&self) -> Vec<Record> {
-        let mut out = self.records.clone();
-        out.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
-        out
+    /// Time-limited history, newest first.
+    pub fn history(&self, days: u32) -> Vec<Record> {
+        let now = chrono::Utc::now();
+        let cutoff = now - chrono::Duration::days(i64::from(days));
+        let mut recent: Vec<_> = self
+            .records
+            .iter()
+            .filter_map(|record| {
+                let finished = chrono::DateTime::parse_from_rfc3339(&record.finished_at).ok()?;
+                (finished > cutoff && finished <= now).then_some((finished, record))
+            })
+            .collect();
+        recent.sort_by(|(a, _), (b, _)| b.cmp(a));
+        recent
+            .into_iter()
+            .map(|(_, record)| record.clone())
+            .collect()
     }
 }

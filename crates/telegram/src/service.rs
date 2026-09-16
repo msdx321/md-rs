@@ -4,11 +4,15 @@ use media_runtime::{BackgroundTask, RunningEngine};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub async fn start(database: media_storage::Database) -> anyhow::Result<RunningEngine> {
+pub async fn start(
+    database: media_storage::Database,
+    schedule: tokio::sync::watch::Receiver<media_config::app::Config>,
+) -> anyhow::Result<RunningEngine> {
     let shutdown = app::Shutdown::new();
     let (tx, mut rx) = mpsc::channel(16);
-    let state = Arc::new(api::ApiState::new(tx, database).await?);
+    let state = Arc::new(api::ApiState::new(tx, database, schedule.clone()).await?);
     let router = api::router(state.clone());
+    let mut retention_settings = schedule.clone();
     let worker_shutdown = shutdown.clone();
     let worker_state = state.clone();
     let worker = BackgroundTask::spawn("telegram worker", async move {
@@ -20,8 +24,14 @@ pub async fn start(database: media_storage::Database) -> anyhow::Result<RunningE
             };
             let result = match cfg {
                 Ok(cfg) => {
-                    app::run_downloader(cfg, worker_state.clone(), &mut rx, worker_shutdown.clone())
-                        .await
+                    app::run_downloader(
+                        cfg,
+                        worker_state.clone(),
+                        &mut rx,
+                        worker_shutdown.clone(),
+                        schedule.clone(),
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             };
@@ -46,7 +56,10 @@ pub async fn start(database: media_storage::Database) -> anyhow::Result<RunningE
     let cleanup = BackgroundTask::spawn("telegram history cleanup", async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {},
+                changed = retention_settings.changed() => { if changed.is_err() { break; } },
+            }
             state.prune_history().await;
             state.publish().await;
         }

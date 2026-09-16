@@ -37,6 +37,7 @@ pub enum ChatTarget {
 
 #[derive(Debug)]
 pub enum ChatRequest {
+    Scan,
     Once(ChatTarget, i32),
     Subscribe(ChatTarget),
 }
@@ -127,6 +128,7 @@ fn valid_invite_hash(hash: &str) -> bool {
 }
 
 pub struct ApiState {
+    common: watch::Receiver<media_config::app::Config>,
     pub(crate) download_cancel: Mutex<CancellationToken>,
     pub(crate) cancelling: AtomicBool,
     pub(crate) config_update: Mutex<()>,
@@ -159,6 +161,7 @@ struct DownloadStat {
 
 #[derive(Serialize)]
 struct DashboardSnapshot {
+    history_retention_days: u32,
     login: login::LoginSnapshot,
     status: String,
     request_status: String,
@@ -195,10 +198,13 @@ impl ApiState {
     pub async fn new(
         download_tx: mpsc::Sender<ChatRequest>,
         database: media_storage::Database,
+        common: watch::Receiver<media_config::app::Config>,
     ) -> anyhow::Result<Self> {
         let (updates, _) = broadcast::channel(64);
         let (pause_tx, _) = watch::channel(false);
+        let days = common.borrow().history_retention_days;
         Ok(Self {
+            common,
             login: login::new(),
             download_cancel: Mutex::new(CancellationToken::new()),
             cancelling: AtomicBool::new(false),
@@ -213,7 +219,7 @@ impl ApiState {
             ),
             status: Mutex::new("starting".to_string()),
             stats: Mutex::new(DashboardStats {
-                completed: history::load(&database, now_millis()).await?,
+                completed: history::load(&database, now_millis(), days).await?,
                 ..DashboardStats::default()
             }),
             updates,
@@ -293,16 +299,35 @@ impl ApiState {
         self.publish().await;
     }
 
+    pub(crate) fn history_cutoff(&self) -> u64 {
+        now_millis().saturating_sub(history::retention_ms(
+            self.common.borrow().history_retention_days,
+        ))
+    }
+
     pub(crate) async fn prune_history(&self) {
         let mut stats = self.stats.lock().await;
         let now = now_millis();
-        let cutoff = now.saturating_sub(history::RETENTION_MS);
+        if let Err(error) = self
+            .database
+            .connection()
+            .await
+            .execute(
+                "DELETE FROM telegram_files WHERE downloaded_at<=?",
+                [i64::try_from(self.history_cutoff()).unwrap_or(i64::MAX)],
+            )
+            .await
+        {
+            warn!("cannot prune Telegram download IDs: {error:#}");
+        }
+        let days = self.common.borrow().history_retention_days;
+        let cutoff = now.saturating_sub(history::retention_ms(days));
         if stats
             .completed
             .iter()
             .any(|item| item.completed_at <= cutoff)
         {
-            match history::delete_expired(&*self.database.connection().await, now).await {
+            match history::delete_expired(&*self.database.connection().await, now, days).await {
                 Ok(()) => stats.completed.retain(|item| item.completed_at > cutoff),
                 Err(error) => warn!("cannot prune download history: {error:#}"),
             }
@@ -390,7 +415,9 @@ impl ApiState {
             })
             .collect();
 
+        let history_retention_days = self.common.borrow().history_retention_days;
         DashboardSnapshot {
+            history_retention_days,
             login: self.login.lock().await.snapshot.clone(),
             status,
             request_status,
@@ -407,7 +434,7 @@ impl ApiState {
     }
 }
 
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -420,6 +447,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/config", get(settings::get).put(settings::put))
         .route("/login", post(login::submit))
         .route("/downloads", post(download))
+        .route("/scan", post(scan))
         .route("/subscriptions", post(subscribe))
         .route("/pause", post(pause))
         .route("/resume", post(resume))
@@ -435,6 +463,32 @@ struct DownloadPayload {
 #[derive(Serialize)]
 struct ApiResponse {
     message: String,
+}
+
+async fn scan(State(state): State<Arc<ApiState>>) -> (StatusCode, Json<ApiResponse>) {
+    if state.login.lock().await.snapshot.step != "ready" {
+        return api_response(
+            StatusCode::CONFLICT,
+            "Connect Telegram before running a job",
+        );
+    }
+    let cancellation = state.download_cancel.lock().await;
+    if cancellation.is_cancelled() || state.paused.load(Ordering::Relaxed) {
+        return api_response(
+            StatusCode::CONFLICT,
+            "Resume downloads before running a job",
+        );
+    }
+    match state.download_tx.try_send(ChatRequest::Scan) {
+        Ok(()) => api_response(StatusCode::ACCEPTED, "Scan queued"),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            api_response(StatusCode::TOO_MANY_REQUESTS, "The download queue is full")
+        }
+        Err(_) => api_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The downloader is not ready",
+        ),
+    }
 }
 
 async fn download(

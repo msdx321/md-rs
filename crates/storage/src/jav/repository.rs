@@ -33,8 +33,9 @@ impl Repository {
     /// Commit before updating the cache so failed writes never look durable.
     pub async fn upsert_record(&self, record: Record) -> anyhow::Result<()> {
         let _write = self.state_write.lock().await;
-        let conn = self.database.connection().await;
-        store_record(&conn, &record).await?;
+        let tx = self.database.transaction().await?;
+        store_record(&tx, &record).await?;
+        tx.commit().await?;
         self.state
             .lock()
             .expect("state lock poisoned")
@@ -44,26 +45,49 @@ impl Repository {
 
     pub async fn forget_record(&self, id: &str) -> anyhow::Result<()> {
         let _write = self.state_write.lock().await;
-        self.database
-            .connection()
-            .await
-            .execute("DELETE FROM jav_records WHERE id=?", [id])
+        let tx = self.database.transaction().await?;
+        tx.execute("DELETE FROM jav_records WHERE id=?", [id])
             .await?;
+        tx.commit().await?;
         self.state.lock().expect("state lock poisoned").forget(id);
         Ok(())
     }
 
-    pub async fn clear_history(&self) -> anyhow::Result<usize> {
+    pub async fn clear_history(&self, days: u32) -> anyhow::Result<usize> {
         let _write = self.state_write.lock().await;
-        self.database
-            .connection()
-            .await
-            .execute("DELETE FROM jav_records", ())
-            .await?;
+        let ids: std::collections::HashSet<_> = self
+            .snapshot()
+            .history(days)
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let tx = self.database.transaction().await?;
+        for id in &ids {
+            tx.execute("DELETE FROM jav_records WHERE id=?", [id.as_str()])
+                .await?;
+        }
+        tx.commit().await?;
         let mut state = self.state.lock().expect("state lock poisoned");
-        let removed = state.records.len();
-        state.records.clear();
-        Ok(removed)
+        state.records.retain(|record| !ids.contains(&record.id));
+        Ok(ids.len())
+    }
+
+    pub async fn prune_history(&self, days: u32) -> anyhow::Result<()> {
+        let _write = self.state_write.lock().await;
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+        self.database.connection().await.execute(
+            "DELETE FROM jav_records WHERE julianday(finished_at) <= julianday(?) OR julianday(finished_at) IS NULL",
+            [cutoff.to_rfc3339()],
+        ).await?;
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .records
+            .retain(|record| {
+                chrono::DateTime::parse_from_rfc3339(&record.finished_at)
+                    .is_ok_and(|time| time > cutoff)
+            });
+        Ok(())
     }
 
     pub async fn mark_daily_run(&self, date: &str) -> anyhow::Result<()> {

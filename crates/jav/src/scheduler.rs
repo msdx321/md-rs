@@ -4,7 +4,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration as ChronoDuration, Local, TimeZone};
+use chrono::Local;
+#[cfg(test)]
+use chrono::{Duration as ChronoDuration, TimeZone};
+#[cfg(test)]
+use media_runtime::schedule::{next_occurrence, parse_daily_time};
 use serde::Serialize;
 use tokio::task::JoinSet;
 
@@ -94,77 +98,24 @@ impl LinkQueue {
     }
 }
 
-/// Parse `HH:MM`, falling back to 03:30 on anything unparseable.
-pub fn parse_daily_time(value: &str) -> (u32, u32) {
-    let mut parts = value.trim().split(':');
-    let hour = parts.next().and_then(|h| h.trim().parse::<u32>().ok());
-    let minute = parts.next().and_then(|m| m.trim().parse::<u32>().ok());
-    match (hour, minute) {
-        (Some(h), Some(m)) if h < 24 && m < 60 && parts.next().is_none() => (h, m),
-        _ => (3, 30),
-    }
-}
-
-/// The next local datetime at `HH:MM`, strictly after `now`.
-pub fn next_occurrence(now: DateTime<Local>, hhmm: &str) -> DateTime<Local> {
-    let (hour, minute) = parse_daily_time(hhmm);
-    let today = now
-        .date_naive()
-        .and_hms_opt(hour, minute, 0)
-        .and_then(|naive| Local.from_local_datetime(&naive).single())
-        .unwrap_or(now);
-    if today > now {
-        today
-    } else {
-        today + ChronoDuration::days(1)
-    }
-}
-
-/// Background timer loop. Re-evaluates the schedule frequently so a settings
-/// change takes effect without a restart.
-pub async fn run(ctx: Arc<AppCtx>) {
-    if ctx.config().run_on_start {
-        log::info!("run_on_start is enabled — triggering the daily job now");
-        let ctx_for_job = Arc::clone(&ctx);
-        tokio::spawn(async move {
-            if let Err(e) = run_daily(ctx_for_job, "startup").await {
-                log::error!("startup daily run failed: {e:#}");
-            }
-        });
-    }
-
+/// Run scheduled work with the shared timer; active jobs are never overlapped.
+pub async fn run(
+    ctx: Arc<AppCtx>,
+    schedule: tokio::sync::watch::Receiver<media_config::app::Config>,
+) {
+    let mut timer =
+        media_runtime::schedule::Timer::new(schedule, media_runtime::schedule::Module::Jav);
     loop {
-        let cfg = ctx.config();
         ctx.set_scheduler(|s| {
-            s.enabled = cfg.daily_enabled;
-            s.daily_time = cfg.daily_time.clone();
+            s.enabled = timer.config.enabled;
+            s.daily_time = timer.config.daily_time.clone();
+            s.next_run_at = timer.next.map(|next| next.to_rfc3339());
         });
-
-        if !cfg.daily_enabled {
-            ctx.set_scheduler(|s| s.next_run_at = None);
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            continue;
-        }
-
-        let now = Local::now();
-        let next = next_occurrence(now, &cfg.daily_time);
-        let until = (next - now)
-            .to_std()
-            .unwrap_or(std::time::Duration::from_secs(1));
-        ctx.set_scheduler(|s| s.next_run_at = Some(next.to_rfc3339()));
-
-        // Wake up regularly so config edits are picked up promptly.
-        tokio::time::sleep(until.min(std::time::Duration::from_secs(30))).await;
-
-        if Local::now() >= next {
-            let ctx_for_job = Arc::clone(&ctx);
-            tokio::spawn(async move {
-                if let Err(e) = run_daily(ctx_for_job, "scheduled").await {
-                    log::error!("daily run failed: {e:#}");
-                }
-            });
-            // Make sure the same slot cannot fire twice.
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        if timer.tick().await {
+            if let Err(error) = run_daily(ctx.clone(), "scheduled").await {
+                log::error!("scheduled JAV run failed: {error:#}");
+            }
+            timer.finished();
         }
     }
 }

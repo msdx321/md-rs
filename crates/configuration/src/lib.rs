@@ -1,4 +1,6 @@
+pub mod app;
 pub mod jav;
+pub mod schedule;
 pub mod telegram;
 
 use anyhow::Context;
@@ -15,6 +17,7 @@ pub const JAV_FILE: &str = "config/jav.yaml";
 
 /// A configuration file paired with its provider-owned data model.
 pub struct ConfigFile<T> {
+    keep_defaults: bool,
     path: &'static str,
     model: std::marker::PhantomData<fn() -> T>,
 }
@@ -23,32 +26,60 @@ impl<T> ConfigFile<T> {
     pub const fn new(path: &'static str) -> Self {
         Self {
             path,
+            keep_defaults: false,
             model: std::marker::PhantomData,
         }
     }
+
+    /// Keep shared settings explicit, including migration precedence markers.
+    pub const fn with_defaults(mut self) -> Self {
+        self.keep_defaults = true;
+        self
+    }
 }
 
-impl<T: DeserializeOwned> ConfigFile<T> {
+// Normalizing a read writes the file, so it must serialize with saves.
+static CONFIG_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl<T: DeserializeOwned + Serialize + Default> ConfigFile<T> {
     pub fn load_optional(&self) -> anyhow::Result<Option<T>> {
+        let _io = CONFIG_IO.lock().unwrap_or_else(|error| error.into_inner());
         let text = match fs::read_to_string(self.path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error).with_context(|| format!("cannot read {}", self.path)),
         };
-        serde_yaml::from_str(&text)
-            .with_context(|| format!("invalid YAML in {}", self.path))
-            .map(Some)
+        let config = serde_yaml::from_str(&text)
+            .with_context(|| format!("invalid YAML in {}", self.path))?;
+        let normalized = self.render(&config)?;
+        if normalized != text {
+            write_atomic(Path::new(self.path), normalized.as_bytes())?;
+        }
+        Ok(Some(config))
     }
 }
 
-impl<T: Serialize> ConfigFile<T> {
-    /// Save durably. Provider code serializes edits and publishes only after success.
+impl<T: Serialize + Default> ConfigFile<T> {
+    /// Save normalized YAML durably, omitting defaults unless explicitly retained.
+    /// Provider code serializes edits and publishes only after success.
     pub fn save(&self, config: &T) -> anyhow::Result<()> {
-        save(self.path, config)
+        let _io = CONFIG_IO.lock().unwrap_or_else(|error| error.into_inner());
+        write_atomic(Path::new(self.path), self.render(config)?.as_bytes())
+    }
+
+    fn render(&self, config: &T) -> anyhow::Result<String> {
+        let mut value = serde_yaml::to_value(config)?;
+        let defaults = serde_yaml::to_value(T::default())?;
+        if !self.keep_defaults
+            && let (Some(fields), Some(defaults)) = (value.as_mapping_mut(), defaults.as_mapping())
+        {
+            fields.retain(|key, value| defaults.get(key) != Some(value));
+        }
+        sorted_yaml(value)
     }
 }
 
-/// Read an arbitrary YAML path, including legacy migration candidates.
+/// Read raw legacy data without normalization, preserving fields for migration.
 pub fn load<T: DeserializeOwned>(path: impl AsRef<Path>) -> anyhow::Result<T> {
     let path = path.as_ref();
     let text =
@@ -56,9 +87,25 @@ pub fn load<T: DeserializeOwned>(path: impl AsRef<Path>) -> anyhow::Result<T> {
     serde_yaml::from_str(&text).with_context(|| format!("invalid YAML in {}", path.display()))
 }
 
-/// Callers serialize writes to the same configuration.
-pub fn save<T: Serialize>(path: impl AsRef<Path>, config: &T) -> anyhow::Result<()> {
-    write_atomic(path.as_ref(), serde_yaml::to_string(config)?.as_bytes())
+/// Sort mappings recursively; sequence order is meaningful and stays unchanged.
+fn sorted_yaml(mut value: serde_yaml::Value) -> anyhow::Result<String> {
+    fn sort(value: &mut serde_yaml::Value) {
+        match value {
+            serde_yaml::Value::Mapping(mapping) => {
+                let mut entries: Vec<_> = std::mem::take(mapping).into_iter().collect();
+                entries.sort_by(|(left, _), (right, _)| left.as_str().cmp(&right.as_str()));
+                for (key, mut value) in entries {
+                    sort(&mut value);
+                    mapping.insert(key, value);
+                }
+            }
+            serde_yaml::Value::Sequence(items) => items.iter_mut().for_each(sort),
+            serde_yaml::Value::Tagged(tagged) => sort(&mut tagged.value),
+            _ => {}
+        }
+    }
+    sort(&mut value);
+    Ok(serde_yaml::to_string(&value)?)
 }
 
 /// Replace a configuration file only after its new contents have reached disk.

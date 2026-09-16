@@ -1,5 +1,5 @@
 //! Editable download preferences. Credentials are kept private.
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
@@ -24,10 +24,8 @@ pub(super) struct Settings {
     chat: Option<Vec<ChatSettings>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     original_chat: Option<Vec<ChatSettings>>,
-    save_path: PathBuf,
     max_download_task: usize,
     download_connections: usize,
-    check_interval_secs: u64,
     media_types: Vec<String>,
     file_formats: FileFormats,
     file_path_prefix: Vec<String>,
@@ -49,10 +47,8 @@ impl From<Config> for Settings {
                     .collect(),
             ),
             original_chat: None,
-            save_path: cfg.save_path,
             max_download_task: cfg.max_download_task,
             download_connections: cfg.download_connections,
-            check_interval_secs: cfg.check_interval_secs,
             media_types: cfg.media_types,
             file_formats: cfg.file_formats,
             file_path_prefix: cfg.file_path_prefix,
@@ -96,20 +92,11 @@ impl Settings {
                     .filter(|filter| !filter.is_empty());
             }
         }
-        if self.save_path.as_os_str().is_empty() || self.save_path.to_string_lossy().contains('\0')
-        {
-            return Err(invalid("Enter a download directory"));
-        }
         if !(1..=128).contains(&self.max_download_task) {
             return Err(invalid("Parallel downloads must be between 1 and 128"));
         }
         if !(1..=32).contains(&self.download_connections) {
             return Err(invalid("Connections per download must be between 1 and 32"));
-        }
-        if !(1..=604_800).contains(&self.check_interval_secs) {
-            return Err(invalid(
-                "Scan interval must be between 1 and 604800 seconds",
-            ));
         }
         if self.media_types.is_empty()
             || self.media_types.iter().any(|kind| {
@@ -172,10 +159,8 @@ impl Settings {
         if let Some(chats) = self.chat {
             cfg.chat = chats.into_iter().map(|chat| chat.config).collect();
         }
-        cfg.save_path = self.save_path;
         cfg.max_download_task = self.max_download_task;
         cfg.download_connections = self.download_connections;
-        cfg.check_interval_secs = self.check_interval_secs;
         cfg.media_types = self.media_types;
         cfg.file_formats = self.file_formats;
         cfg.file_path_prefix = self.file_path_prefix;

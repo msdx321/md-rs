@@ -1993,6 +1993,7 @@ dependencies = [
  "media-runtime",
  "media-storage",
  "media-telegram",
+ "serde_json",
  "tokio",
 ]
 
@@ -2058,8 +2059,10 @@ name = "media-runtime"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "futures-util",
  "log",
+ "media-config",
  "tokio",
 ]
 
@@ -2068,6 +2071,7 @@ name = "media-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "libsql",
  "serde",
  "tokio",
