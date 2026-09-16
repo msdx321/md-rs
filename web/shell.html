@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{{title}}</title>
+  <script src="/assets/theme.js"></script>
+  <link rel="stylesheet" href="/assets/components.css">
+  {{page_assets}}
+</head>
+<body class="{{section}}">
+  <nav class="media-nav" aria-label="Download sources">
+    <a class="media-brand" href="/" {{home_current}}>Media Downloader</a>
+    <a href="/telegram/" {{telegram_current}}>Telegram</a>
+    <a href="/jav/" {{jav_current}}>JAV</a>
+    <button id="theme-toggle" class="theme-switch" type="button" aria-label="Change color theme">Light</button>
+  </nav>
+  <main class="shell">
+    {{header}}
+    {{content}}
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

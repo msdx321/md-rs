@@ -1,0 +1,108 @@
+<section id="login-panel" class="panel login-panel" aria-labelledby="login-heading">
+  <h1 id="login-heading">Connect Telegram</h1>
+  <p id="login-message" role="status" aria-live="polite">Connecting to Telegram…</p>
+  <form id="login-form" autocomplete="off">
+    <div id="login-value-field" class="login-field" hidden>
+      <label id="login-value-label" for="login-value">Value</label>
+      <input id="login-value" name="login_value" maxlength="1024" spellcheck="false">
+    </div>
+    <div id="login-hash-field" class="login-field" hidden>
+      <label for="login-hash">API hash</label>
+      <input id="login-hash" name="api_hash" type="password" autocomplete="off" maxlength="32" spellcheck="false">
+    </div>
+    <p id="login-help" class="hint" hidden>Use the API ID and API hash from your Telegram application. They are saved locally so you only need to enter them once.</p>
+    <p id="login-error" class="request-status is-error" role="alert"></p>
+    <button id="login-submit" class="primary-button" type="submit" disabled>Continue</button>
+    <button id="login-reset" class="secondary-button" type="button" hidden>Change API credentials</button>
+  </form>
+</section>
+
+<section class="stats-grid" aria-label="Download summary">
+  <div class="stat"><span>Files saved <small>· 30 days</small></span><strong id="downloaded-files">0</strong></div>
+  <div class="stat"><span>Data saved <small>· 30 days</small></span><strong id="downloaded-bytes">0</strong></div>
+  <div class="stat"><span>In progress</span><strong id="active-count">0</strong></div>
+</section>
+
+  <form id="download-form" class="download-form control-panel" hidden>
+    <label for="chat-link">Add downloads</label>
+    <div class="form-row">
+      <input
+        id="chat-link"
+        name="chat_link"
+        type="text"
+        inputmode="url"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="Paste a Telegram message or chat link"
+        aria-describedby="link-hint request-status"
+        required
+      >
+      <div class="form-actions">
+        <button class="primary-button" type="submit" name="action" value="once">Download once</button>
+        <button class="secondary-button" type="submit" name="action" value="subscribe">Subscribe</button>
+      </div>
+    </div>
+    <p id="link-hint" class="hint">Download a single message, or subscribe to a chat for new media.</p>
+    <p id="request-status" class="request-status" role="status" aria-live="polite">Ready for a message or chat link</p>
+  </form>
+
+<section class="panel">
+  <nav role="tablist" aria-label="Download activity">
+    <button id="active-tab" class="active" type="button" role="tab" aria-selected="true" aria-controls="telegram-tasks">Tasks</button>
+    <button id="completed-tab" type="button" role="tab" aria-selected="false" aria-controls="completed-downloads" tabindex="-1">History</button>
+    <button id="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="telegram-settings" tabindex="-1">Settings</button>
+  </nav>
+  <div id="telegram-tasks" class="active" role="tabpanel" aria-labelledby="active-tab" tabindex="0">
+    <div class="actions toolbar"><button id="btn-pause" disabled>Pause all</button><button id="btn-resume" disabled>Resume all</button><button id="btn-cancel" class="danger" disabled>Cancel all</button><strong id="status" class="status-pill" role="status">Starting</strong></div>
+    <p class="hint">Pause keeps progress. Cancel deletes partial files and retry data and leaves Telegram paused.</p>
+    <div id="tasks-banner" role="status"></div>
+    <div id="downloads" class="downloads"><p class="empty">No tasks. Completed downloads appear in History.</p></div>
+  </div>
+  <div id="completed-downloads" class="downloads" role="tabpanel" aria-labelledby="completed-tab" tabindex="0" hidden>
+    <p class="empty">No files downloaded in the last 30 days</p>
+  </div>
+  <div id="telegram-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0" hidden>
+    <div class="settings-heading"><h2>Settings</h2><p>Saved changes apply at the next scan boundary. Downloads already running finish with their current settings.</p></div>
+    <form id="settings-form">
+      <fieldset id="settings-fields" disabled>
+        <div class="settings-grid">
+          <section class="settings-card subscribed-chats"><h3>Subscribed chats</h3><p class="settings-description">Use a username (with or without @) or a numeric Telegram chat ID. Your account must have access to the chat. Removing a subscription keeps its downloaded files and history.</p>
+            <div id="subscribed-chats"></div>
+            <p id="no-subscriptions" class="hint">No subscribed chats.</p>
+            <button id="btn-add-chat" type="button">Add chat</button>
+            <p class="hint">Optional filters use the existing filter syntax, for example: media_type == 'video' and file_size &gt; 10MB. Leave blank to download all matching media.</p>
+          </section>
+          <section class="settings-card"><h3>Downloads</h3><p class="settings-description">Where to save media and how much to download at once.</p><div class="form">
+            <div class="field full"><label for="save_path">Download directory</label><input id="save_path" required><span class="hint">Relative paths are inside the application's data directory.</span></div>
+            <div class="field"><label for="max_download_task">Parallel downloads</label><input id="max_download_task" type="number" min="1" max="128" required></div>
+            <div class="field"><label for="download_connections">Connections per download</label><input id="download_connections" type="number" min="1" max="32" required></div>
+            <div class="field full"><label for="check_interval_secs">Scan interval (seconds)</label><input id="check_interval_secs" type="number" min="1" max="604800" required></div>
+          </div></section>
+          <section class="settings-card"><h3>Media selection</h3><p class="settings-description">Choose the types of media to save from subscribed chats.</p><div class="media-options">
+            <label><input type="checkbox" name="media_type" value="photo"> Photos</label>
+            <label><input type="checkbox" name="media_type" value="video"> Videos</label>
+            <label><input type="checkbox" name="media_type" value="audio"> Audio</label>
+            <label><input type="checkbox" name="media_type" value="document"> Documents</label>
+            <label><input type="checkbox" name="media_type" value="voice"> Voice messages</label>
+            <label><input type="checkbox" name="media_type" value="video_note"> Video messages</label>
+          </div></section>
+        </div>
+        <details class="settings-advanced"><summary>Advanced preferences <span>File extensions and naming</span></summary><div class="settings-grid">
+          <section class="settings-card"><h3>File extensions</h3><p class="settings-description">Comma-separated extensions without dots, or all.</p><div class="form">
+            <div class="field full"><label for="formats-video">Video extensions</label><input id="formats-video" required placeholder="all or mp4, mkv"></div>
+            <div class="field full"><label for="formats-audio">Audio extensions</label><input id="formats-audio" required placeholder="all or mp3, flac"></div>
+            <div class="field full"><label for="formats-document">Document extensions</label><input id="formats-document" required placeholder="all or pdf, zip"></div>
+          </div></section>
+          <section class="settings-card"><h3>Folders and filenames</h3><p class="settings-description">Comma-separated fields in the order they should appear.</p><div class="form">
+            <div class="field full"><label for="file_path_prefix">Folder fields</label><input id="file_path_prefix"><span class="hint">chat_title, media_datetime, media_type. Empty saves directly in the download directory.</span></div>
+            <div class="field full"><label for="file_name_prefix">Filename fields</label><input id="file_name_prefix"><span class="hint">message_id, file_name, caption. Empty uses the message ID.</span></div>
+            <div class="field"><label for="file_name_prefix_split">Filename separator</label><input id="file_name_prefix_split"></div>
+            <div class="field"><label for="date_format">Folder date format</label><input id="date_format" required placeholder="%Y_%m"></div>
+          </div></section>
+        </div></details>
+      </fieldset>
+      <div id="settings-error" class="banner err" role="alert" hidden></div>
+      <div class="settings-savebar"><span id="save-note" class="muted" role="status">Loading settings…</span><div class="settings-save-actions"><button id="btn-discard" type="button" disabled>Discard changes</button><button id="btn-save" class="primary" type="submit" disabled>Save settings</button></div></div>
+    </form>
+  </div>
+</section>

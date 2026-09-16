@@ -1,0 +1,77 @@
+[package]
+name = "md-rs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+description = "Unified Telegram and JAV media downloader"
+repository = "https://github.com/msdx321/md-rs"
+
+[workspace]
+members = [
+    "crates/configuration",
+    "crates/jav",
+    "crates/migration",
+    "crates/runtime",
+    "crates/storage",
+    "crates/telegram",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+
+[workspace.dependencies]
+aes = "0.9"
+anyhow = "1"
+axum = "0.8.9"
+cbc = "0.2"
+chrono = "0.4"
+dom_query = "0.28"
+env_logger = "0.11"
+futures-util = "0.3"
+grammers-client = { git = "https://codeberg.org/Lonami/grammers", package = "grammers-client" }
+grammers-mtsender = { git = "https://codeberg.org/Lonami/grammers", package = "grammers-mtsender" }
+grammers-session = { git = "https://codeberg.org/Lonami/grammers", package = "grammers-session" }
+headless_chrome = "1.0.22"
+indicatif = "0.18"
+libsql = { version = "0.9.30", default-features = false }
+log = "0.4"
+media-config = { path = "crates/configuration" }
+media-jav = { path = "crates/jav" }
+media-migration = { path = "crates/migration" }
+media-runtime = { path = "crates/runtime" }
+media-storage = { path = "crates/storage" }
+media-telegram = { path = "crates/telegram" }
+percent-encoding = "2"
+regex = "1"
+rustc-hash = "2.1"
+serde = "1"
+serde_json = "1.0.150"
+serde_yaml = "0.9"
+tokio = "1"
+tokio-stream = "0.1.18"
+tokio-util = { version = "0.7", default-features = false }
+url = "2"
+wreq = "0.16"
+wreq-util = "0.2"
+
+[dependencies]
+media-runtime.workspace = true
+media-config.workspace = true
+media-migration.workspace = true
+media-storage.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+env_logger.workspace = true
+log.workspace = true
+tokio = { workspace = true, features = ["full"] }
+media-telegram.workspace = true
+media-jav.workspace = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true

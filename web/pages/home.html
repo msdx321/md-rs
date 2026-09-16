@@ -1,0 +1,31 @@
+<header class="dashboard-title">
+  <div><h1>Overview</h1><p class="muted">Downloads, module status, and recent activity in one place.</p></div>
+  <span class="muted">Updates automatically</span>
+</header>
+<section class="stats-grid" aria-label="All modules summary">
+  <div class="stat"><span>Active transfers <small>Both modules</small></span><strong id="overview-active">—</strong></div>
+  <div class="stat"><span>Telegram files saved <small>Last 30 days</small></span><strong id="overview-telegram">—</strong></div>
+  <div class="stat"><span>JAV files saved <small>All time</small></span><strong id="overview-jav">—</strong></div>
+</section>
+<section class="module-grid" aria-label="Module status">
+  <article class="panel module-card">
+    <header><h2>Telegram</h2><span id="telegram-connection" class="pill" role="status">Connecting</span></header>
+    <p id="telegram-status">Waiting for Telegram status…</p>
+    <dl><div><dt>Data saved · 30 days</dt><dd id="telegram-saved">—</dd></div><div><dt>Transfers</dt><dd id="telegram-transfers">—</dd></div></dl>
+  </article>
+  <article class="panel module-card">
+    <header><h2>JAV</h2><span id="jav-connection" class="pill" role="status">Connecting</span></header>
+    <p id="jav-status">Waiting for JAV status…</p>
+    <dl><div><dt>Data saved · all time</dt><dd id="jav-saved">—</dd></div><div><dt>Next scheduled run</dt><dd id="jav-next-run">—</dd></div></dl>
+  </article>
+</section>
+<section class="panel dashboard-section" aria-labelledby="activity-heading">
+  <header><h2 id="activity-heading">Current downloads</h2><span id="activity-count" class="muted">Loading…</span></header>
+  <p id="activity-error" class="request-status is-error" role="status" hidden></p>
+  <div id="overview-downloads"><p class="empty">Waiting for download status…</p></div>
+</section>
+<section class="panel dashboard-section" aria-labelledby="recent-heading">
+  <header><h2 id="recent-heading">Recent activity</h2><span class="muted">Latest 10 records</span></header>
+  <p id="history-error" class="request-status is-error" role="status" hidden></p>
+  <div id="overview-history"><p class="empty">Loading recent activity…</p></div>
+</section>

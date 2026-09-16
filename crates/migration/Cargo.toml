@@ -1,0 +1,14 @@
+[package]
+name = "media-migration"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+
+[dependencies]
+media-config.workspace = true
+media-storage.workspace = true
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_yaml.workspace = true
