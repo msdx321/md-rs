@@ -1,13 +1,13 @@
 <div class="stats-grid" aria-label="Download summary">
-  <div class="stat"><span>Files saved</span><strong id="stat-files">—</strong></div>
-  <div class="stat"><span>Data saved</span><strong id="stat-bytes">—</strong></div>
+  <div class="stat"><span>Files saved <small data-history-days="jav">· 30 days</small></span><strong id="stat-files">—</strong></div>
+  <div class="stat"><span>Data saved <small data-history-days="jav">· 30 days</small></span><strong id="stat-bytes">—</strong></div>
   <div class="stat"><span>In progress</span><strong id="stat-active">—</strong></div>
 </div>
 <div class="control-panel">
-  <div class="control-copy"><h1>Daily downloads</h1><p>Save the most-watched videos. Already saved files are skipped.</p>
+  <div class="control-copy"><h1>Scheduled downloads</h1><p>Save the most-watched videos. Already saved files are skipped.</p>
     <div class="status-row"><span class="pill" id="pill-cookie" role="status">Checking cookie</span><span class="pill" id="pill-sched" role="status">Checking schedule</span></div>
   </div>
-  <button class="primary" id="btn-run">Run daily job</button>
+  <button class="primary" id="btn-run">Run job</button>
 </div>
 <div class="panel">
 <nav role="tablist" aria-label="Media library">
@@ -34,13 +34,7 @@
 
   <section id="tab-tasks" role="tabpanel" aria-labelledby="tasks-tab" tabindex="0">
     <div class="actions toolbar"><button id="btn-pause">Pause all</button><button id="btn-resume">Resume all</button><button class="danger" id="btn-cancel">Cancel all</button><button id="btn-clear-failed" disabled>Clear failed</button></div><div id="tasks-banner" role="status"></div>
-    <div class="table-scroll" tabindex="0" role="region" aria-label="Download records"><table>
-      <thead>
-        <tr><th>Title</th><th>Source</th><th>State</th><th style="width:150px">Progress</th><th>Speed</th><th>Detail</th><th></th></tr>
-      </thead>
-      <tbody id="tasks-body"></tbody>
-    </table></div>
-    <div class="empty" id="tasks-empty">No tasks. Completed downloads appear in History.</div>
+    {{task_table}}
   </section>
 
   <section id="tab-history" role="tabpanel" aria-labelledby="history-tab" tabindex="0">
@@ -54,7 +48,7 @@
       </thead>
       <tbody id="history-body"></tbody>
     </table></div>
-    <div class="empty" id="history-empty">Nothing downloaded yet.</div>
+    <div class="empty" id="history-empty">No downloads in the last 30 days.</div>
   </section>
 
   <section id="tab-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0">
@@ -63,19 +57,12 @@
     <form id="settings-form">
     <fieldset id="settings-fields" disabled>
     <div class="settings-grid">
-<div class="settings-card ranking-links"><h3>Ranking links</h3><p class="settings-description">Each link has its own daily quota of new completed downloads. Shared videos are downloaded once. Failures are replaced within the page limit for each link.</p>
+<div class="settings-card ranking-links"><h3>Ranking links</h3><p class="settings-description">Each link has its own quota per run of new completed downloads. Shared videos are downloaded once. Failures are replaced within the page limit for each link.</p>
     <div id="ranking-links"></div>
     <button type="button" id="btn-add-link">Add link</button>
 </div>
-<div class="settings-card"><h3>Downloads</h3><p class="settings-description">Choose a destination and your preferred quality.</p><div class="form">      <div class="field">
-        <label for="save_path">Download directory</label>
-        <input id="save_path" placeholder="downloads">
-      </div>
-      <div class="field">
-        <label for="temp_path">Temporary segment directory</label>
-        <input id="temp_path" placeholder="temp">
-        <span class="hint">Stores HLS segments while downloading; cleared after completion. Keep outside the download directory.</span>
-      </div>
+<div class="settings-card"><h3>Downloads</h3><p class="settings-description">Choose your preferred quality.</p><div class="form">
+
       <div class="field">
         <label for="resolution">Resolution preference</label>
         <input id="resolution" list="resolution-options" placeholder="highest / lowest / 1080">
@@ -89,7 +76,7 @@
 <div class="settings-card"><h3>Video selection</h3><p class="settings-description">Filter titles before choosing the most-watched videos.</p><div class="form">      <div class="field">
         <label for="title_filter">Video name filter</label>
         <input id="title_filter" placeholder="All titles" spellcheck="false">
-        <span class="hint">Include matching titles in Popular and daily downloads. Blank includes all. Direct URL downloads are unaffected.</span>
+        <span class="hint">Include matching titles in Popular and scheduled downloads. Blank includes all. Direct URL downloads are unaffected.</span>
       </div>
       <div class="field">
         <label for="title_filter_regex">Name matching</label>
@@ -102,24 +89,6 @@
       <div class="field">
         <label for="max_pages">Listing pages to scan</label>
         <input id="max_pages" type="number" required min="1" max="20">
-      </div></div></div>
-<div class="settings-card"><h3>Schedule</h3><p class="settings-description">Times use the server’s local timezone.</p><div class="form">      <div class="field">
-        <label for="daily_enabled">Daily schedule</label>
-        <select id="daily_enabled">
-          <option value="true">Enabled</option>
-          <option value="false">Disabled</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="daily_time">Run at (local HH:MM)</label>
-        <input id="daily_time" type="time" required>
-      </div>
-      <div class="field">
-        <label for="run_on_start">Run once on startup</label>
-        <select id="run_on_start">
-          <option value="false">No</option>
-          <option value="true">Yes</option>
-        </select>
       </div></div></div>
 <div class="settings-card"><h3>Site access</h3><p class="settings-description">Automatic clearance handles site access for you.</p><div class="form">      <div class="field">
         <label for="browser_enabled">Automatic cookie minting</label>
@@ -144,18 +113,9 @@
         <label for="segment_concurrency">Concurrent segments per video</label>
         <input id="segment_concurrency" type="number" required min="1" max="32">
       </div></div></div>
-<div class="settings-card"><h3>Site & server</h3><p class="settings-description">Host and port changes take effect after restarting the app.</p><div class="form">      <div class="field">
+<div class="settings-card"><h3>Site</h3><div class="form"><div class="field full">
         <label for="site_base">Site base URL</label>
         <input id="site_base">
-      </div>
-      <div class="field">
-        <label for="web_host">Web bind host</label>
-        <input id="web_host">
-      </div>
-      <div class="field">
-        <label for="web_port">Web port</label>
-        <input id="web_port" type="number" required min="1" max="65535">
-        <span class="hint">Changing host/port needs a restart.</span>
       </div></div></div>
 <div class="settings-card"><h3>Manual access overrides</h3><p class="settings-description">Leave these empty when automatic clearance works.</p><div class="form">      <div class="field full">
         <label for="cookie">cf_clearance cookie (optional override)</label>

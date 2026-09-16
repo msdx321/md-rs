@@ -71,3 +71,50 @@ export const bytes = (n) => {
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return n.toFixed(n < 10 && i > 0 ? 1 : 0) + ' ' + u[i];
 };
+
+// Keep task rows and their controls mounted while progress snapshots change.
+export function reconcileTaskRows(container, rows) {
+  const existing = new Map([...container.children].map(row => [row.dataset.taskId, row]));
+  let position = container.firstElementChild;
+  for (const next of rows) {
+    const key = next.dataset.taskId;
+    const current = existing.get(key);
+    const row = current || next;
+    if (current) patchTaskNode(current, next);
+    if (row !== position) container.insertBefore(row, position);
+    position = row.nextElementSibling;
+    existing.delete(key);
+  }
+  for (const row of existing.values()) row.remove();
+}
+
+function patchTaskNode(current, next) {
+  if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName) {
+    current.replaceWith(next.cloneNode(true));
+    return;
+  }
+  if (current.nodeType === Node.TEXT_NODE) {
+    if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+    return;
+  }
+  for (const attr of [...current.attributes]) {
+    if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+  }
+  for (const attr of next.attributes) {
+    if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+  }
+  const oldChildren = [...current.childNodes];
+  const newChildren = [...next.childNodes];
+  for (let i = 0; i < Math.max(oldChildren.length, newChildren.length); i++) {
+    if (!newChildren[i]) oldChildren[i].remove();
+    else if (!oldChildren[i]) current.append(newChildren[i].cloneNode(true));
+    else patchTaskNode(oldChildren[i], newChildren[i]);
+  }
+}
+
+export function historyPeriod(module, days) {
+  document.querySelectorAll(`[data-history-days="${module}"]`).forEach(el => {
+    const text = `· ${days} days`;
+    if (el.textContent !== text) el.textContent = text;
+  });
+}

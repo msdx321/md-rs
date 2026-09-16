@@ -18,12 +18,31 @@
 </section>
 
 <section class="stats-grid" aria-label="Download summary">
-  <div class="stat"><span>Files saved <small>· 30 days</small></span><strong id="downloaded-files">0</strong></div>
-  <div class="stat"><span>Data saved <small>· 30 days</small></span><strong id="downloaded-bytes">0</strong></div>
+  <div class="stat"><span>Files saved <small data-history-days="telegram">· 30 days</small></span><strong id="downloaded-files">0</strong></div>
+  <div class="stat"><span>Data saved <small data-history-days="telegram">· 30 days</small></span><strong id="downloaded-bytes">0</strong></div>
   <div class="stat"><span>In progress</span><strong id="active-count">0</strong></div>
 </section>
 
-  <form id="download-form" class="download-form control-panel" hidden>
+<div class="control-panel">
+  <div class="control-copy"><h1>Scheduled downloads</h1><p>Save new media from subscribed chats. Already saved files are skipped.</p>
+    <div class="status-row"><span class="pill" id="pill-login" role="status">Checking login</span><span class="pill" id="status" role="status">Starting</span></div>
+  </div>
+  <button class="primary" id="btn-run" disabled>Run job</button>
+</div>
+
+<section class="panel">
+  <nav role="tablist" aria-label="Download activity">
+    <button id="active-tab" class="active" type="button" role="tab" aria-selected="true" aria-controls="telegram-tasks">Tasks <span id="task-count"></span></button>
+    <button id="completed-tab" type="button" role="tab" aria-selected="false" aria-controls="completed-downloads" tabindex="-1">History</button>
+    <button id="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="telegram-settings" tabindex="-1">Settings</button>
+    <button id="downloads-tab" type="button" role="tab" aria-selected="false" aria-controls="telegram-downloads" tabindex="-1">Add downloads</button>
+  </nav>
+  <div id="telegram-tasks" class="active" role="tabpanel" aria-labelledby="active-tab" tabindex="0">
+    <div class="actions toolbar"><button id="btn-pause" disabled>Pause all</button><button id="btn-resume" disabled>Resume all</button><button id="btn-cancel" class="danger" disabled title="Delete partial files and retry data, then pause Telegram">Cancel all</button></div><div id="tasks-banner" role="status"></div>
+    {{task_table}}
+  </div>
+  <div id="telegram-downloads" role="tabpanel" aria-labelledby="downloads-tab" tabindex="0" hidden>
+  <form id="download-form" class="download-form" hidden>
     <label for="chat-link">Add downloads</label>
     <div class="form-row">
       <input
@@ -46,20 +65,9 @@
     <p id="request-status" class="request-status" role="status" aria-live="polite">Ready for a message or chat link</p>
   </form>
 
-<section class="panel">
-  <nav role="tablist" aria-label="Download activity">
-    <button id="active-tab" class="active" type="button" role="tab" aria-selected="true" aria-controls="telegram-tasks">Tasks</button>
-    <button id="completed-tab" type="button" role="tab" aria-selected="false" aria-controls="completed-downloads" tabindex="-1">History</button>
-    <button id="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="telegram-settings" tabindex="-1">Settings</button>
-  </nav>
-  <div id="telegram-tasks" class="active" role="tabpanel" aria-labelledby="active-tab" tabindex="0">
-    <div class="actions toolbar"><button id="btn-pause" disabled>Pause all</button><button id="btn-resume" disabled>Resume all</button><button id="btn-cancel" class="danger" disabled>Cancel all</button><strong id="status" class="status-pill" role="status">Starting</strong></div>
-    <p class="hint">Pause keeps progress. Cancel deletes partial files and retry data and leaves Telegram paused.</p>
-    <div id="tasks-banner" role="status"></div>
-    <div id="downloads" class="downloads"><p class="empty">No tasks. Completed downloads appear in History.</p></div>
   </div>
   <div id="completed-downloads" class="downloads" role="tabpanel" aria-labelledby="completed-tab" tabindex="0" hidden>
-    <p class="empty">No files downloaded in the last 30 days</p>
+    <p class="empty">No recent downloads</p>
   </div>
   <div id="telegram-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0" hidden>
     <div class="settings-heading"><h2>Settings</h2><p>Saved changes apply at the next scan boundary. Downloads already running finish with their current settings.</p></div>
@@ -73,10 +81,10 @@
             <p class="hint">Optional filters use the existing filter syntax, for example: media_type == 'video' and file_size &gt; 10MB. Leave blank to download all matching media.</p>
           </section>
           <section class="settings-card"><h3>Downloads</h3><p class="settings-description">Where to save media and how much to download at once.</p><div class="form">
-            <div class="field full"><label for="save_path">Download directory</label><input id="save_path" required><span class="hint">Relative paths are inside the application's data directory.</span></div>
+
             <div class="field"><label for="max_download_task">Parallel downloads</label><input id="max_download_task" type="number" min="1" max="128" required></div>
             <div class="field"><label for="download_connections">Connections per download</label><input id="download_connections" type="number" min="1" max="32" required></div>
-            <div class="field full"><label for="check_interval_secs">Scan interval (seconds)</label><input id="check_interval_secs" type="number" min="1" max="604800" required></div>
+
           </div></section>
           <section class="settings-card"><h3>Media selection</h3><p class="settings-description">Choose the types of media to save from subscribed chats.</p><div class="media-options">
             <label><input type="checkbox" name="media_type" value="photo"> Photos</label>

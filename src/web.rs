@@ -3,10 +3,21 @@ use axum::{Router, response::Html, routing::get};
 
 pub(crate) fn router(engines: &[media_runtime::RunningEngine]) -> Router {
     let app = Router::new()
+        .route("/settings/", get(|| async { page("settings") }))
         .route("/", get(|| async { page("home") }))
         .route("/telegram/", get(|| async { page("telegram") }))
         .route("/jav/", get(|| async { page("jav") }));
     let app = [
+        (
+            "settings.js",
+            "text/javascript",
+            include_str!("../web/scripts/settings.js"),
+        ),
+        (
+            "settings.css",
+            "text/css",
+            include_str!("../web/styles/settings.css"),
+        ),
         (
             "home.css",
             "text/css",
@@ -66,6 +77,13 @@ pub(crate) fn router(engines: &[media_runtime::RunningEngine]) -> Router {
 
 fn page(section: &str) -> Html<String> {
     let (name, description, mark, content, actions) = match section {
+        "settings" => (
+            "Settings",
+            "Storage, server and schedules",
+            "S",
+            include_str!("../web/pages/settings.html"),
+            "",
+        ),
         "telegram" => (
             "Telegram",
             "Messages and chat subscriptions",
@@ -102,6 +120,14 @@ fn page(section: &str) -> Html<String> {
             .replace("{{description}}", description)
             .replace("{{mark}}", mark)
             .replace("{{actions}}", actions)
+            .replace(
+                "{{connection}}",
+                if section == "settings" {
+                    ""
+                } else {
+                    r#"<span id="connection" class="pill" role="status">Connecting</span>"#
+                },
+            )
     };
     let assets = format!(
         r#"<link rel="stylesheet" href="/assets/{section}.css"><script type="module" src="/assets/{section}.js"></script>"#
@@ -112,7 +138,7 @@ fn page(section: &str) -> Html<String> {
         .replace("{{section}}", section)
         .replace("{{page_assets}}", &assets)
         .replace("{{header}}", &header);
-    for name in ["home", "telegram", "jav"] {
+    for name in ["home", "telegram", "jav", "settings"] {
         html = html.replace(
             &format!("{{{{{name}_current}}}}"),
             if name == section {
@@ -122,5 +148,8 @@ fn page(section: &str) -> Html<String> {
             },
         );
     }
-    Html(html.replace("{{content}}", content))
+    Html(
+        html.replace("{{content}}", content)
+            .replace("{{task_table}}", include_str!("../web/task-table.html")),
+    )
 }

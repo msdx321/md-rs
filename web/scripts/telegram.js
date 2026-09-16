@@ -1,12 +1,12 @@
 import "./telegram-settings.js";
-import { api, bindTabs, connectEvents } from "./shared.js";
+import { api, bindTabs, connectEvents, reconcileTaskRows, historyPeriod } from "./shared.js";
 
 const statusEl = document.querySelector("#status");
 const requestEl = document.querySelector("#request-status");
 const filesEl = document.querySelector("#downloaded-files");
 const bytesEl = document.querySelector("#downloaded-bytes");
 const activeEl = document.querySelector("#active-count");
-const downloadsEl = document.querySelector("#downloads");
+const downloadsEl = document.querySelector("#tasks-body");
 const completedEl = document.querySelector("#completed-downloads");
 const tabEls = [...document.querySelectorAll('[role="tab"]')];
 const controls = Object.fromEntries(["pause", "resume", "cancel"].map(action => [action, document.querySelector(`#btn-${action}`)]));
@@ -18,6 +18,7 @@ function updateControls() {
   controls.pause.disabled = unavailable || paused;
   controls.resume.disabled = unavailable || !paused;
   controls.cancel.disabled = unavailable;
+  document.querySelector("#btn-run").disabled = unavailable || paused;
 }
 const formEl = document.querySelector("#download-form");
 const linkEl = document.querySelector("#chat-link");
@@ -69,16 +70,39 @@ for (const [action, button] of Object.entries(controls)) {
   });
 }
 
+document.querySelector('#btn-run').addEventListener('click', async () => {
+  controlBusy = true;
+  updateControls();
+  try {
+    await api('/telegram/scan', { method: 'POST' });
+    taskBanner.textContent = '';
+    taskBanner.className = '';
+  } catch (error) {
+    taskBanner.textContent = error.message;
+    taskBanner.className = 'banner err';
+  } finally {
+    controlBusy = false;
+    updateControls();
+  }
+});
+
 function setText(selector, value, root = document) {
   root.querySelector(selector).textContent = value;
 }
 
 function render(snapshot) {
   renderLogin(snapshot.login);
+  historyPeriod("telegram", snapshot.history_retention_days);
   paused = snapshot.paused;
   cancelling = snapshot.cancelling;
   updateControls();
-  statusEl.textContent = snapshot.status;
+  statusEl.textContent = cancelling ? 'cancelling' : paused ? 'paused' : snapshot.status;
+  statusEl.className = 'pill ' + (snapshot.status === 'running' && !paused && !cancelling ? 'ok' : '');
+  const loginBadge = document.querySelector('#pill-login');
+  const ready = snapshot.login?.step === 'ready';
+  loginBadge.textContent = ready ? 'connected' : 'login required';
+  loginBadge.className = 'pill ' + (ready ? 'ok' : 'err');
+  document.querySelector('#task-count').textContent = snapshot.active.length ? `(${snapshot.active.length})` : '';
   requestEl.textContent = snapshot.request_status;
   requestEl.classList.toggle("is-error", snapshot.request_status.startsWith("Could not"));
   filesEl.textContent = snapshot.downloaded_files;
@@ -89,7 +113,7 @@ function render(snapshot) {
   if (snapshot.completed.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "No files downloaded in the last 30 days";
+    empty.textContent = `No downloads in the last ${snapshot.history_retention_days} days.`;
     completedEl.append(empty);
   }
   for (const item of snapshot.completed) {
@@ -117,38 +141,30 @@ function render(snapshot) {
     completedEl.append(card);
   }
 
-  downloadsEl.replaceChildren();
-  if (snapshot.active.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = "No tasks. Completed downloads appear in History.";
-    downloadsEl.append(empty);
-    return;
-  }
-
+  const rows = [];
+  document.querySelector('#tasks-empty').style.display = snapshot.active.length ? 'none' : 'block';
   for (const item of snapshot.active) {
-    const card = document.createElement("div");
-    card.className = "download-card";
-    card.innerHTML = `
-      <div class="download-head">
-        <strong class="file"></strong>
-        <span class="speed"></span>
-      </div>
-      <progress class="download-progress" aria-label="Download progress" max="100"></progress>
-      <div class="download-meta">
-        <span class="progress-text"></span>
-        <span class="msg"></span>
-      </div>
-      <div class="path"></div>
-    `;
-    setText(".file", item.file_name, card);
-    setText(".speed", item.speed, card);
-    setText(".progress-text", `${item.percent.toFixed(1)}% (${item.downloaded}/${item.total})`, card);
-    setText(".msg", `msg ${item.msg_id}`, card);
-    setText(".path", item.path, card);
-    card.querySelector("progress").value = Math.min(100, Math.max(0, item.percent));
-    downloadsEl.append(card);
+    const row = document.createElement('tr');
+    row.dataset.taskId = `${item.msg_id}:${item.path}`;
+    const state = cancelling ? 'cancelling' : paused ? 'paused' : 'running';
+    const percent = Math.min(100, Math.max(0, item.percent));
+    row.innerHTML = `
+      <td><span class="truncate file"></span></td>
+      <td class="muted"><span class="truncate source"></span></td>
+      <td><span class="tag ${state}">${state}</span></td>
+      <td><div class="bar" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${percent.toFixed(1)}%"></i></div><span class="muted">${percent.toFixed(0)}%</span></td>
+      <td class="muted task-speed"></td>
+      <td class="muted"><span class="truncate detail"></span></td>
+      <td></td>`;
+    setText('.file', item.file_name, row);
+    row.querySelector('.file').title = item.file_name;
+    setText('.source', `Message ${item.msg_id}`, row);
+    setText('.task-speed', paused || cancelling ? '—' : item.speed, row);
+    setText('.detail', `${item.downloaded} / ${item.total}`, row);
+    row.querySelector('.detail').title = item.path;
+    rows.push(row);
   }
+  reconcileTaskRows(downloadsEl, rows);
 }
 
 let loginStep = null;

@@ -1,4 +1,4 @@
-import { $, api, connectEvents, bytes } from './shared.js';
+import { $, api, connectEvents, bytes, historyPeriod } from './shared.js';
 
 let telegram = null;
 let jav = null;
@@ -9,16 +9,18 @@ const terminal = new Set(['completed', 'failed', 'cancelled']);
 function renderSummary() {
   $('overview-active').textContent = telegram && jav ? telegram.active_count + jav.active_tasks : '—';
   if (telegram) {
+    historyPeriod("telegram", telegram.history_retention_days);
     $('overview-telegram').textContent = telegram.downloaded_files;
     $('telegram-saved').textContent = telegram.downloaded_bytes;
     $('telegram-status').textContent = telegram.login.step === 'ready' ? telegram.status : telegram.login.message;
     $('telegram-transfers').textContent = telegram.paused ? 'Paused' : `${telegram.active_count} active`;
   }
   if (jav) {
+    historyPeriod("jav", jav.history_retention_days);
     $('overview-jav').textContent = jav.downloaded;
     $('jav-saved').textContent = bytes(jav.downloaded_bytes);
     $('jav-status').textContent = jav.scheduler.running ? 'Daily job running' : jav.scheduler.last_result || 'Ready for downloads';
-    $('jav-next-run').textContent = !jav.scheduler.enabled ? 'Disabled' : jav.scheduler.next_run_at ? new Date(jav.scheduler.next_run_at).toLocaleString() : `Daily at ${jav.scheduler.daily_time}`;
+    $('jav-next-run').textContent = !jav.scheduler.enabled ? 'Disabled' : jav.scheduler.next_run_at ? new Date(jav.scheduler.next_run_at).toLocaleString() : 'Waiting for next run';
   }
 }
 

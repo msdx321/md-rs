@@ -1,4 +1,4 @@
-import { $, api, bindTabs, connectEvents, bytes } from "./shared.js";
+import { $, api, bindTabs, connectEvents, bytes, reconcileTaskRows, historyPeriod } from "./shared.js";
 
 const toast = (msg, kind = '') => {
   const el = document.createElement('div');
@@ -21,6 +21,8 @@ let latestStatus;
 let statusRevision = 0;
 function renderStatus(s) {
   latestStatus = s;
+  historyPeriod("jav", s.history_retention_days);
+  $("history-empty").textContent = `No downloads in the last ${s.history_retention_days} days.`;
   statusRevision += 1;
   const src = s.cookie_source === 'browser' ? 'minted' : 'pasted';
   $('pill-cookie').textContent = s.cookie_refreshing ? 'minting clearance…'
@@ -155,7 +157,8 @@ function renderTasks() {
   $('task-count').textContent = active ? `(${active})` : '';
   $('stat-active').textContent = tasks.filter((t) => t.state === 'running').length;
   $('tasks-empty').style.display = tasks.length ? 'none' : 'block';
-  $('tasks-body').innerHTML = tasks.map((t) => {
+  const nextRows = document.createElement('tbody');
+  nextRows.innerHTML = tasks.map((t) => {
     const terminal = ['completed', 'failed', 'cancelled'].includes(t.state);
     const pct = t.state === 'completed' ? 100 : t.total_segments > 0 ? Math.min(100, (t.done_segments / t.total_segments) * 100)
               : t.total_bytes > 0 ? Math.min(100, (t.downloaded_bytes / t.total_bytes) * 100) : 0;
@@ -164,7 +167,7 @@ function renderTasks() {
     const detail = t.state === 'running' || t.state === 'paused'
       ? (t.total_segments ? `${t.done_segments}/${t.total_segments} seg · ` : '') + bytes(t.downloaded_bytes)
       : (t.message || '');
-    return `<tr>
+    return `<tr data-task-id="${esc(t.id)}">
       <td><span class="truncate" title="${esc(t.title || t.url)}">${esc(t.title || t.url)}</span></td>
       <td class="muted"><span class="truncate" title="${esc(t.source_url || 'Manual')}">${esc(t.source_url || 'Manual')}</span></td>
       <td><span class="tag ${t.state}">${t.state}</span></td>
@@ -179,6 +182,7 @@ function renderTasks() {
       </td>
     </tr>`;
   }).join('');
+  reconcileTaskRows($('tasks-body'), [...nextRows.children]);
   document.querySelectorAll('#tasks-body button[data-act]').forEach((btn) => {
     btn.onclick = () => taskAction(btn.dataset.act, btn.dataset.id);
   });
@@ -226,9 +230,9 @@ async function loadHistory() {
 }
 
 // ── settings ──────────────────────────────────────────────────────────────
-const FIELDS = ['cookie', 'user_agent', 'save_path', 'temp_path', 'site_base',
+const FIELDS = ['cookie', 'user_agent', 'site_base',
   'title_filter', 'title_filter_regex', 'max_pages', 'min_duration_secs', 'resolution', 'concurrent_videos',
-  'segment_concurrency', 'daily_enabled', 'daily_time', 'run_on_start', 'web_host', 'web_port',
+  'segment_concurrency',
   'browser_enabled', 'browser_path', 'browser_profile_dir'];
 
 let savedSettings = null;
@@ -259,7 +263,6 @@ function updateSettingsControls() {
   $('btn-save').textContent = settingsSaving ? 'Saving…' : 'Save settings';
   $('save-note').classList.toggle('is-dirty', dirty);
   $('save-note').textContent = settingsSaving ? 'Saving changes…' : dirty ? 'Unsaved changes' : 'All changes saved';
-  $('daily_time').disabled = $('daily_enabled').value !== 'true';
   $('regex-hint').hidden = $('title_filter_regex').value !== 'true';
   $('title_filter').placeholder = $('title_filter_regex').value === 'true' ? 'e.g. (?i)ABC-\\d+' : 'All titles';
 }
@@ -271,7 +274,7 @@ function addLinkRow(link = { url: '', daily_quota: 10 }) {
   row.className = 'ranking-link';
   row.innerHTML = `<label class="field link-url">Ranking URL or path
       <input data-link-url required value="${esc(link.url)}" placeholder="https://missav.ai/cn/fc2?sort=weekly_views"></label>
-    <label class="field link-quota">Daily quota
+    <label class="field link-quota">Per-run quota
       <input data-link-quota type="number" required min="1" max="100" value="${esc(link.daily_quota)}"></label>
     <button type="button" class="tiny danger" data-remove-link>Remove</button>`;
   row.querySelector('[data-remove-link]').onclick = () => {
@@ -289,7 +292,7 @@ function updateLinkButtons() {
 function populatePopularLinks(cfg) {
   const selected = $('popular-link').value;
   $('popular-link').innerHTML = configuredLinks(cfg).map((link, index) =>
-    `<option value="${index}">${esc(link.url)} · ${link.daily_quota}/day</option>`).join('');
+    `<option value="${index}">${esc(link.url)} · ${link.daily_quota}/run</option>`).join('');
   if ([...$('popular-link').options].some((option) => option.value === selected)) $('popular-link').value = selected;
 }
 $('btn-add-link').onclick = () => { addLinkRow(); updateSettingsControls(); };
@@ -316,8 +319,7 @@ async function saveSettings() {
     const previous = savedSettings;
     savedSettings = await api('/jav/api/config', { method: 'PUT', body: JSON.stringify(readSettings()) });
     populateSettings(savedSettings);
-    const restart = previous.web_host !== savedSettings.web_host || previous.web_port !== savedSettings.web_port;
-    toast(restart ? 'Settings saved. Restart the app to apply host or port changes.' : 'Settings saved', 'ok');
+    toast('Settings saved', 'ok');
     loadStatus();
     populatePopularLinks(savedSettings);
     if (['title_filter', 'title_filter_regex', 'site_base'].some((key) => previous[key] !== savedSettings[key])
@@ -348,7 +350,7 @@ window.addEventListener('beforeunload', (event) => {
 
 // ── wiring ────────────────────────────────────────────────────────────────
 $('btn-run').onclick = async () => {
-  try { await api('/jav/api/daily/run', { method: 'POST' }); toast('Daily job started', 'ok'); }
+  try { await api('/jav/api/daily/run', { method: 'POST' }); toast('Download job started', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
 $('btn-pause').onclick = async () => { await api('/jav/api/daily/pause', { method: 'POST' }); toast('Pausing all downloads'); };
@@ -367,7 +369,7 @@ $('btn-prev').onclick = () => { if (page > 1) loadPopular(page - 1); };
 $('btn-next').onclick = () => { loadPopular(page + 1); };
 $('btn-reload-history').onclick = loadHistory;
 $('btn-clear-history').onclick = async () => {
-  if (!confirm('Clear the history? Downloaded files are kept, but every video becomes downloadable again.')) return;
+  if (!confirm('Clear retained history? Downloaded files are kept, but videos in this history become downloadable again.')) return;
   await api('/jav/api/history', { method: 'DELETE' });
   loadHistory(); loadStatus();
 };
