@@ -122,4 +122,16 @@ fn default_download_connections() -> usize {
     4
 }
 
-pub const FILE: crate::ConfigFile<Config> = crate::ConfigFile::new(crate::TELEGRAM_FILE);
+pub const FILE: crate::ConfigFile<Config> = crate::ConfigFile::new(crate::TELEGRAM_FILE)
+    .with_groups(&[
+        &["api_hash", "api_id"],
+        &["chat"],
+        &["file_formats", "media_types"],
+        &[
+            "date_format",
+            "file_name_prefix",
+            "file_name_prefix_split",
+            "file_path_prefix",
+        ],
+        &["download_connections", "max_download_task"],
+    ]);

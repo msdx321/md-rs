@@ -1,8 +1,14 @@
 //! Shared HTTP listener settings. Provider files contain only provider settings.
 use serde::{Deserialize, Serialize};
 
-pub const FILE: crate::ConfigFile<Config> =
-    crate::ConfigFile::new("config/app.yaml").with_defaults();
+pub const FILE: crate::ConfigFile<Config> = crate::ConfigFile::new("config/app.yaml")
+    .with_defaults()
+    .with_groups(&[
+        &["host", "port"],
+        &["jav_download_path", "telegram_download_path", "temp_path"],
+        &["history_retention_days"],
+        &["schedules"],
+    ]);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

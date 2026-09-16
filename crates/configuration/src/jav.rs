@@ -3,7 +3,18 @@ use std::path::PathBuf;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-pub const FILE: crate::ConfigFile<Config> = crate::ConfigFile::new(crate::JAV_FILE);
+pub const FILE: crate::ConfigFile<Config> = crate::ConfigFile::new(crate::JAV_FILE).with_groups(&[
+    &["cookie", "site_base", "user_agent"],
+    &["browser_enabled", "browser_path", "browser_profile_dir"],
+    &["links", "max_pages", "popular_path", "top_n"],
+    &[
+        "min_duration_secs",
+        "resolution",
+        "title_filter",
+        "title_filter_regex",
+    ],
+    &["concurrent_videos", "segment_concurrency"],
+]);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListingLink {

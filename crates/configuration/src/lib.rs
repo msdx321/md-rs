@@ -18,6 +18,7 @@ pub const JAV_FILE: &str = "config/jav.yaml";
 /// A configuration file paired with its provider-owned data model.
 pub struct ConfigFile<T> {
     keep_defaults: bool,
+    groups: &'static [&'static [&'static str]],
     path: &'static str,
     model: std::marker::PhantomData<fn() -> T>,
 }
@@ -27,6 +28,7 @@ impl<T> ConfigFile<T> {
         Self {
             path,
             keep_defaults: false,
+            groups: &[],
             model: std::marker::PhantomData,
         }
     }
@@ -34,6 +36,12 @@ impl<T> ConfigFile<T> {
     /// Keep shared settings explicit, including migration precedence markers.
     pub const fn with_defaults(mut self) -> Self {
         self.keep_defaults = true;
+        self
+    }
+
+    /// Root fields grouped in display order; keys within each group are sorted.
+    pub const fn with_groups(mut self, groups: &'static [&'static [&'static str]]) -> Self {
+        self.groups = groups;
         self
     }
 }
@@ -75,7 +83,7 @@ impl<T: Serialize + Default> ConfigFile<T> {
         {
             fields.retain(|key, value| defaults.get(key) != Some(value));
         }
-        sorted_yaml(value)
+        sorted_yaml(value, self.groups)
     }
 }
 
@@ -88,7 +96,7 @@ pub fn load<T: DeserializeOwned>(path: impl AsRef<Path>) -> anyhow::Result<T> {
 }
 
 /// Sort mappings recursively; sequence order is meaningful and stays unchanged.
-fn sorted_yaml(mut value: serde_yaml::Value) -> anyhow::Result<String> {
+fn sorted_yaml(mut value: serde_yaml::Value, groups: &[&[&str]]) -> anyhow::Result<String> {
     fn sort(value: &mut serde_yaml::Value) {
         match value {
             serde_yaml::Value::Mapping(mapping) => {
@@ -105,6 +113,26 @@ fn sorted_yaml(mut value: serde_yaml::Value) -> anyhow::Result<String> {
         }
     }
     sort(&mut value);
+    if !groups.is_empty()
+        && let serde_yaml::Value::Mapping(fields) = &value
+        && !fields.is_empty()
+    {
+        let mut sections = vec![serde_yaml::Mapping::new(); groups.len() + 1];
+        // Fields are already alphabetical. Unknown future fields go last.
+        for (key, value) in fields {
+            let group = groups
+                .iter()
+                .position(|group| group.contains(&key.as_str().unwrap_or_default()))
+                .unwrap_or(groups.len());
+            sections[group].insert(key.clone(), value.clone());
+        }
+        let sections = sections
+            .iter()
+            .filter(|section| !section.is_empty())
+            .map(serde_yaml::to_string)
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(sections.join("\n"));
+    }
     Ok(serde_yaml::to_string(&value)?)
 }
 

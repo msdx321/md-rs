@@ -46,7 +46,7 @@ temp_path: temp
 history_retention_days: 30
 ```
 
-Docker creates this file under `data/config/` with `host: 0.0.0.0`. On first start only, `MEDIA_HOST` and `MEDIA_PORT` seed the file; existing YAML takes precedence. Configure Telegram and JAV in the web UI. YAML keys are sorted and unknown fields removed on load and save. Provider files omit default values; list order is preserved.
+Docker creates this file under `data/config/` with `host: 0.0.0.0`. On first start only, `MEDIA_HOST` and `MEDIA_PORT` seed the file; existing YAML takes precedence. Configure Telegram and JAV in the web UI. YAML fields are arranged in logical groups, sorted alphabetically within each group, and stripped of unknown fields on load and save. Provider files omit default values; list order is preserved.
 
 History and download IDs expire after `history_retention_days` for both modules. Cleanup runs at startup, when settings change, and every minute. Downloaded files are kept; expired IDs no longer prevent downloads.
 
