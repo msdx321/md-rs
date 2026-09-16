@@ -1,0 +1,13 @@
+# Only source inputs enter the build context. Never send local runtime data.
+**
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!web/
+!web/**
+!crates/
+!crates/**
+**/target/
+**/.git/
+**/.DS_Store

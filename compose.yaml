@@ -1,0 +1,15 @@
+name: md-rs
+
+services:
+  md-rs:
+    image: ${MEDIA_IMAGE:-md-rs:local}
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./data:/data
+    shm_size: 1gb
+    stop_grace_period: 2m
+    restart: unless-stopped
