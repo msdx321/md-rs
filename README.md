@@ -13,7 +13,7 @@
 docker compose up -d --build
 ```
 
-Open http://127.0.0.1:8080. Persistent data lives in `./data/`. Set `TZ` to your timezone before starting Compose.
+Open http://127.0.0.1:8080. Persistent data lives in `./data/`. Set `MEDIA_HOST`, `MEDIA_PORT`, and `TZ` in your environment or a `.env` file to change the published address, port, and timezone. The shared listener settings are in `data/config/app.yaml`; if you change its port, match `MEDIA_PORT` in the Compose mapping.
 
 To use a published image:
 
@@ -23,7 +23,7 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-Use `edge` for the default branch or `latest` for a stable release. Stop an older Compose deployment before starting the renamed `md-rs` project.
+Use a version tag or `latest` for a stable release. Stop an older Compose deployment before starting the renamed `md-rs` project.
 
 The web UI has no authentication. Keep it local or put it behind an authenticated reverse proxy.
 
@@ -35,7 +35,20 @@ Requires Rust 1.98+, Chromium, ffmpeg, CMake, Go, Perl, a C++ compiler, and libc
 cargo run --release --bin md-rs
 ```
 
-Use `MEDIA_HOST` and `MEDIA_PORT` to change the listener. Configure both modules in the web UI; configuration files live in `config/`.
+Configure shared storage, separate Telegram/JAV schedules, and the web listener in the Settings page. Listener changes require a restart. Common settings live in `config/app.yaml`:
+
+```yaml
+host: 127.0.0.1
+port: 8080
+telegram_download_path: downloads/telegram
+jav_download_path: downloads/jav
+temp_path: temp
+history_retention_days: 30
+```
+
+Docker creates this file under `data/config/` with `host: 0.0.0.0`. On first start only, `MEDIA_HOST` and `MEDIA_PORT` seed the file; existing YAML takes precedence. Configure Telegram and JAV in the web UI. YAML keys are sorted and unknown fields removed on load and save. Provider files omit default values; list order is preserved.
+
+History and download IDs expire after `history_retention_days` for both modules. Cleanup runs at startup, when settings change, and every minute. Downloaded files are kept; expired IDs no longer prevent downloads.
 
 ## Import existing data
 
@@ -49,4 +62,4 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 ```
 
-CI checks the code and publishes native AMD64/ARM64 images to `docker.io/<DOCKER_HUB_USERNAME>/md-rs`. Configure the GitHub Actions secrets `DOCKER_HUB_USERNAME` and `DOCKER_HUB_ACCESS_TOKEN`. Branch builds produce `edge` on the default branch; `v*` release tags produce version tags and stable releases update `latest`. Pull requests never publish.
+CI checks branches and pull requests. Only pushes of `v*` release tags build and publish native AMD64/ARM64 images to `docker.io/<DOCKER_HUB_USERNAME>/md-rs`; stable releases update `latest`. Configure the GitHub Actions secrets `DOCKER_HUB_USERNAME` and `DOCKER_HUB_ACCESS_TOKEN`.
