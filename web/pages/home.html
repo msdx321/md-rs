@@ -16,7 +16,11 @@
   </article>
   <article class="panel module-card">
     <header><h2><span class="module-mark" aria-hidden="true">J</span>JAV</h2><span id="jav-connection" class="pill" role="status">Connecting</span></header>
-    <p id="jav-status">Waiting for JAV status…</p>
+    <div class="run-summary">
+      <p id="jav-status">Waiting for JAV status…</p>
+      <div id="jav-run-counts" class="run-counts" hidden></div>
+      <details id="jav-run-details" hidden><summary>Run details</summary><ul id="jav-run-breakdown"></ul></details>
+    </div>
     <dl><div><dt>Data saved <span data-history-days="jav">· 30 days</span></dt><dd id="jav-saved">—</dd></div><div><dt>Next scheduled run</dt><dd id="jav-next-run">—</dd></div></dl>
     <footer><span id="jav-transfers" class="muted">—</span><a href="/jav/">Open JAV <span aria-hidden="true">↗</span></a></footer>
   </article>

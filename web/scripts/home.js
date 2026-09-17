@@ -6,6 +6,39 @@ let tasks = null;
 let history = null;
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 
+function renderJavRun(scheduler) {
+  const result = scheduler.last_result || '';
+  // The scheduler also sends free-form progress and error messages.
+  const match = result.match(/^(manual|scheduled): (\d+)\/(\d+) completed, (\d+) attempted, (\d+) failed, (\d+) skipped; ([\s\S]*)$/);
+  const structured = !scheduler.running && match !== null;
+  $('jav-run-counts').hidden = !structured;
+  $('jav-run-details').hidden = !structured;
+  if (!structured) {
+    $('jav-status').textContent = scheduler.running ? 'Scheduled job running' : result || 'Ready for downloads';
+    return;
+  }
+  const [, trigger, completed, target, attempted, failed, skipped, details] = match;
+  const stopped = details.endsWith('stopped by user');
+  $('jav-status').textContent = `Last ${trigger} run${stopped ? ' · Stopped' : Number(completed) < Number(target) ? ' · Incomplete' : ''}`;
+  const counts = [
+    [`${completed} / ${target} completed`, 'completed'],
+    [`${attempted} attempted`, ''],
+    [`${failed} failed`, Number(failed) ? 'failed' : ''],
+    [`${skipped} skipped`, ''],
+  ];
+  $('jav-run-counts').replaceChildren(...counts.map(([text, kind]) => {
+    const count = document.createElement('span');
+    count.className = `tag ${kind}`;
+    count.textContent = text;
+    return count;
+  }));
+  $('jav-run-breakdown').replaceChildren(...details.split('; ').map((text) => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    return item;
+  }));
+}
+
 function renderSummary() {
   $('overview-active').textContent = telegram && jav ? telegram.active_count + jav.active_tasks : '—';
   if (telegram) {
@@ -21,7 +54,7 @@ function renderSummary() {
     $('overview-jav').textContent = jav.downloaded.toLocaleString();
     $('jav-transfers').textContent = `${jav.active_tasks} active`;
     $('jav-saved').textContent = bytes(jav.downloaded_bytes);
-    $('jav-status').textContent = jav.scheduler.running ? 'Scheduled job running' : jav.scheduler.last_result || 'Ready for downloads';
+    renderJavRun(jav.scheduler);
     $('jav-next-run').textContent = !jav.scheduler.enabled ? 'Disabled' : jav.scheduler.next_run_at ? dateTime(jav.scheduler.next_run_at) : 'Waiting for next run';
   }
 }
