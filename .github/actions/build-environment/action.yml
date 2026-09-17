@@ -1,0 +1,48 @@
+name: Build environment
+description: Reuse the Rust build environment, or build it when its definition changes.
+inputs:
+  arch:
+    description: Native runner architecture
+    required: true
+  publish:
+    description: Publish a missing environment from a trusted workflow
+    default: 'false'
+outputs:
+  image:
+    description: Build environment image reference
+    value: ${{ steps.image.outputs.image }}
+runs:
+  using: composite
+  steps:
+    - name: Environment image name
+      id: image
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+      run: |
+        definition=$(awk '/^# Application build$/ {exit} {print}' Dockerfile | sha256sum | cut -d ' ' -f 1)
+        echo "image=ghcr.io/${GITHUB_REPOSITORY,,}/build-env:${definition}-${ARCH}" >> "$GITHUB_OUTPUT"
+    - name: Pull existing environment
+      id: pull
+      shell: bash
+      env:
+        IMAGE: ${{ steps.image.outputs.image }}
+      run: |
+        if docker pull "$IMAGE"; then
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "found=false" >> "$GITHUB_OUTPUT"
+        fi
+    - uses: docker/setup-buildx-action@v4
+      if: steps.pull.outputs.found != 'true'
+    - name: Build missing environment
+      if: steps.pull.outputs.found != 'true'
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        target: build-env
+        platforms: linux/${{ inputs.arch }}
+        tags: ${{ steps.image.outputs.image }}
+        labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+        load: true
+        push: ${{ inputs.publish == 'true' }}
