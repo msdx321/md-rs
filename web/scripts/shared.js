@@ -219,9 +219,9 @@ for (const table of document.querySelectorAll('table[data-resizable]')) {
     columns.forEach(column => column.style.removeProperty('width'));
     try { localStorage.removeItem(key); } catch {}
     reset.disabled = true;
-    headers.forEach((header, index) => header.querySelector('.column-resizer').setAttribute('aria-valuenow', String(Math.round(measure()[index]))));
+    headers.forEach((header, index) => header.querySelector('.column-resizer')?.setAttribute('aria-valuenow', String(Math.round(measure()[index]))));
   };
-  headers.forEach((header, index) => {
+  headers.slice(0, -1).forEach((header, index) => {
     const handle = document.createElement('span');
     handle.className = 'column-resizer';
     handle.tabIndex = 0;
@@ -277,7 +277,7 @@ for (const table of document.querySelectorAll('table[data-resizable]')) {
   new ResizeObserver(() => {
     headers.forEach(header => {
       const width = Math.round(header.getBoundingClientRect().width);
-      if (width) header.querySelector('.column-resizer').setAttribute('aria-valuenow', String(width));
+      if (width) header.querySelector('.column-resizer')?.setAttribute('aria-valuenow', String(width));
     });
   }).observe(table);
 }

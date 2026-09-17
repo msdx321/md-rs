@@ -178,11 +178,11 @@ function renderLogin(login) {
   const changed = !loginStep || loginStep.id !== login.id || loginStep.step !== login.step;
   loginStep = login;
   const ready = login.step === "ready";
-  document.querySelector("#login-panel").hidden = ready;
+  const hasInput = ["credentials", "phone", "code", "password"].includes(login.step);
+  document.querySelector("#login-panel").hidden = !hasInput && login.step !== "retry";
   formEl.hidden = !ready;
   document.querySelector('#download-login-note').hidden = ready;
   document.querySelector("#login-message").textContent = login.message;
-  const hasInput = ["credentials", "phone", "code", "password"].includes(login.step);
   document.querySelector("#login-value-field").hidden = !hasInput;
   document.querySelector("#login-hash-field").hidden = login.step !== "credentials";
   document.querySelector("#login-help").hidden = login.step !== "credentials";
