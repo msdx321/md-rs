@@ -1,0 +1,709 @@
+//! Recursive-descent parser for the Telegram Media Downloader filter language.
+//!
+//! Grammar:
+//!   expr     = or_expr
+//!   or_expr  = and_expr ("||" | "or" | "OR") and_expr
+//!   and_expr = comp ("&&" | "and" | "AND") comp
+//!   comp     = add (("==" | "!=" | ">" | "<" | ">=" | "<=") add)*
+//!   add      = mul (("+" | "-") mul)*
+//!   mul      = unary (("*" | "/") unary)*
+//!   unary    = "-" unary | primary
+//!   primary  = NUMBER | STRING | RESTRING | TIME | NAME | "(" expr ")"
+
+use crate::telegram::format::parse_byte_str;
+use chrono::NaiveDateTime;
+use regex::Regex;
+use std::collections::HashMap;
+use std::fmt;
+use std::str::Chars;
+use std::sync::LazyLock;
+
+// Date-like prefixes used by the lexer to decide whether a run of digits
+// starts a datetime literal instead of a plain number.
+static RE_DATETIME_FULL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2}").unwrap()
+});
+static RE_DATETIME_DATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}").unwrap());
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    ReStr(Regex),
+    DateTime(NaiveDateTime),
+    Bool(bool),
+}
+
+pub trait VarLookup {
+    fn get_var(&self, name: &str) -> Option<Value>;
+}
+
+impl VarLookup for HashMap<String, Value> {
+    fn get_var(&self, name: &str) -> Option<Value> {
+        self.get(name).cloned()
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Int(v) => write!(f, "{v}"),
+            Value::Float(v) => write!(f, "{v}"),
+            Value::Str(v) => write!(f, "{v}"),
+            Value::ReStr(v) => write!(f, "r'{v}'"),
+            Value::DateTime(v) => write!(f, "{}", v.format("%Y-%m-%d %H:%M:%S")),
+            Value::Bool(v) => write!(f, "{v}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Token {
+    Num(i64),
+    Str(String),
+    ReStr(Regex),
+    Time(NaiveDateTime),
+    Name(String),
+    And,
+    Or,
+    Eq,
+    Ne,
+    Ge,
+    Le,
+    Gt,
+    Lt,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LParen,
+    RParen,
+    Eof,
+}
+
+struct Lexer<'a> {
+    chars: Chars<'a>,
+    peeked: Option<char>,
+}
+
+impl<'a> Lexer<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            chars: input.chars(),
+            peeked: None,
+        }
+    }
+
+    fn next_char(&mut self) -> Option<char> {
+        self.peeked.take().or_else(|| self.chars.next())
+    }
+
+    fn peek_char(&mut self) -> Option<char> {
+        if self.peeked.is_none() {
+            self.peeked = self.chars.next();
+        }
+        self.peeked
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(c) = self.peek_char() {
+            if !c.is_ascii_whitespace() {
+                break;
+            }
+            self.next_char();
+        }
+    }
+
+    fn read_string(&mut self, quote: char) -> Token {
+        let mut s = String::new();
+        loop {
+            match self.next_char() {
+                Some(c) if c == quote => break,
+                Some(c) => s.push(c),
+                None => break,
+            }
+        }
+        Token::Str(s)
+    }
+
+    fn read_re_string(&mut self) -> Token {
+        let mut s = String::new();
+        loop {
+            match self.next_char() {
+                Some('\'') => break,
+                Some(c) => s.push(c),
+                None => break,
+            }
+        }
+        match Regex::new(&s) {
+            Ok(re) => Token::ReStr(re),
+            Err(_) => Token::Str(s), // fallback: treat as plain string
+        }
+    }
+
+    fn read_number(&mut self, first: char) -> Token {
+        let mut s = String::from(first);
+        while let Some(c) = self.peek_char() {
+            if c.is_ascii_digit() {
+                s.push(c);
+                self.next_char();
+            } else {
+                break;
+            }
+        }
+        // Check for byte suffix: 10MB, 1GB, etc. `c` is the first letter
+        // (held in `peeked`); `self.chars` sits just past it, so we clone
+        // from there to read the remaining letters without consuming them.
+        if let Some(c) = self.peek_char()
+            && c.is_ascii_alphabetic()
+        {
+            let tail: String = self
+                .chars
+                .clone()
+                .take_while(|ch| ch.is_ascii_alphabetic())
+                .collect();
+            let candidate = format!("{s}{c}{tail}");
+            if let Some(bytes) = parse_byte_str(&candidate) {
+                self.next_char(); // consume the peeked first letter
+                for _ in 0..tail.len() {
+                    self.next_char();
+                }
+                return Token::Num(bytes as i64);
+            }
+        }
+        match s.parse() {
+            Ok(n) => Token::Num(n),
+            Err(_) => Token::Name(s),
+        }
+    }
+
+    fn read_name(&mut self, first: char) -> Token {
+        let mut s = String::from(first);
+        while let Some(c) = self.peek_char() {
+            if c.is_alphanumeric() || c == '_' {
+                s.push(c);
+                self.next_char();
+            } else {
+                break;
+            }
+        }
+        match s.to_uppercase().as_str() {
+            "AND" => Token::And,
+            "OR" => Token::Or,
+            _ => Token::Name(s),
+        }
+    }
+
+    fn read_datetime(&mut self) -> Token {
+        let mut s = String::new();
+        // Read digits, hyphens, colons, spaces
+        while let Some(c) = self.peek_char() {
+            if c.is_ascii_digit() || c == '-' || c == '.' || c == '/' || c == ' ' || c == ':' {
+                s.push(c);
+                self.next_char();
+            } else {
+                break;
+            }
+        }
+        let normalized = s.replace(['/', '.'], "-");
+        if let Ok(dt) = NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%d %H:%M:%S") {
+            return Token::Time(dt);
+        }
+        // Try just date
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(normalized.trim(), "%Y-%m-%d")
+            && let Some(dt) = date.and_hms_opt(0, 0, 0)
+        {
+            return Token::Time(dt);
+        }
+        // Fallback: treat as string
+        Token::Str(s)
+    }
+}
+
+impl<'a> Iterator for Lexer<'a> {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Token> {
+        self.skip_ws();
+        let c = self.next_char()?;
+
+        Some(match c {
+            '\'' => self.read_string('\''),
+            '\"' => self.read_string('\"'),
+            'r' if self.peek_char() == Some('\'') => {
+                self.next_char(); // consume the '
+                self.read_re_string()
+            }
+            '(' => Token::LParen,
+            ')' => Token::RParen,
+            '+' => Token::Plus,
+            '-' => Token::Minus,
+            '*' => Token::Star,
+            '/' => Token::Slash,
+            '=' => {
+                if self.peek_char() == Some('=') {
+                    self.next_char();
+                    Token::Eq
+                } else {
+                    Token::Name("=".into())
+                }
+            }
+            '!' => {
+                if self.peek_char() == Some('=') {
+                    self.next_char();
+                    Token::Ne
+                } else {
+                    Token::Name("!".into())
+                }
+            }
+            '>' => {
+                if self.peek_char() == Some('=') {
+                    self.next_char();
+                    Token::Ge
+                } else {
+                    Token::Gt
+                }
+            }
+            '<' => {
+                if self.peek_char() == Some('=') {
+                    self.next_char();
+                    Token::Le
+                } else {
+                    Token::Lt
+                }
+            }
+            '&' => {
+                if self.peek_char() == Some('&') {
+                    self.next_char();
+                    Token::And
+                } else {
+                    Token::Name("&".into())
+                }
+            }
+            '|' => {
+                if self.peek_char() == Some('|') {
+                    self.next_char();
+                    Token::Or
+                } else {
+                    Token::Name("|".into())
+                }
+            }
+            d if d.is_ascii_digit() => {
+                // Peek ahead: if date-like pattern, parse as datetime
+                let rest: String = self.chars.clone().take(20).collect();
+                let candidate = format!("{d}{rest}");
+                if RE_DATETIME_FULL.is_match(&candidate) || RE_DATETIME_DATE.is_match(&candidate) {
+                    self.read_datetime()
+                } else {
+                    self.read_number(d)
+                }
+            }
+            a if a.is_alphabetic() || a == '_' => self.read_name(a),
+            _ => Token::Name(c.to_string()),
+        })
+    }
+}
+
+pub struct Parser {
+    expr: Result<Expr, String>,
+}
+
+impl Parser {
+    pub fn new(input: &str) -> Self {
+        let lexer = Lexer::new(input);
+        let tokens: Vec<Token> = lexer.collect();
+        Self {
+            expr: ExprParser {
+                tokens: &tokens,
+                pos: 0,
+            }
+            .parse(),
+        }
+    }
+
+    pub fn parse(&self, vars: &impl VarLookup) -> Result<Value, String> {
+        self.expr.as_ref().map_err(Clone::clone)?.eval(vars)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Expr {
+    Literal(Value),
+    Var(String),
+    UnaryMinus(Box<Expr>),
+    Binary {
+        left: Box<Expr>,
+        op: BinaryOp,
+        right: Box<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BinaryOp {
+    Or,
+    And,
+    Eq,
+    Ne,
+    Gt,
+    Lt,
+    Ge,
+    Le,
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl Expr {
+    fn eval(&self, vars: &impl VarLookup) -> Result<Value, String> {
+        match self {
+            Expr::Literal(value) => Ok(value.clone()),
+            Expr::Var(name) => vars
+                .get_var(name)
+                .ok_or_else(|| format!("undefined variable: {name}")),
+            Expr::UnaryMinus(expr) => match expr.eval(vars)? {
+                Value::Int(v) => Ok(Value::Int(-v)),
+                Value::Float(v) => Ok(Value::Float(-v)),
+                _ => Err("cannot negate non-numeric value".into()),
+            },
+            Expr::Binary { left, op, right } => {
+                let left = left.eval(vars)?;
+                let right = right.eval(vars)?;
+                Ok(match op {
+                    BinaryOp::Or => truthy_or(left, right),
+                    BinaryOp::And => truthy_and(left, right),
+                    BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Gt
+                    | BinaryOp::Lt
+                    | BinaryOp::Ge
+                    | BinaryOp::Le => compare(&left, *op, &right),
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+                        arithmetic(&left, *op, &right)
+                    }
+                })
+            }
+        }
+    }
+}
+
+struct ExprParser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+}
+
+impl ExprParser<'_> {
+    fn peek(&self) -> &Token {
+        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
+    }
+
+    fn advance(&mut self) -> &Token {
+        self.pos += 1;
+        self.tokens.get(self.pos - 1).unwrap_or(&Token::Eof)
+    }
+
+    fn expect(&mut self, expected: fn(&Token) -> bool, label: &str) -> Result<Token, String> {
+        let t = self.advance();
+        if expected(t) {
+            Ok(t.clone())
+        } else {
+            Err(format!("expected {label}, got {t:?}"))
+        }
+    }
+
+    fn parse(&mut self) -> Result<Expr, String> {
+        let expr = self.or_expr()?;
+        if !matches!(self.peek(), Token::Eof) {
+            return Err(format!(
+                "unexpected token after expression: {:?}",
+                self.peek()
+            ));
+        }
+        Ok(expr)
+    }
+
+    fn or_expr(&mut self) -> Result<Expr, String> {
+        let mut left = self.and_expr()?;
+        while matches!(self.peek(), Token::Or) {
+            self.advance();
+            let right = self.and_expr()?;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Or,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    fn and_expr(&mut self) -> Result<Expr, String> {
+        let mut left = self.comp()?;
+        while matches!(self.peek(), Token::And) {
+            self.advance();
+            let right = self.comp()?;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    fn comp(&mut self) -> Result<Expr, String> {
+        let left = self.add()?;
+        match self.peek() {
+            Token::Eq | Token::Ne | Token::Gt | Token::Lt | Token::Ge | Token::Le => {
+                let op = token_to_binary_op(self.advance())?;
+                let right = self.add()?;
+                Ok(Expr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                })
+            }
+            _ => Ok(left),
+        }
+    }
+
+    fn add(&mut self) -> Result<Expr, String> {
+        let mut left = self.mul()?;
+        loop {
+            match self.peek() {
+                Token::Plus => {
+                    self.advance();
+                    left = Expr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::Add,
+                        right: Box::new(self.mul()?),
+                    };
+                }
+                Token::Minus => {
+                    self.advance();
+                    left = Expr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::Sub,
+                        right: Box::new(self.mul()?),
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn mul(&mut self) -> Result<Expr, String> {
+        let mut left = self.unary()?;
+        loop {
+            match self.peek() {
+                Token::Star => {
+                    self.advance();
+                    left = Expr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::Mul,
+                        right: Box::new(self.unary()?),
+                    };
+                }
+                Token::Slash => {
+                    self.advance();
+                    left = Expr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::Div,
+                        right: Box::new(self.unary()?),
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn unary(&mut self) -> Result<Expr, String> {
+        if matches!(self.peek(), Token::Minus) {
+            self.advance();
+            return Ok(Expr::UnaryMinus(Box::new(self.unary()?)));
+        }
+        self.primary()
+    }
+
+    fn primary(&mut self) -> Result<Expr, String> {
+        match self.peek() {
+            Token::Num(n) => {
+                let v = *n;
+                self.advance();
+                Ok(Expr::Literal(Value::Int(v)))
+            }
+            Token::Str(_) => match self.advance().clone() {
+                Token::Str(s) => Ok(Expr::Literal(Value::Str(s))),
+                t => Err(format!("expected string, got {t:?}")),
+            },
+            Token::ReStr(_) => match self.advance().clone() {
+                Token::ReStr(r) => Ok(Expr::Literal(Value::ReStr(r))),
+                t => Err(format!("expected regex string, got {t:?}")),
+            },
+            Token::Time(dt) => {
+                let v = *dt;
+                self.advance();
+                Ok(Expr::Literal(Value::DateTime(v)))
+            }
+            Token::Name(name) => {
+                let n = name.clone();
+                self.advance();
+                Ok(Expr::Var(n))
+            }
+            Token::LParen => {
+                self.advance();
+                let v = self.or_expr()?;
+                self.expect(|t| matches!(t, Token::RParen), ")")?;
+                Ok(v)
+            }
+            _ => Err(format!("unexpected token: {:?}", self.peek())),
+        }
+    }
+}
+
+fn token_to_binary_op(token: &Token) -> Result<BinaryOp, String> {
+    match token {
+        Token::Eq => Ok(BinaryOp::Eq),
+        Token::Ne => Ok(BinaryOp::Ne),
+        Token::Gt => Ok(BinaryOp::Gt),
+        Token::Lt => Ok(BinaryOp::Lt),
+        Token::Ge => Ok(BinaryOp::Ge),
+        Token::Le => Ok(BinaryOp::Le),
+        _ => Err(format!("expected comparison operator, got {token:?}")),
+    }
+}
+
+fn truthy_and(a: Value, b: Value) -> Value {
+    match (a, b) {
+        (Value::Bool(a), Value::Bool(b)) => Value::Bool(a && b),
+        _ => Value::Bool(false),
+    }
+}
+
+fn truthy_or(a: Value, b: Value) -> Value {
+    match (a, b) {
+        (Value::Bool(a), Value::Bool(b)) => Value::Bool(a || b),
+        _ => Value::Bool(false),
+    }
+}
+
+fn compare(left: &Value, op: BinaryOp, right: &Value) -> Value {
+    let result = match (left, right) {
+        (Value::Int(l), Value::Int(r)) => cmp_num(*l as f64, *r as f64, op),
+        (Value::Float(l), Value::Float(r)) => cmp_num(*l, *r, op),
+        (Value::Int(l), Value::Float(r)) => cmp_num(*l as f64, *r, op),
+        (Value::Float(l), Value::Int(r)) => cmp_num(*l, *r as f64, op),
+        (Value::Str(l), Value::Str(r)) => cmp_str(l, r, op),
+        (Value::Str(l), Value::ReStr(r)) => match op {
+            BinaryOp::Eq => r.is_match(l),
+            BinaryOp::Ne => !r.is_match(l),
+            _ => false,
+        },
+        (Value::ReStr(l), Value::Str(r)) => match op {
+            BinaryOp::Eq => l.is_match(r),
+            BinaryOp::Ne => !l.is_match(r),
+            _ => false,
+        },
+        (Value::DateTime(l), Value::DateTime(r)) => cmp_num(
+            l.and_utc().timestamp() as f64,
+            r.and_utc().timestamp() as f64,
+            op,
+        ),
+        _ => false,
+    };
+    Value::Bool(result)
+}
+
+fn cmp_num(l: f64, r: f64, op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::Eq => (l - r).abs() < f64::EPSILON,
+        BinaryOp::Ne => (l - r).abs() >= f64::EPSILON,
+        BinaryOp::Gt => l > r,
+        BinaryOp::Lt => l < r,
+        BinaryOp::Ge => l >= r,
+        BinaryOp::Le => l <= r,
+        _ => false,
+    }
+}
+
+fn cmp_str(l: &str, r: &str, op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::Eq => l == r,
+        BinaryOp::Ne => l != r,
+        BinaryOp::Gt => l > r,
+        BinaryOp::Lt => l < r,
+        BinaryOp::Ge => l >= r,
+        BinaryOp::Le => l <= r,
+        _ => false,
+    }
+}
+
+fn arithmetic(left: &Value, op: BinaryOp, right: &Value) -> Value {
+    let l = as_f64(left);
+    let r = as_f64(right);
+    let result = match op {
+        BinaryOp::Add => l + r,
+        BinaryOp::Sub => l - r,
+        BinaryOp::Mul => l * r,
+        BinaryOp::Div => {
+            if r == 0.0 {
+                return Value::Float(f64::NAN);
+            }
+            l / r
+        }
+        _ => return Value::Int(0),
+    };
+    if result.fract() == 0.0 && result.is_finite() {
+        Value::Int(result as i64)
+    } else {
+        Value::Float(result)
+    }
+}
+
+fn as_f64(v: &Value) -> f64 {
+    match v {
+        Value::Int(n) => *n as f64,
+        Value::Float(n) => *n,
+        _ => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn var(name: &str, v: i64) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert(name.into(), Value::Int(v));
+        m
+    }
+
+    #[test]
+    fn byte_suffix_lexes_intact() {
+        // Regression: the first letter of a byte suffix used to be dropped,
+        // so "10MB" was read as Num(10) plus a dangling Name("B") token and
+        // the parser rejected the trailing token.
+        let p = Parser::new("10MB");
+        assert!(matches!(
+            p.parse(&HashMap::new()).unwrap(),
+            Value::Int(n) if n == 10 * 1024 * 1024
+        ));
+    }
+
+    #[test]
+    fn byte_suffix_in_comparison() {
+        let p = Parser::new("file_size >= 10MB");
+        assert!(matches!(
+            p.parse(&var("file_size", 10 * 1024 * 1024)).unwrap(),
+            Value::Bool(true)
+        ));
+        let p = Parser::new("file_size >= 10MB");
+        assert!(matches!(
+            p.parse(&var("file_size", 10)).unwrap(),
+            Value::Bool(false)
+        ));
+    }
+}

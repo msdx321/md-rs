@@ -1983,41 +1983,6 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "md-rs"
 version = "0.2.2"
 dependencies = [
- "anyhow",
- "axum",
- "env_logger",
- "log",
- "media-config",
- "media-jav",
- "media-migration",
- "media-runtime",
- "media-storage",
- "media-telegram",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "md5"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
-
-[[package]]
-name = "media-config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "regex",
- "serde",
- "serde_yaml",
- "url",
-]
-
-[[package]]
-name = "media-jav"
-version = "0.4.1"
-dependencies = [
  "aes",
  "anyhow",
  "axum",
@@ -2026,84 +1991,33 @@ dependencies = [
  "dom_query",
  "env_logger",
  "futures-util",
+ "grammers-client",
+ "grammers-mtsender",
+ "grammers-session",
  "headless_chrome",
+ "indicatif",
+ "libsql",
  "log",
- "media-config",
- "media-runtime",
- "media-storage",
  "percent-encoding",
  "regex",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "url",
  "wreq",
  "wreq-util",
 ]
 
 [[package]]
-name = "media-migration"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "media-config",
- "media-storage",
- "serde",
- "serde_json",
- "serde_yaml",
-]
-
-[[package]]
-name = "media-runtime"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "futures-util",
- "log",
- "media-config",
- "tokio",
-]
-
-[[package]]
-name = "media-storage"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "libsql",
- "serde",
- "tokio",
-]
-
-[[package]]
-name = "media-telegram"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "env_logger",
- "grammers-client",
- "grammers-mtsender",
- "grammers-session",
- "indicatif",
- "log",
- "media-config",
- "media-migration",
- "media-runtime",
- "media-storage",
- "regex",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tokio-stream",
- "tokio-util",
-]
+name = "md5"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
 
 [[package]]
 name = "memchr"

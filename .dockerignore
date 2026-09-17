@@ -6,8 +6,6 @@
 !src/**
 !web/
 !web/**
-!crates/
-!crates/**
 **/target/
 **/.git/
 **/.DS_Store

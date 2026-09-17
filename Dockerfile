@@ -15,20 +15,18 @@ FROM build-env AS chef
 
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
 COPY src ./src
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /build/recipe.json recipe.json
 # Local source builds cache dependencies separately from application sources.
-RUN cargo chef cook --release --locked --recipe-path recipe.json --workspace --all-targets --all-features
+RUN cargo chef cook --release --locked --recipe-path recipe.json --all-targets --all-features
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
 COPY src ./src
 COPY web ./web
 # Test and build in the same directory so release dependencies are reused.
-RUN cargo test --release --locked --workspace --all-targets --all-features \
+RUN cargo test --release --locked --all-targets --all-features \
     && cargo build --release --locked --bin md-rs \
     && cp target/release/md-rs /usr/local/bin/md-rs
 

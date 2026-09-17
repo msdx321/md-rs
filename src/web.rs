@@ -1,7 +1,7 @@
 //! The application UI: one shell, shared assets, and source-specific pages.
 use axum::{Router, response::Html, routing::get};
 
-pub(crate) fn router(engines: &[media_runtime::RunningEngine]) -> Router {
+pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
     let app = Router::new()
         .route("/settings/", get(|| async { page("settings") }))
         .route("/", get(|| async { page("home") }))

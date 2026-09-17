@@ -101,8 +101,8 @@ jobs:
           cache-workspace-crates: true
           cache-on-failure: true
           save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') }}
-      - run: bash .github/scripts/in-build-env.sh cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - run: bash .github/scripts/in-build-env.sh cargo test --locked --workspace --all-targets --all-features
+      - run: bash .github/scripts/in-build-env.sh cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: bash .github/scripts/in-build-env.sh cargo test --locked --all-targets --all-features
 
   build:
     name: Image (${{ matrix.arch }})
@@ -131,7 +131,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/release-output
           # No fallback: skipping compilation/tests requires identical inputs.
-          key: release-binary-${{ matrix.arch }}-${{ needs.plan.outputs.environment }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build.rs', 'crates/**', 'src/**', 'web/**', '.cargo/**', 'rust-toolchain*', '.github/scripts/build-release.sh', '.github/scripts/in-build-env.sh') }}
+          key: release-binary-${{ matrix.arch }}-${{ needs.plan.outputs.environment }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build.rs', 'src/**', 'web/**', '.cargo/**', 'rust-toolchain*', '.github/scripts/build-release.sh', '.github/scripts/in-build-env.sh') }}
       - uses: docker/login-action@v4
         if: steps.binary.outputs.cache-hit != 'true'
         with:

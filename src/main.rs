@@ -1,5 +1,11 @@
 mod application;
+mod configuration;
+mod jav;
+mod migration;
+mod runtime;
 mod settings;
+mod storage;
+mod telegram;
 mod web;
 
 #[tokio::main]

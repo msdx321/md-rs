@@ -1,10 +1,10 @@
 //! Owns startup ordering, failure cleanup, and process shutdown.
 
 pub(crate) async fn run() -> anyhow::Result<()> {
-    std::fs::create_dir_all(media_config::DIRECTORY)?;
-    let database = media_storage::Database::open(media_storage::DATABASE_FILE).await?;
-    media_migration::run(&database).await?;
-    let config = media_config::app::load_or_create()?;
+    std::fs::create_dir_all(crate::configuration::DIRECTORY)?;
+    let database = crate::storage::Database::open(crate::storage::DATABASE_FILE).await?;
+    crate::migration::run(&database).await?;
+    let config = crate::configuration::app::load_or_create()?;
     config.validate()?;
     let (settings, updates) = tokio::sync::watch::channel(config.clone());
     anyhow::ensure!(
@@ -30,11 +30,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         std::env::temp_dir().join("md-rs-http-address"),
         health_address.to_string(),
     )?;
-    let mut engines = vec![media_telegram::start(database.clone(), updates.clone()).await?];
-    match media_jav::start(database, updates).await {
+    let mut engines = vec![crate::telegram::start(database.clone(), updates.clone()).await?];
+    match crate::jav::start(database, updates).await {
         Ok(engine) => engines.push(engine),
         Err(error) => {
-            media_runtime::shutdown_all(engines).await;
+            crate::runtime::shutdown_all(engines).await;
             return Err(error);
         }
     };
@@ -46,7 +46,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     };
     log::info!("Stopping downloaders; send another interrupt to force exit");
     tokio::select! {
-        _ = media_runtime::shutdown_all(engines) => {},
+        _ = crate::runtime::shutdown_all(engines) => {},
         _ = wait_for_shutdown() => std::process::exit(130),
     }
     Ok(result?)

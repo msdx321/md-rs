@@ -1,5 +1,5 @@
+use crate::configuration::app::Config;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
-use media_config::app::Config;
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 
@@ -23,7 +23,7 @@ async fn save(
         .validate()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let state = state.lock().await;
-    media_config::app::FILE
+    crate::configuration::app::FILE
         .save(&config)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     state.send_replace(config.clone());

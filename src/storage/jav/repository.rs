@@ -1,0 +1,232 @@
+//! Serializes durable mutations and publishes cache changes only after commit.
+use super::{Record, State};
+use crate::storage::{Connection, Database, params};
+use std::sync::Mutex;
+
+pub struct Repository {
+    state: Mutex<State>,
+    database: Database,
+    state_write: tokio::sync::Mutex<()>,
+}
+
+impl Repository {
+    pub async fn load(database: Database) -> anyhow::Result<Self> {
+        let state = State::load(&database).await?;
+        Ok(Self {
+            state: Mutex::new(state),
+            database,
+            state_write: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    pub fn snapshot(&self) -> State {
+        self.state.lock().expect("state lock poisoned").clone()
+    }
+
+    pub fn is_completed(&self, id: &str) -> bool {
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .is_completed(id)
+    }
+
+    /// Commit before updating the cache so failed writes never look durable.
+    pub async fn upsert_record(&self, record: Record) -> anyhow::Result<()> {
+        let _write = self.state_write.lock().await;
+        let tx = self.database.transaction().await?;
+        store_record(&tx, &record).await?;
+        tx.commit().await?;
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .upsert(record);
+        Ok(())
+    }
+
+    pub async fn forget_record(&self, id: &str) -> anyhow::Result<()> {
+        let _write = self.state_write.lock().await;
+        let tx = self.database.transaction().await?;
+        tx.execute("DELETE FROM jav_records WHERE id=?", [id])
+            .await?;
+        tx.commit().await?;
+        self.state.lock().expect("state lock poisoned").forget(id);
+        Ok(())
+    }
+
+    pub async fn clear_history(&self, days: u32) -> anyhow::Result<usize> {
+        let _write = self.state_write.lock().await;
+        let ids: std::collections::HashSet<_> = self
+            .snapshot()
+            .history(days)
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let tx = self.database.transaction().await?;
+        for id in &ids {
+            tx.execute("DELETE FROM jav_records WHERE id=?", [id.as_str()])
+                .await?;
+        }
+        tx.commit().await?;
+        let mut state = self.state.lock().expect("state lock poisoned");
+        state.records.retain(|record| !ids.contains(&record.id));
+        Ok(ids.len())
+    }
+
+    pub async fn prune_history(&self, days: u32) -> anyhow::Result<()> {
+        let _write = self.state_write.lock().await;
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+        self.database.connection().await.execute(
+            "DELETE FROM jav_records WHERE julianday(finished_at) <= julianday(?) OR julianday(finished_at) IS NULL",
+            [cutoff.to_rfc3339()],
+        ).await?;
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .records
+            .retain(|record| {
+                chrono::DateTime::parse_from_rfc3339(&record.finished_at)
+                    .is_ok_and(|time| time > cutoff)
+            });
+        Ok(())
+    }
+
+    pub async fn mark_daily_run(&self, date: &str) -> anyhow::Result<()> {
+        let _write = self.state_write.lock().await;
+        self.database.connection().await.execute("INSERT INTO jav_scheduler(id,last_daily_run) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET last_daily_run=excluded.last_daily_run", [date]).await?;
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .last_daily_run = Some(date.to_string());
+        Ok(())
+    }
+}
+
+impl State {
+    pub async fn load(db: &Database) -> anyhow::Result<Self> {
+        let conn = db.connection().await;
+        let mut state = Self::default();
+        let mut rows = conn.query("SELECT id,url,title,rank,status,path,size,finished_at,error FROM jav_records ORDER BY rowid", ()).await?;
+        while let Some(row) = rows.next().await? {
+            state.records.push(Record {
+                id: row.get(0)?,
+                url: row.get(1)?,
+                title: row.get(2)?,
+                rank: row
+                    .get::<Option<i64>>(3)?
+                    .map(usize::try_from)
+                    .transpose()?,
+                status: row.get(4)?,
+                path: row.get(5)?,
+                size: u64::try_from(row.get::<i64>(6)?)?,
+                finished_at: row.get(7)?,
+                error: row.get(8)?,
+            });
+        }
+        if let Some(row) = conn
+            .query("SELECT last_daily_run FROM jav_scheduler WHERE id=1", ())
+            .await?
+            .next()
+            .await?
+        {
+            state.last_daily_run = row.get(0)?;
+        }
+        Ok(state)
+    }
+
+    #[cfg(test)]
+    async fn write(&self, conn: &Connection) -> anyhow::Result<()> {
+        for record in &self.records {
+            store_record(conn, record).await?;
+        }
+        conn.execute("INSERT INTO jav_scheduler(id,last_daily_run) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET last_daily_run=excluded.last_daily_run", [self.last_daily_run.clone()]).await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn save(&self, db: &Database) -> anyhow::Result<()> {
+        let tx = db.transaction().await?;
+        tx.execute("DELETE FROM jav_records", ()).await?;
+        self.write(&tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+pub async fn store_record(conn: &Connection, record: &Record) -> anyhow::Result<()> {
+    conn.execute("INSERT INTO jav_records(id,url,title,rank,status,path,size,finished_at,error) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET url=excluded.url,title=excluded.title,rank=excluded.rank,status=excluded.status,path=excluded.path,size=excluded.size,finished_at=excluded.finished_at,error=excluded.error",
+        params![record.id.clone(),record.url.clone(),record.title.clone(),record.rank.map(i64::try_from).transpose()?,record.status.clone(),record.path.clone(),i64::try_from(record.size)?,record.finished_at.clone(),record.error.clone()]).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(id: &str, status: &str) -> Record {
+        Record {
+            id: id.into(),
+            url: format!("https://missav.ai/cn/{id}"),
+            title: format!("video {id}"),
+            rank: Some(1),
+            status: status.into(),
+            path: format!("/tmp/{id}.mp4"),
+            size: 10,
+            finished_at: "2026-01-01T00:00:00Z".into(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn upsert_replaces_by_id() {
+        let mut state = State::default();
+        state.upsert(record("1", "failed"));
+        state.upsert(record("1", "completed"));
+        assert_eq!(state.records.len(), 1);
+        assert!(state.is_completed("1"));
+    }
+
+    #[test]
+    fn forget_removes_the_dedup_entry() {
+        let mut state = State::default();
+        state.upsert(record("1", "completed"));
+        assert!(state.is_completed("1"));
+        assert!(state.forget("1"));
+        assert!(!state.is_completed("1"));
+        assert!(!state.forget("1"));
+    }
+
+    #[test]
+    fn failed_records_are_not_dedup_hits() {
+        let mut state = State::default();
+        state.upsert(record("9", "failed"));
+        assert!(!state.is_completed("9"));
+    }
+
+    #[tokio::test]
+    async fn round_trips_through_disk() {
+        let dir = std::env::temp_dir().join(format!("javd-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.db");
+        let path = path.to_str().unwrap();
+
+        let mut state = State::default();
+        state.upsert(record("1", "completed"));
+        state.last_daily_run = Some("2026-01-01".into());
+        let db = Database::open(path).await.unwrap();
+        state.save(&db).await.unwrap();
+        drop(db);
+        let db = Database::open(path).await.unwrap();
+
+        let loaded = State::load(&db).await.unwrap();
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.last_daily_run.as_deref(), Some("2026-01-01"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn empty_database_loads_empty() {
+        let db = Database::open(":memory:").await.unwrap();
+        let state = State::load(&db).await.unwrap();
+        assert!(state.records.is_empty());
+    }
+}

@@ -56,10 +56,12 @@ Place old Telegram `config.yaml` and `data.yaml` in `config/telegram/`, and the 
 
 ## Development and publishing
 
+The application is one Rust package with a single version in `Cargo.toml`. Configuration, JAV, Telegram, storage, migration, and runtime code are modules under `src/`.
+
 ```sh
 cargo fmt --all
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
 ```
 
 CI checks branches, pull requests, and manual runs. Only pushes of `v*` tags compile release binaries, package native AMD64/ARM64 Docker images, and publish them. After Rust checks and both image builds pass, CI publishes `docker.io/<DOCKER_HUB_USERNAME>/md-rs:validated-<full-commit-sha>` and the release tags. If that exact commit already has a validated image, the tag run reuses it by digest. Stable release tags update `latest`. Runs for the same commit are serialized. Configure the GitHub Actions secrets `DOCKER_HUB_USERNAME` and `DOCKER_HUB_ACCESS_TOKEN`.

@@ -1,75 +1,41 @@
 [package]
 name = "md-rs"
 version = "0.2.2"
-edition.workspace = true
-rust-version.workspace = true
+edition = "2024"
+rust-version = "1.98"
 license = "MIT"
 description = "Unified Telegram and JAV media downloader"
 repository = "https://github.com/msdx321/md-rs"
 
-[workspace]
-members = [
-    "crates/configuration",
-    "crates/jav",
-    "crates/migration",
-    "crates/runtime",
-    "crates/storage",
-    "crates/telegram",
-]
-resolver = "3"
-
-[workspace.package]
-edition = "2024"
-rust-version = "1.98"
-
-[workspace.dependencies]
+[dependencies]
 aes = "0.9"
 anyhow = "1"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["json", "query"] }
 cbc = "0.2"
 chrono = "0.4"
 dom_query = "0.28"
 env_logger = "0.11"
 futures-util = "0.3"
-grammers-client = { git = "https://codeberg.org/Lonami/grammers", package = "grammers-client" }
+grammers-client = { git = "https://codeberg.org/Lonami/grammers", package = "grammers-client", features = ["fs", "parse_invite_link", "proxy"] }
 grammers-mtsender = { git = "https://codeberg.org/Lonami/grammers", package = "grammers-mtsender" }
 grammers-session = { git = "https://codeberg.org/Lonami/grammers", package = "grammers-session" }
 headless_chrome = "1.0.22"
 indicatif = "0.18"
-libsql = { version = "0.9.30", default-features = false }
+libsql = { version = "0.9.30", default-features = false, features = ["core"] }
 log = "0.4"
-media-config = { path = "crates/configuration" }
-media-jav = { path = "crates/jav" }
-media-migration = { path = "crates/migration" }
-media-runtime = { path = "crates/runtime" }
-media-storage = { path = "crates/storage" }
-media-telegram = { path = "crates/telegram" }
 percent-encoding = "2"
 regex = "1"
 rustc-hash = "2.1"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9"
-tokio = "1"
-tokio-stream = "0.1.18"
-tokio-util = { version = "0.7", default-features = false }
+tempfile = "3.27"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1.18", features = ["sync"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 url = "2"
-wreq = "0.16"
+wreq = { version = "0.16", features = ["stream", "gzip", "brotli", "deflate", "zstd"] }
 wreq-util = "0.2"
-
-[dependencies]
-serde_json.workspace = true
-media-runtime.workspace = true
-media-config.workspace = true
-media-migration.workspace = true
-media-storage.workspace = true
-anyhow.workspace = true
-axum.workspace = true
-env_logger.workspace = true
-log.workspace = true
-tokio = { workspace = true, features = ["full"] }
-media-telegram.workspace = true
-media-jav.workspace = true
 
 [profile.release]
 lto = true

@@ -1,0 +1,400 @@
+//! HLS playlist parsing.
+//!
+//! Handles master playlists (variant selection), media playlists, fMP4 init
+//! segments, byte ranges and AES-128 key declarations. Segments are not
+//! assumed to be MPEG-TS: they may be `.m4s`, ADTS AAC, or extension-less
+//! URLs with query strings.
+
+use std::error::Error;
+
+use regex::Regex;
+use url::Url;
+
+use crate::jav::util::parse_hex;
+
+/// One media segment (or init segment) of an HLS playlist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Segment {
+    pub url: String,
+    /// `(start, length)` from `#EXT-X-BYTERANGE:length@start`.
+    pub byte_range: Option<(u64, u64)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct M3u8Info {
+    /// Selected media playlist and its advertised quality, when available.
+    pub variant: Variant,
+    pub segments: Vec<Segment>,
+    /// fMP4 init segment from `#EXT-X-MAP`, prepended when merging.
+    pub init_segment: Option<Segment>,
+    pub key_url: Option<String>,
+    pub iv: Option<Vec<u8>>,
+    pub total_duration: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Variant {
+    pub uri: String,
+    pub bandwidth: Option<usize>,
+    pub resolution: Option<(usize, usize)>,
+}
+
+fn parse_extinf_duration(line: &str) -> Option<f64> {
+    let rest = line.strip_prefix("#EXTINF:")?;
+    rest.split(',')
+        .next()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|&d| d > 0.0)
+}
+
+/// Parse a `BYTERANGE` attribute (`"82112@752"`, or `"82112"` when the range
+/// continues from the previous one).
+fn parse_byterange_attr(value: &str, last_end: Option<u64>) -> Option<(u64, u64)> {
+    let value = value.trim().trim_matches('"');
+    let mut parts = value.split('@');
+    let len = parts.next()?.trim().parse::<u64>().ok()?;
+    let start = match parts.next() {
+        Some(s) if !s.trim().is_empty() => s.trim().parse::<u64>().ok()?,
+        _ => last_end.unwrap_or(0),
+    };
+    Some((start, len))
+}
+
+/// Extract a quoted attribute such as `URI="init.mp4"`.
+fn extract_attr(attrs: &str, name: &str) -> Option<String> {
+    let re = Regex::new(&format!(r#"{}=\"([^\"]+)\""#, regex::escape(name))).ok()?;
+    re.captures(attrs)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// Extract an unquoted attribute such as `METHOD=AES-128`.
+fn extract_unquoted_attr(attrs: &str, name: &str) -> Option<String> {
+    let re = Regex::new(&format!(r#"{}=([^,\s]+)"#, regex::escape(name))).ok()?;
+    re.captures(attrs)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn Error>> {
+    let mut segments = Vec::new();
+    let mut init_segment = None;
+    let mut key_url = None;
+    let mut iv = None;
+    let mut total_duration = 0.0f64;
+    let mut current_duration: Option<f64> = None;
+    let mut pending_byterange: Option<(u64, u64)> = None;
+    let mut last_byterange_end: Option<u64> = None;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix('#') {
+            let _ = rest;
+            if line.starts_with("#EXTINF:") {
+                current_duration = parse_extinf_duration(line);
+            } else if line.starts_with("#EXT-X-KEY") {
+                let attrs = line.strip_prefix("#EXT-X-KEY:").unwrap_or_default();
+                if attrs.contains("METHOD=NONE") {
+                    key_url = None;
+                    iv = None;
+                } else if extract_unquoted_attr(attrs, "METHOD").as_deref() == Some("AES-128") {
+                    if let Some(uri) = extract_attr(attrs, "URI") {
+                        key_url = Some(base_url.join(&uri)?.to_string());
+                    }
+                    if let Some(iv_hex) = extract_unquoted_attr(attrs, "IV") {
+                        iv = parse_hex(&iv_hex);
+                    }
+                }
+            } else if line.starts_with("#EXT-X-MAP") {
+                let attrs = line.strip_prefix("#EXT-X-MAP:").unwrap_or_default().trim();
+                if let Some(uri) = extract_attr(attrs, "URI") {
+                    let resolved = base_url.join(&uri)?;
+                    let range = extract_attr(attrs, "BYTERANGE")
+                        .and_then(|v| parse_byterange_attr(&v, last_byterange_end));
+                    if let Some((start, len)) = range {
+                        last_byterange_end = Some(start + len);
+                    }
+                    init_segment = Some(Segment {
+                        url: resolved.to_string(),
+                        byte_range: range,
+                    });
+                }
+            } else if line.starts_with("#EXT-X-BYTERANGE") {
+                let value = line.strip_prefix("#EXT-X-BYTERANGE:").unwrap_or_default();
+                if let Some(range) = parse_byterange_attr(value, last_byterange_end) {
+                    last_byterange_end = Some(range.0 + range.1);
+                    pending_byterange = Some(range);
+                }
+            }
+        } else {
+            segments.push(Segment {
+                url: base_url.join(line)?.to_string(),
+                byte_range: pending_byterange.take(),
+            });
+            if let Some(dur) = current_duration.take() {
+                total_duration += dur;
+            }
+        }
+    }
+
+    if total_duration == 0.0 && !segments.is_empty() {
+        // Playlists without EXTINF: assume the usual 6s target duration.
+        total_duration = segments.len() as f64 * 6.0;
+    }
+
+    Ok(M3u8Info {
+        variant: Variant {
+            uri: base_url.to_string(),
+            bandwidth: None,
+            resolution: None,
+        },
+        segments,
+        init_segment,
+        key_url,
+        iv,
+        total_duration,
+    })
+}
+
+fn parse_stream_inf(line: &str) -> (Option<usize>, Option<(usize, usize)>) {
+    let mut bandwidth = None;
+    let mut resolution = None;
+    let parts = line.strip_prefix("#EXT-X-STREAM-INF:").unwrap_or("");
+    for attr in parts.split(',') {
+        let Some((key, val)) = attr.split_once('=') else {
+            continue;
+        };
+        match key.trim().to_uppercase().as_str() {
+            "BANDWIDTH" => bandwidth = val.trim().parse::<usize>().ok(),
+            "RESOLUTION" => {
+                if let Some((w, h)) = val.trim().split_once('x')
+                    && let (Ok(w), Ok(h)) = (w.parse::<usize>(), h.parse::<usize>())
+                {
+                    resolution = Some((w, h));
+                }
+            }
+            _ => {}
+        }
+    }
+    (bandwidth, resolution)
+}
+
+/// Pick a variant by preference: `lowest`, `highest`, or a target height.
+pub fn select_variant(variants: &[Variant], pref: &str) -> Option<Variant> {
+    if variants.is_empty() {
+        return None;
+    }
+    let pref = pref.trim().to_lowercase();
+    let mut sorted = variants.to_vec();
+    sorted.sort_by_key(|v| {
+        (
+            v.resolution.map(|r| r.1).unwrap_or(0),
+            v.bandwidth.unwrap_or(0),
+        )
+    });
+
+    match pref.as_str() {
+        "lowest" => return sorted.first().cloned(),
+        "highest" | "" => return sorted.last().cloned(),
+        _ => {}
+    }
+
+    if let Ok(target) = pref.parse::<usize>() {
+        let at_or_below: Vec<Variant> = sorted
+            .iter()
+            .filter(|v| v.resolution.map(|r| r.1).unwrap_or(0) <= target)
+            .cloned()
+            .collect();
+        if !at_or_below.is_empty() {
+            return at_or_below.last().cloned();
+        }
+    }
+    sorted.last().cloned()
+}
+
+/// Split a master playlist into its variants, resolving relative URIs.
+pub fn parse_master_variants(text: &str, base_url: &Url) -> Vec<Variant> {
+    let mut variants = Vec::new();
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("#EXT-X-STREAM-INF:") {
+            let (bandwidth, resolution) = parse_stream_inf(lines[i]);
+            let mut j = i + 1;
+            while j < lines.len() {
+                let next = lines[j];
+                if !next.is_empty() && !next.starts_with('#') {
+                    if let Ok(uri) = base_url.join(next) {
+                        variants.push(Variant {
+                            uri: uri.to_string(),
+                            bandwidth,
+                            resolution,
+                        });
+                    }
+                    break;
+                }
+                j += 1;
+            }
+            i = j;
+        }
+        i += 1;
+    }
+    variants
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base() -> Url {
+        Url::parse("https://cdn.example.com/video/index.m3u8").unwrap()
+    }
+
+    #[test]
+    fn parses_plain_ts_playlist() {
+        let text = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n\
+#EXTINF:10.0,\nseg0.ts\n#EXTINF:9.5,\nsub/seg1.ts\n";
+        let info = parse_media_m3u8(text, &base()).unwrap();
+        assert_eq!(info.segments.len(), 2);
+        assert_eq!(
+            info.segments[0].url,
+            "https://cdn.example.com/video/seg0.ts"
+        );
+        assert_eq!(
+            info.segments[1].url,
+            "https://cdn.example.com/video/sub/seg1.ts"
+        );
+        assert_eq!(info.segments[0].byte_range, None);
+        assert!(info.init_segment.is_none());
+        assert!(info.key_url.is_none());
+        assert_eq!(info.total_duration, 19.5);
+    }
+
+    #[test]
+    fn parses_aes_key_and_iv() {
+        let text = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0x0000000000000000000000000000002a\n\
+#EXTINF:10.0,\ns0.ts\n";
+        let info = parse_media_m3u8(text, &base()).unwrap();
+        assert_eq!(
+            info.key_url.as_deref(),
+            Some("https://cdn.example.com/video/key.bin")
+        );
+        let mut expected = [0u8; 16];
+        expected[15] = 0x2a;
+        assert_eq!(info.iv.as_deref(), Some(&expected[..]));
+    }
+
+    #[test]
+    fn parses_fmp4_with_map_and_byterange() {
+        let text = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:6\n\
+#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"720@0\"\n\
+#EXTINF:6.0,\nseg1.m4s\n\
+#EXT-X-BYTERANGE:82112@752\n#EXTINF:6.0,\nseg2.m4s\n\
+#EXTINF:6.0,\n/other/seg3.m4s\n\
+#EXTINF:6.0,\n//other.example.com/x/seg4.m4s\n";
+        let info = parse_media_m3u8(text, &base()).unwrap();
+        let init = info.init_segment.expect("init segment parsed");
+        assert_eq!(init.url, "https://cdn.example.com/video/init.mp4");
+        assert_eq!(init.byte_range, Some((0, 720)));
+        assert_eq!(info.segments.len(), 4);
+        assert_eq!(info.segments[1].byte_range, Some((752, 82112)));
+        assert_eq!(
+            info.segments[2].url,
+            "https://cdn.example.com/other/seg3.m4s"
+        );
+        assert_eq!(info.segments[3].url, "https://other.example.com/x/seg4.m4s");
+    }
+
+    #[test]
+    fn byterange_without_offset_continues_from_previous() {
+        let text = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"720@0\"\n\
+#EXTINF:6.0,\nseg1.m4s\n\
+#EXT-X-BYTERANGE:82112\n#EXTINF:6.0,\nseg2.m4s\n";
+        let info = parse_media_m3u8(text, &base()).unwrap();
+        assert_eq!(info.init_segment.unwrap().byte_range, Some((0, 720)));
+        assert_eq!(info.segments[1].byte_range, Some((720, 82112)));
+    }
+
+    #[test]
+    fn key_method_none_disables_encryption() {
+        let text = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n\
+#EXTINF:10.0,\ns0.ts\n\
+#EXT-X-KEY:METHOD=NONE\n\
+#EXTINF:10.0,\ns1.ts\n";
+        let info = parse_media_m3u8(text, &base()).unwrap();
+        assert!(
+            info.key_url.is_none(),
+            "later METHOD=NONE must clear the key"
+        );
+        assert_eq!(info.segments.len(), 2);
+    }
+
+    #[test]
+    fn segments_with_query_strings_and_no_extension() {
+        let text = "#EXTM3U\n#EXTINF:6.0,\nseg1?token=abc&exp=1\n#EXTINF:6.0,\nclip\n";
+        let info = parse_media_m3u8(text, &base()).unwrap();
+        assert_eq!(
+            info.segments[0].url,
+            "https://cdn.example.com/video/seg1?token=abc&exp=1"
+        );
+        assert_eq!(info.segments[1].url, "https://cdn.example.com/video/clip");
+    }
+
+    #[test]
+    fn key_attributes_in_any_order_and_bom() {
+        let text = "\u{feff}#EXTM3U\n#EXT-X-KEY:URI=\"key.bin\",METHOD=AES-128,KEYFORMAT=\"identity\"\n\
+#EXTINF:10.0,\ns0.ts\n";
+        let info = parse_media_m3u8(text, &base()).unwrap();
+        assert_eq!(
+            info.key_url.as_deref(),
+            Some("https://cdn.example.com/video/key.bin")
+        );
+        assert_eq!(info.segments.len(), 1, "BOM line must not become a segment");
+    }
+
+    #[test]
+    fn parses_master_playlist_variants() {
+        let text = "#EXTM3U\n\
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nlow/index.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720\nhigh/index.m3u8\n";
+        let variants = parse_master_variants(text, &base());
+        assert_eq!(variants.len(), 2);
+        assert_eq!(
+            variants[1].uri,
+            "https://cdn.example.com/video/high/index.m3u8"
+        );
+        assert_eq!(variants[1].resolution, Some((1280, 720)));
+    }
+
+    #[test]
+    fn variant_selection_modes() {
+        let variants = vec![
+            Variant {
+                uri: "a".into(),
+                bandwidth: Some(1),
+                resolution: Some((640, 360)),
+            },
+            Variant {
+                uri: "b".into(),
+                bandwidth: Some(2),
+                resolution: Some((1280, 720)),
+            },
+            Variant {
+                uri: "c".into(),
+                bandwidth: Some(3),
+                resolution: Some((1920, 1080)),
+            },
+        ];
+        assert_eq!(select_variant(&variants, "highest").unwrap().uri, "c");
+        assert_eq!(select_variant(&variants, "lowest").unwrap().uri, "a");
+        assert_eq!(select_variant(&variants, "720").unwrap().uri, "b");
+        assert_eq!(select_variant(&variants, "480").unwrap().uri, "a");
+        assert_eq!(select_variant(&variants, "2160").unwrap().uri, "c");
+    }
+}
