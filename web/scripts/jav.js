@@ -1,4 +1,4 @@
-import { $, api, bindTabs, connectEvents, bytes, reconcileTaskRows, historyPeriod } from "./shared.js";
+import { $, api, bindTabs, connectEvents, pollWhenVisible, bytes, reconcileTaskRows, historyPeriod, dateTime, label } from "./shared.js";
 
 const toast = (msg, kind = '') => {
   const el = document.createElement('div');
@@ -24,14 +24,14 @@ function renderStatus(s) {
   historyPeriod("jav", s.history_retention_days);
   $("history-empty").textContent = `No downloads in the last ${s.history_retention_days} days.`;
   statusRevision += 1;
-  const src = s.cookie_source === 'browser' ? 'minted' : 'pasted';
-  $('pill-cookie').textContent = s.cookie_refreshing ? 'minting clearance…'
-    : s.cookie_error ? 'clearance refresh failed'
-    : s.cookie_configured ? 'clearance ' + src : 'no clearance';
+  const src = s.cookie_source === 'browser' ? 'automatic' : 'manual';
+  $('pill-cookie').textContent = s.cookie_refreshing ? 'Refreshing access…'
+    : s.cookie_error ? 'Access refresh failed'
+    : s.cookie_configured ? 'Site access ready' : 'Site access pending';
   $('pill-cookie').className = 'pill ' + (s.cookie_refreshing ? '' : s.cookie_error || !s.cookie_configured ? 'err' : 'ok');
   const sched = s.scheduler;
-  $('pill-sched').textContent = sched.running ? 'job running'
-    : sched.enabled ? 'next ' + shortTime(sched.next_run_at) : 'schedule off';
+  $('pill-sched').textContent = sched.running ? 'Job running'
+    : sched.enabled ? 'Next run: ' + dateTime(sched.next_run_at) : 'Schedule disabled';
   $('pill-sched').className = 'pill ' + (sched.running ? 'ok' : '');
   $('stat-files').textContent = s.downloaded.toLocaleString();
   $('stat-bytes').textContent = bytes(s.downloaded_bytes);
@@ -43,23 +43,23 @@ function renderStatus(s) {
   const detail = $('cookie-detail');
   if (detail) {
     if (s.cookie_refreshing) {
-      detail.textContent = 'Minting clearance — waiting for the browser to finish.';
+      detail.textContent = 'Refreshing site access. Waiting for the browser to finish.';
     } else if (s.cookie_error) {
       detail.textContent = 'Clearance refresh failed: ' + s.cookie_error;
     } else if (!s.cookie_minting) {
-      detail.textContent = 'Automatic minting is disabled — paste a cookie under Advanced settings.';
+      detail.textContent = 'Automatic site access is disabled. Paste a cookie under Advanced settings.';
     } else if (s.cookie_configured) {
       const age = s.cookie_age_secs == null ? '' : `, ${duration(s.cookie_age_secs)} old`;
-      detail.textContent = `Clearance cookie ${src}${age}. Reused until the site rejects it.` +
-        (s.browser_running ? ' Minting browser is warm.' : '');
+      detail.textContent = `Access cookie: ${src}${age}. Reused until the site rejects it.` +
+        (s.browser_running ? ' Browser ready.' : '');
     } else {
-      detail.textContent = 'No cookie yet. Automatic minting runs only if the site requests clearance.';
+      detail.textContent = 'Site access will refresh automatically when needed.';
     }
   }
 
   $('settings-banner').innerHTML = (s.cookie_configured || s.cookie_minting) ? '' :
-    '<div class="banner warn">No <code>cf_clearance</code> cookie and automatic minting is off — ' +
-    'enable automatic clearance or paste a cookie under Advanced settings.</div>';
+    '<div class="banner warn">Site access is not configured. Enable automatic site access ' +
+    'or paste a cookie under Advanced settings.</div>';
 }
 async function loadStatus() {
   const revision = statusRevision;
@@ -73,12 +73,6 @@ const duration = (secs) => {
   if (secs < 60) return `${secs}s`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m`;
   return `${Math.floor(secs / 3600)}h`;
-};
-const shortTime = (iso) => {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d)) return '—';
-  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
 // ── popular ───────────────────────────────────────────────────────────────
@@ -151,7 +145,7 @@ async function download(ds) {
 // ── tasks ─────────────────────────────────────────────────────────────────
 let tasks = [];
 function renderTasks() {
-  tasks = tasks.filter((t) => t.state !== 'completed');
+  tasks = tasks.filter((t) => !['completed', 'cancelled'].includes(t.state));
   $('btn-clear-failed').disabled = !tasks.some((t) => t.state === 'failed');
   const active = tasks.filter((t) => !['completed', 'failed', 'cancelled'].includes(t.state)).length;
   $('task-count').textContent = active ? `(${active})` : '';
@@ -163,14 +157,14 @@ function renderTasks() {
     const pct = t.state === 'completed' ? 100 : t.total_segments > 0 ? Math.min(100, (t.done_segments / t.total_segments) * 100)
               : t.total_bytes > 0 ? Math.min(100, (t.downloaded_bytes / t.total_bytes) * 100) : 0;
     const barClass = t.state === 'completed' ? 'done' : t.state === 'failed' ? 'fail' : '';
-    const speed = t.speed_kbps > 0 && t.state === 'running' ? (t.speed_kbps / 1024).toFixed(2) + ' MB/s' : '—';
+    const speed = t.speed_kbps > 0 && t.state === 'running' ? bytes(t.speed_kbps * 1024) + '/s' : '—';
     const detail = t.state === 'running' || t.state === 'paused'
       ? (t.total_segments ? `${t.done_segments}/${t.total_segments} seg · ` : '') + bytes(t.downloaded_bytes)
       : (t.message || '');
     return `<tr data-task-id="${esc(t.id)}">
       <td><span class="truncate" title="${esc(t.title || t.url)}">${esc(t.title || t.url)}</span></td>
       <td class="muted"><span class="truncate" title="${esc(t.source_url || 'Manual')}">${esc(t.source_url || 'Manual')}</span></td>
-      <td><span class="tag ${t.state}">${t.state}</span></td>
+      <td><span class="tag ${t.state}">${label(t.state)}</span></td>
       <td><div class="bar ${barClass}" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct.toFixed(1)}%"></i></div><span class="muted">${pct.toFixed(0)}%</span></td>
       <td class="muted">${speed}</td>
       <td class="muted"><span class="truncate" title="${esc(detail)}">${esc(detail)}</span></td>
@@ -196,7 +190,7 @@ async function taskAction(act, id) {
     if (act === 'dismiss') {
       tasks = tasks.filter((t) => encodeURIComponent(t.id) !== id);
       renderTasks();
-    }
+    } else await loadTasks();
   } catch (e) { toast(e.message, 'err'); }
 }
 async function loadTasks() {
@@ -213,8 +207,8 @@ async function loadHistory() {
         <td><span class="truncate" title="${esc(r.path || r.title)}">${esc(r.title || r.url)}</span></td>
         <td class="muted">${r.rank != null ? '#' + r.rank : '—'}</td>
         <td class="muted">${bytes(r.size)}</td>
-        <td class="muted">${shortTime(r.finished_at)}</td>
-        <td><span class="tag ${r.status === 'completed' ? 'completed' : 'failed'}">${r.status}</span></td>
+        <td class="muted">${dateTime(r.finished_at)}</td>
+        <td><span class="tag ${r.status === 'completed' ? 'completed' : 'failed'}">${esc(label(r.status))}</span></td>
         <td><button class="tiny" data-forget="${esc(r.id)}">Forget</button></td>
       </tr>`).join('');
     document.querySelectorAll('#history-body button[data-forget]').forEach((btn) => {
@@ -270,36 +264,80 @@ function configuredLinks(cfg) {
   return cfg.links?.length ? cfg.links : [{ url: cfg.popular_path, daily_quota: cfg.top_n }];
 }
 function addLinkRow(link = { url: '', daily_quota: 10 }) {
-  const row = document.createElement('div');
-  row.className = 'ranking-link';
-  row.innerHTML = `<label class="field link-url">Ranking URL or path
-      <input data-link-url required value="${esc(link.url)}" placeholder="https://missav.ai/cn/fc2?sort=weekly_views"></label>
-    <label class="field link-quota">Per-run quota
-      <input data-link-quota type="number" required min="1" max="100" value="${esc(link.daily_quota)}"></label>
-    <button type="button" class="tiny danger" data-remove-link>Remove</button>`;
+  const row = document.createElement('details');
+  row.className = 'ranking-link settings-item';
+  row.innerHTML = `<summary><span class="settings-item-icon" aria-hidden="true">↗</span><span class="settings-item-summary"><strong data-link-name></strong><span data-link-preview></span></span><span class="settings-item-edit">Edit</span></summary>
+    <div class="settings-item-fields">
+      <label class="field full">Ranking URL or path
+        <input data-link-url required placeholder="https://missav.ai/cn/fc2?sort=weekly_views"><span class="hint">Use a full ranking URL or a path on your configured site.</span></label>
+      <label class="field">Downloads per run
+        <input data-link-quota type="number" required min="1" max="100"><span class="hint">Number of new completed downloads to save from this link.</span></label>
+      <div class="settings-item-actions full"><button type="button" class="tiny danger" data-remove-link>Remove link</button></div>
+    </div>`;
+  row.querySelector('[data-link-url]').value = link.url;
+  row.querySelector('[data-link-quota]').value = link.daily_quota;
+  const updateSummary = () => {
+    row.querySelector('[data-link-name]').textContent = row.querySelector('[data-link-url]').value.trim() || 'New ranking link';
+    const quota = row.querySelector('[data-link-quota]').value;
+    row.querySelector('[data-link-preview]').textContent = quota ? `${quota} ${quota === '1' ? 'download' : 'downloads'} per run` : 'Set a download quota';
+  };
+  updateSummary();
+  row.addEventListener('input', updateSummary);
   row.querySelector('[data-remove-link]').onclick = () => {
+    const next = row.nextElementSibling || row.previousElementSibling;
     row.remove();
     updateLinkButtons();
     updateSettingsControls();
+    (next && !next.hidden ? next.querySelector('summary') : $('btn-add-link')).focus();
   };
   $('ranking-links').appendChild(row);
-  updateLinkButtons();
+  return row;
 }
 function updateLinkButtons() {
   const buttons = document.querySelectorAll('[data-remove-link]');
   buttons.forEach((button) => { button.disabled = buttons.length === 1; });
+  const rows = [...$('ranking-links').children];
+  const query = $('ranking-search').value.trim().toLowerCase();
+  let visible = 0;
+  for (const row of rows) {
+    row.hidden = !row.querySelector('[data-link-url]').value.toLowerCase().includes(query);
+    if (!row.hidden) visible++;
+  }
+  $('ranking-count').textContent = rows.length;
+  $('ranking-search-count').textContent = query ? `${visible} of ${rows.length} links` : `${rows.length} ranking ${rows.length === 1 ? 'link' : 'links'}`;
+  $('no-ranking-matches').hidden = visible > 0;
 }
+$('ranking-search').addEventListener('input', updateLinkButtons);
+$('ranking-search').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') event.preventDefault();
+});
+$('settings-form').addEventListener('invalid', (event) => {
+  const row = event.target.closest('.ranking-link');
+  if (row) {
+    $('ranking-search').value = '';
+    updateLinkButtons();
+    row.open = true;
+  }
+}, true);
 function populatePopularLinks(cfg) {
   const selected = $('popular-link').value;
   $('popular-link').innerHTML = configuredLinks(cfg).map((link, index) =>
     `<option value="${index}">${esc(link.url)} · ${link.daily_quota}/run</option>`).join('');
   if ([...$('popular-link').options].some((option) => option.value === selected)) $('popular-link').value = selected;
 }
-$('btn-add-link').onclick = () => { addLinkRow(); updateSettingsControls(); };
+$('btn-add-link').onclick = () => {
+  $('ranking-search').value = '';
+  const row = addLinkRow();
+  updateLinkButtons();
+  row.open = true;
+  row.querySelector('input').focus();
+  updateSettingsControls();
+};
 $('popular-link').onchange = () => loadPopular(1);
 function populateSettings(cfg) {
   $('ranking-links').innerHTML = '';
   configuredLinks(cfg).forEach(addLinkRow);
+  updateLinkButtons();
   for (const key of FIELDS) $(key).value = String(cfg[key] ?? '');
   updateSettingsControls();
 }
@@ -354,7 +392,7 @@ $('btn-run').onclick = async () => {
   catch (e) { toast(e.message, 'err'); }
 };
 $('btn-pause').onclick = async () => { await api('/jav/api/daily/pause', { method: 'POST' }); toast('Pausing all downloads'); };
-$('btn-cancel').onclick = async () => { await api('/jav/api/daily/cancel', { method: 'POST' }); toast('Cancelling all downloads'); };
+$('btn-cancel').onclick = async () => { await api('/jav/api/daily/cancel', { method: 'POST' }); toast('Cancelling all downloads'); await loadTasks(); };
 $('btn-resume').onclick = async () => {
   const r = await api('/jav/api/tasks/resume-all', { method: 'POST' });
   toast(`Resumed ${r.count} task(s)`, 'ok');
@@ -404,7 +442,7 @@ for (const id of ['btn-run', 'btn-pause', 'btn-cancel', 'btn-resume', 'btn-clear
   button.onclick = () => runAction(button, action);
 }
 
-// Live task and status updates. Polling below only refreshes ages/falls back.
+// Live snapshots cover startup and reconnects; poll only if the stream is down.
 const es = connectEvents('/jav/api/events');
 es.addEventListener('status', (ev) => renderStatus(JSON.parse(ev.data)));
 es.addEventListener('task', (ev) => {
@@ -417,14 +455,16 @@ es.addEventListener('task', (ev) => {
     if ($('history-tab').getAttribute('aria-selected') === 'true') loadHistory();
   }
 });
-es.addEventListener('open', () => { loadTasks(); loadStatus(); });
-window.addEventListener('online', loadStatus);
+es.addEventListener('open', () => {
+  loadTasks();
+  if ($('history-tab').getAttribute('aria-selected') === 'true') loadHistory();
+});
 
-loadStatus();
-loadTasks();
 loadSettings().catch((e) => {
   toast('Could not load settings: ' + e.message, 'err');
   $('btn-save').disabled = true;
   $('save-note').textContent = 'Could not load settings. Reload to try again.';
 });
-setInterval(loadStatus, 15000);
+pollWhenVisible(() => {
+  if (es.readyState !== EventSource.OPEN) { loadStatus(); loadTasks(); }
+}, 15000);

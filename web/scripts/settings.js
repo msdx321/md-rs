@@ -2,27 +2,20 @@ import { $, api } from './shared.js';
 const paths = ['host', 'telegram_download_path', 'jav_download_path', 'temp_path'];
 const modules = ['telegram', 'jav'];
 let current;
+let saving = false;
 function visibility() {
   for (const name of modules) {
     const daily = $(`${name}-mode`).value === 'daily';
-    for (const key of ['daily_time', 'interval_secs']) {
+    const enabled = $(`${name}-enabled`).value === 'true';
+    for (const key of ['mode', 'daily_time', 'interval_secs', 'run_on_start']) {
       const input = $(`${name}-${key}`);
-      input.disabled = key === 'daily_time' ? !daily : daily;
-      input.closest('.field').hidden = input.disabled;
+      const inactive = key === 'daily_time' ? !daily : key === 'interval_secs' ? daily : false;
+      input.disabled = !enabled || inactive;
+      input.closest('.field').hidden = inactive;
     }
   }
 }
-function render(config) {
-  current = config;
-  for (const key of [...paths, 'port', 'history_retention_days']) $(key).value = config[key];
-  for (const name of modules) for (const [key, value] of Object.entries(config.schedules[name])) $(`${name}-${key}`).value = String(value);
-  $('common-fields').disabled = false;
-  visibility();
-}
-$('common-settings').addEventListener('change', visibility);
-$('reload-settings').addEventListener('click', () => { render(current); $('settings-result').textContent = ''; });
-$('common-settings').addEventListener('submit', async event => {
-  event.preventDefault();
+function read() {
   const config = structuredClone(current);
   for (const key of paths) config[key] = $(key).value.trim();
   config.port = Number($('port').value);
@@ -31,9 +24,57 @@ $('common-settings').addEventListener('submit', async event => {
     const raw = $(`${name}-${key}`).value;
     config.schedules[name][key] = typeof value === 'boolean' ? raw === 'true' : typeof value === 'number' ? Number(raw) : raw;
   }
+  return config;
+}
+function changed() { return current && JSON.stringify(read()) !== JSON.stringify(current); }
+function update() {
+  const dirty = changed();
+  $('save-settings').disabled = saving || !dirty;
+  $('reload-settings').disabled = saving || !dirty;
+  $('save-note').classList.toggle('is-dirty', Boolean(dirty));
+  $('save-note').textContent = saving ? 'Saving changes…' : dirty ? 'Unsaved changes' : current ? 'All changes saved' : 'Loading settings…';
+}
+function render(config) {
+  current = config;
+  for (const key of [...paths, 'port', 'history_retention_days']) $(key).value = config[key];
+  for (const name of modules) for (const [key, value] of Object.entries(config.schedules[name])) $(`${name}-${key}`).value = String(value);
+  visibility();
+  update();
+}
+$('common-settings').addEventListener('input', () => { $('settings-result').hidden = true; update(); });
+$('common-settings').addEventListener('change', () => { visibility(); update(); });
+$('reload-settings').addEventListener('click', () => { render(current); $('settings-result').hidden = true; });
+$('common-settings').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (saving || !changed()) return;
+  const config = read();
+  const restart = config.host !== current.host || config.port !== current.port;
+  saving = true;
   $('common-fields').disabled = true;
-  try { render(await api('/api/config', {method:'PUT', body:JSON.stringify(config)})); $('settings-result').textContent = 'Settings saved. Restart to apply web host or port changes.'; }
-  catch (error) { $('settings-result').textContent = error.message; }
-  finally { $('common-fields').disabled = false; visibility(); }
+  $('settings-result').hidden = true;
+  update();
+  try {
+    render(await api('/api/config', {method:'PUT', body:JSON.stringify(config)}));
+    $('settings-result').textContent = restart ? 'Settings saved. Restart the application to apply host or port changes.' : 'Settings saved.';
+    $('settings-result').className = 'banner';
+  } catch (error) {
+    $('settings-result').textContent = error.message;
+    $('settings-result').className = 'banner err';
+  } finally {
+    saving = false;
+    $('common-fields').disabled = false;
+    $('settings-result').hidden = false;
+    visibility();
+    update();
+  }
 });
-api('/api/config').then(render).catch(error => { $('settings-result').textContent = error.message; });
+window.addEventListener('beforeunload', event => { if (changed()) event.preventDefault(); });
+api('/api/config').then(config => {
+  render(config);
+  $('common-fields').disabled = false;
+}).catch(error => {
+  $('settings-result').textContent = error.message;
+  $('settings-result').className = 'banner err';
+  $('settings-result').hidden = false;
+  $('save-note').textContent = 'Could not load settings. Reload to try again.';
+});

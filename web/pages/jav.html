@@ -4,10 +4,10 @@
   <div class="stat"><span>In progress</span><strong id="stat-active">—</strong></div>
 </div>
 <div class="control-panel">
-  <div class="control-copy"><h1>Scheduled downloads</h1><p>Save the most-watched videos. Already saved files are skipped.</p>
+  <div class="control-copy"><h2>Scheduled downloads</h2><p>Save the most-watched videos. Already saved files are skipped.</p>
     <div class="status-row"><span class="pill" id="pill-cookie" role="status">Checking cookie</span><span class="pill" id="pill-sched" role="status">Checking schedule</span></div>
   </div>
-  <button class="primary" id="btn-run">Run job</button>
+  <button class="primary" id="btn-run">Run now</button>
 </div>
 <div class="panel">
 <nav role="tablist" aria-label="Media library">
@@ -24,11 +24,11 @@
       <span class="muted" id="popular-note"></span>
     </div>
     <div id="popular-banner"></div>
-    <div class="grid" id="popular-grid"></div>
-    <div class="actions">
-      <button id="btn-prev">‹ Previous</button>
+    <div class="grid" id="popular-grid"><div class="empty">Loading videos…</div></div>
+    <div class="actions pagination">
+      <button id="btn-prev" disabled>‹ Previous</button>
       <span class="muted">Page <b id="page-num">1</b></span>
-      <button id="btn-next">Next ›</button>
+      <button id="btn-next" disabled>Next ›</button>
     </div>
   </section>
 
@@ -42,9 +42,10 @@
       <button id="btn-reload-history">Reload</button>
       <button class="danger" id="btn-clear-history">Clear history (keep files)</button>
     </div>
-    <div class="table-scroll" tabindex="0" role="region" aria-label="Download records"><table>
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Download records"><table data-resizable="history">
+      <colgroup><col><col><col><col><col><col></colgroup>
       <thead>
-        <tr><th>Title</th><th>Rank</th><th>Size</th><th>Finished</th><th>Status</th><th></th></tr>
+        <tr><th data-min-width="160">Title</th><th>Rank</th><th>Size</th><th data-min-width="220">Finished</th><th>Status</th><th>Actions</th></tr>
       </thead>
       <tbody id="history-body"></tbody>
     </table></div>
@@ -53,13 +54,15 @@
 
   <section id="tab-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0">
     <div id="settings-banner"></div>
-    <div class="settings-heading"><h2>Settings</h2><p>Choose what to save and when to download it.</p></div>
+    <div class="settings-heading"><h2>JAV preferences</h2><p>Choose what to save and how to download it. Manage timing in <a href="/settings/">shared settings</a>.</p></div>
     <form id="settings-form">
     <fieldset id="settings-fields" disabled>
     <div class="settings-grid">
-<div class="settings-card ranking-links"><h3>Ranking links</h3><p class="settings-description">Each link has its own quota per run of new completed downloads. Shared videos are downloaded once. Failures are replaced within the page limit for each link.</p>
-    <div id="ranking-links"></div>
-    <button type="button" id="btn-add-link">Add link</button>
+<div class="settings-card ranking-links"><div class="settings-list-heading"><h3>Ranking links <span id="ranking-count" class="tag">0</span></h3><button type="button" id="btn-add-link">Add link</button></div><p class="settings-description">Open a link to edit its URL and download quota. Shared videos are downloaded once. Changes take effect after saving.</p>
+    <div class="settings-list-search"><label for="ranking-search">Find a ranking link</label><input id="ranking-search" type="search" placeholder="Search by URL or path" autocomplete="off" aria-controls="ranking-links"><span id="ranking-search-count" class="hint" role="status"></span></div>
+    <div id="ranking-links" class="settings-list"></div>
+    <p id="no-ranking-matches" class="empty" hidden>No matching links. Try another URL or path.</p>
+    <p class="hint">Keep at least one ranking link. Failed downloads are replaced within each link’s page limit.</p>
 </div>
 <div class="settings-card"><h3>Downloads</h3><p class="settings-description">Choose your preferred quality.</p><div class="form">
 
@@ -91,19 +94,19 @@
         <input id="max_pages" type="number" required min="1" max="20">
       </div></div></div>
 <div class="settings-card"><h3>Site access</h3><p class="settings-description">Automatic clearance handles site access for you.</p><div class="form">      <div class="field">
-        <label for="browser_enabled">Automatic cookie minting</label>
+        <label for="browser_enabled">Automatic site access</label>
         <select id="browser_enabled">
           <option value="true">Enabled</option>
           <option value="false">Disabled (paste a cookie instead)</option>
         </select>
       </div>
       <div class="field full">
-        <label>Clearance</label>
+        <label for="btn-refresh-cookie">Site access</label>
         <button type="button" id="btn-refresh-cookie" class="secondary">Refresh cookie now</button>
         <span class="hint" id="cookie-detail">Checking…</span>
       </div></div></div>
     </div>
-    <details class="settings-advanced"><summary>Advanced settings <span>Performance, browser overrides and server</span></summary>
+    <details class="settings-advanced"><summary>Advanced settings <span>Performance and browser overrides</span></summary>
     <div class="settings-grid">
 <div class="settings-card"><h3>Performance</h3><p class="settings-description">Higher concurrency uses more bandwidth and connections.</p><div class="form">      <div class="field">
         <label for="concurrent_videos">Concurrent videos</label>

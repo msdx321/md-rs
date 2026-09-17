@@ -15,30 +15,58 @@ let saving = false;
 let chatSequence = 0;
 let originalChats = [];
 function updateChatEmpty() {
-  $('no-subscriptions').hidden = $('subscribed-chats').children.length > 0;
+  const rows = [...$('subscribed-chats').children];
+  const query = $('chat-search').value.trim().toLowerCase();
+  let visible = 0;
+  for (const row of rows) {
+    const text = `${row.querySelector('[data-chat-id]').value} ${row.querySelector('[data-chat-filter]').value}`.toLowerCase();
+    row.hidden = query !== '' && !text.includes(query);
+    if (!row.hidden) visible++;
+  }
+  $('subscription-count').textContent = rows.length;
+  $('chat-search-count').textContent = query ? `${visible} of ${rows.length} chats` : `${rows.length} subscribed ${rows.length === 1 ? 'chat' : 'chats'}`;
+  $('no-subscriptions').hidden = rows.length > 0;
+  $('no-chat-matches').hidden = rows.length === 0 || visible > 0;
 }
+$('chat-search').addEventListener('input', updateChatEmpty);
+$('chat-search').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') event.preventDefault();
+});
 function addChat(chat = { chat_id: '', download_filter: null }) {
-  const row = document.createElement('div');
-  row.className = 'subscription-row';
+  const row = document.createElement('details');
+  row.className = 'subscription-row settings-item';
   const id = ++chatSequence;
-  row.innerHTML = `<div class="field"><label for="chat-id-${id}">Chat username or ID</label><input id="chat-id-${id}" data-chat-id required placeholder="@channel or -1001234567890"></div>
-    <div class="field"><label for="chat-filter-${id}">Download filter (optional)</label><input id="chat-filter-${id}" data-chat-filter placeholder="media_type == 'video'"></div>
-    <div class="field"><label for="chat-cursor-${id}">Last read message ID (optional)</label><input id="chat-cursor-${id}" data-chat-cursor type="number" min="0" max="2147483647" step="1" placeholder="Keep saved cursor"><span class="hint">Blank keeps the saved cursor. Set 0 to scan from the beginning.</span></div>
-    <button type="button" class="danger" data-remove-chat>Remove</button>`;
+  row.innerHTML = `<summary><span class="settings-item-icon" aria-hidden="true">#</span><span class="settings-item-summary"><strong data-chat-name></strong><span data-chat-preview></span></span><span class="settings-item-edit">Edit</span></summary>
+    <div class="settings-item-fields">
+    <div class="field"><label for="chat-id-${id}">Chat username or ID</label><input id="chat-id-${id}" data-chat-id required placeholder="@channel or -1001234567890"><span class="hint">Your Telegram account must have access to this chat.</span></div>
+    <div class="field"><label for="chat-cursor-${id}">Last read message ID</label><input id="chat-cursor-${id}" data-chat-cursor type="number" min="0" max="2147483647" step="1" placeholder="Keep saved position"><span class="hint">Optional. Blank keeps the saved position; 0 scans from the beginning.</span></div>
+    <div class="field full"><label for="chat-filter-${id}">Download filter</label><input id="chat-filter-${id}" data-chat-filter placeholder="media_type == 'video'"><span class="hint">Optional. For example: media_type == 'video' and file_size &gt; 10MB. Blank includes all matching media.</span></div>
+    <div class="settings-item-actions full"><button type="button" class="danger tiny" data-remove-chat>Remove subscription</button></div></div>`;
   row.querySelector('[data-chat-id]').value = chat.chat_id;
   row.querySelector('[data-chat-filter]').value = chat.download_filter || '';
   row.querySelector('[data-chat-cursor]').value = chat.last_read_message_id ?? '';
+  const updateSummary = () => {
+    row.querySelector('[data-chat-name]').textContent = row.querySelector('[data-chat-id]').value.trim() || 'New subscription';
+    row.querySelector('[data-chat-preview]').textContent = row.querySelector('[data-chat-filter]').value.trim() || 'All matching media';
+  };
+  updateSummary();
+  row.addEventListener('input', updateSummary);
   row.querySelector('[data-remove-chat]').addEventListener('click', () => {
+    const next = row.nextElementSibling || row.previousElementSibling;
     row.remove();
     updateChatEmpty();
     update();
+    (next && !next.hidden ? next.querySelector('summary') : $('btn-add-chat')).focus();
   });
   $('subscribed-chats').append(row);
-  updateChatEmpty();
   return row;
 }
 $('btn-add-chat').addEventListener('click', () => {
-  addChat().querySelector('input').focus();
+  $('chat-search').value = '';
+  const row = addChat();
+  updateChatEmpty();
+  row.open = true;
+  row.querySelector('input').focus();
   update();
 });
 const split = (value) => value.split(',').map((item) => item.trim()).filter(Boolean);
@@ -69,6 +97,16 @@ function show(config, resetBaseline = true) {
   saved = JSON.stringify(read());
   update();
 }
+
+// A required field may be inside a collapsed or filtered subscription.
+form.addEventListener('invalid', (event) => {
+  const row = event.target.closest('.subscription-row');
+  if (row) {
+    $('chat-search').value = '';
+    updateChatEmpty();
+    row.open = true;
+  }
+}, true);
 
 function update() {
   const dirty = saved !== null && JSON.stringify(read()) !== saved;

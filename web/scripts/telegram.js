@@ -1,5 +1,5 @@
 import "./telegram-settings.js";
-import { api, bindTabs, connectEvents, reconcileTaskRows, historyPeriod } from "./shared.js";
+import { api, bindTabs, connectEvents, reconcileTaskRows, historyPeriod, dateTime, label, sizeLabel } from "./shared.js";
 
 const statusEl = document.querySelector("#status");
 const requestEl = document.querySelector("#request-status");
@@ -96,17 +96,17 @@ function render(snapshot) {
   paused = snapshot.paused;
   cancelling = snapshot.cancelling;
   updateControls();
-  statusEl.textContent = cancelling ? 'cancelling' : paused ? 'paused' : snapshot.status;
+  statusEl.textContent = cancelling ? 'Cancelling' : paused ? 'Paused' : snapshot.next_run_at ? `Next run: ${dateTime(snapshot.next_run_at)}` : label(snapshot.status);
   statusEl.className = 'pill ' + (snapshot.status === 'running' && !paused && !cancelling ? 'ok' : '');
   const loginBadge = document.querySelector('#pill-login');
   const ready = snapshot.login?.step === 'ready';
-  loginBadge.textContent = ready ? 'connected' : 'login required';
+  loginBadge.textContent = ready ? 'Connected' : 'Login required';
   loginBadge.className = 'pill ' + (ready ? 'ok' : 'err');
   document.querySelector('#task-count').textContent = snapshot.active.length ? `(${snapshot.active.length})` : '';
   requestEl.textContent = snapshot.request_status;
   requestEl.classList.toggle("is-error", snapshot.request_status.startsWith("Could not"));
-  filesEl.textContent = snapshot.downloaded_files;
-  bytesEl.textContent = snapshot.downloaded_bytes;
+  filesEl.textContent = snapshot.downloaded_files.toLocaleString();
+  bytesEl.textContent = sizeLabel(snapshot.downloaded_bytes);
   activeEl.textContent = snapshot.active_count;
 
   completedEl.replaceChildren();
@@ -131,13 +131,13 @@ function render(snapshot) {
       <div class="path"></div>
     `;
     setText(".file", item.file_name, card);
-    setText(".size", item.size, card);
+    setText(".size", sizeLabel(item.size), card);
     setText(".msg", `msg ${item.msg_id}`, card);
     setText(".path", item.path, card);
     const date = new Date(item.completed_at);
     const time = card.querySelector("time");
     time.dateTime = date.toISOString();
-    time.textContent = `Saved ${date.toLocaleString()}`;
+    time.textContent = `Saved ${dateTime(item.completed_at)}`;
     completedEl.append(card);
   }
 
@@ -151,7 +151,7 @@ function render(snapshot) {
     row.innerHTML = `
       <td><span class="truncate file"></span></td>
       <td class="muted"><span class="truncate source"></span></td>
-      <td><span class="tag ${state}">${state}</span></td>
+      <td><span class="tag ${state}">${label(state)}</span></td>
       <td><div class="bar" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${percent.toFixed(1)}%"></i></div><span class="muted">${percent.toFixed(0)}%</span></td>
       <td class="muted task-speed"></td>
       <td class="muted"><span class="truncate detail"></span></td>
@@ -159,8 +159,8 @@ function render(snapshot) {
     setText('.file', item.file_name, row);
     row.querySelector('.file').title = item.file_name;
     setText('.source', `Message ${item.msg_id}`, row);
-    setText('.task-speed', paused || cancelling ? '—' : item.speed, row);
-    setText('.detail', `${item.downloaded} / ${item.total}`, row);
+    setText('.task-speed', paused || cancelling ? '—' : sizeLabel(item.speed), row);
+    setText('.detail', `${sizeLabel(item.downloaded)} / ${sizeLabel(item.total)}`, row);
     row.querySelector('.detail').title = item.path;
     rows.push(row);
   }
@@ -180,6 +180,7 @@ function renderLogin(login) {
   const ready = login.step === "ready";
   document.querySelector("#login-panel").hidden = ready;
   formEl.hidden = !ready;
+  document.querySelector('#download-login-note').hidden = ready;
   document.querySelector("#login-message").textContent = login.message;
   const hasInput = ["credentials", "phone", "code", "password"].includes(login.step);
   document.querySelector("#login-value-field").hidden = !hasInput;

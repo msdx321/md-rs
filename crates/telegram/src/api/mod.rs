@@ -140,9 +140,15 @@ pub struct ApiState {
     last_progress_publish_ms: AtomicU64,
     pause_tx: watch::Sender<bool>,
     request_status: Mutex<String>,
-    status: Mutex<String>,
+    status: Mutex<DashboardStatus>,
     stats: Mutex<DashboardStats>,
     updates: broadcast::Sender<String>,
+}
+
+#[derive(Clone)]
+struct DashboardStatus {
+    message: String,
+    next_run_at: Option<String>,
 }
 
 #[derive(Default)]
@@ -164,6 +170,7 @@ struct DashboardSnapshot {
     history_retention_days: u32,
     login: login::LoginSnapshot,
     status: String,
+    next_run_at: Option<String>,
     request_status: String,
     paused: bool,
     cancelling: bool,
@@ -217,7 +224,10 @@ impl ApiState {
             request_status: Mutex::new(
                 "Paste a Telegram message or chat link to begin".to_string(),
             ),
-            status: Mutex::new("starting".to_string()),
+            status: Mutex::new(DashboardStatus {
+                message: "starting".to_string(),
+                next_run_at: None,
+            }),
             stats: Mutex::new(DashboardStats {
                 completed: history::load(&database, now_millis(), days).await?,
                 ..DashboardStats::default()
@@ -228,7 +238,23 @@ impl ApiState {
     }
 
     pub async fn set_status(&self, status: &str) {
-        *self.status.lock().await = status.to_string();
+        *self.status.lock().await = DashboardStatus {
+            message: status.to_string(),
+            next_run_at: None,
+        };
+        self.publish().await;
+    }
+
+    pub(crate) async fn set_schedule(&self, next: Option<chrono::DateTime<chrono::Local>>) {
+        *self.status.lock().await = DashboardStatus {
+            message: if next.is_some() {
+                "Ready for downloads"
+            } else {
+                "Schedule disabled"
+            }
+            .into(),
+            next_run_at: next.map(|time| time.to_rfc3339()),
+        };
         self.publish().await;
     }
 
@@ -377,7 +403,6 @@ impl ApiState {
     }
 
     async fn snapshot(&self) -> DashboardSnapshot {
-        self.prune_history().await;
         let status = self.status.lock().await.clone();
         let request_status = self.request_status.lock().await.clone();
         let stats = self.stats.lock().await;
@@ -419,7 +444,8 @@ impl ApiState {
         DashboardSnapshot {
             history_retention_days,
             login: self.login.lock().await.snapshot.clone(),
-            status,
+            status: status.message,
+            next_run_at: status.next_run_at,
             request_status,
             paused: self.paused.load(Ordering::Relaxed),
             cancelling: self.cancelling.load(Ordering::Relaxed),

@@ -1,5 +1,5 @@
 <section id="login-panel" class="panel login-panel" aria-labelledby="login-heading">
-  <h1 id="login-heading">Connect Telegram</h1>
+  <h2 id="login-heading">Connect Telegram</h2>
   <p id="login-message" role="status" aria-live="polite">Connecting to Telegram…</p>
   <form id="login-form" autocomplete="off">
     <div id="login-value-field" class="login-field" hidden>
@@ -18,16 +18,16 @@
 </section>
 
 <section class="stats-grid" aria-label="Download summary">
-  <div class="stat"><span>Files saved <small data-history-days="telegram">· 30 days</small></span><strong id="downloaded-files">0</strong></div>
-  <div class="stat"><span>Data saved <small data-history-days="telegram">· 30 days</small></span><strong id="downloaded-bytes">0</strong></div>
-  <div class="stat"><span>In progress</span><strong id="active-count">0</strong></div>
+  <div class="stat"><span>Files saved <small data-history-days="telegram">· 30 days</small></span><strong id="downloaded-files">—</strong></div>
+  <div class="stat"><span>Data saved <small data-history-days="telegram">· 30 days</small></span><strong id="downloaded-bytes">—</strong></div>
+  <div class="stat"><span>In progress</span><strong id="active-count">—</strong></div>
 </section>
 
 <div class="control-panel">
-  <div class="control-copy"><h1>Scheduled downloads</h1><p>Save new media from subscribed chats. Already saved files are skipped.</p>
+  <div class="control-copy"><h2>Scheduled downloads</h2><p>Save new media from subscribed chats. Already saved files are skipped.</p>
     <div class="status-row"><span class="pill" id="pill-login" role="status">Checking login</span><span class="pill" id="status" role="status">Starting</span></div>
   </div>
-  <button class="primary" id="btn-run" disabled>Run job</button>
+  <button class="primary" id="btn-run" disabled>Run now</button>
 </div>
 
 <section class="panel">
@@ -42,6 +42,7 @@
     {{task_table}}
   </div>
   <div id="telegram-downloads" role="tabpanel" aria-labelledby="downloads-tab" tabindex="0" hidden>
+  <p id="download-login-note" class="empty">Connect Telegram above to add downloads.</p>
   <form id="download-form" class="download-form" hidden>
     <label for="chat-link">Add downloads</label>
     <div class="form-row">
@@ -70,15 +71,16 @@
     <p class="empty">No recent downloads</p>
   </div>
   <div id="telegram-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0" hidden>
-    <div class="settings-heading"><h2>Settings</h2><p>Saved changes apply at the next scan boundary. Downloads already running finish with their current settings.</p></div>
+    <div class="settings-heading"><h2>Telegram preferences</h2><p>Changes apply at the next scan. Manage storage and schedules in <a href="/settings/">shared settings</a>.</p></div>
     <form id="settings-form">
       <fieldset id="settings-fields" disabled>
         <div class="settings-grid">
-          <section class="settings-card subscribed-chats"><h3>Subscribed chats</h3><p class="settings-description">Use a username (with or without @) or a numeric Telegram chat ID. Your account must have access to the chat. Removing a subscription keeps its downloaded files and history.</p>
-            <div id="subscribed-chats"></div>
-            <p id="no-subscriptions" class="hint">No subscribed chats.</p>
-            <button id="btn-add-chat" type="button">Add chat</button>
-            <p class="hint">Optional filters use the existing filter syntax, for example: media_type == 'video' and file_size &gt; 10MB. Leave blank to download all matching media.</p>
+          <section class="settings-card subscribed-chats"><div class="settings-list-heading"><h3>Subscribed chats <span id="subscription-count" class="tag">0</span></h3><button id="btn-add-chat" type="button">Add chat</button></div><p class="settings-description">Search your subscriptions or open a chat to edit its filter and scan position. Changes take effect after saving.</p>
+            <div class="settings-list-search"><label for="chat-search">Find a subscription</label><input id="chat-search" type="search" placeholder="Search by username, ID or filter" autocomplete="off" aria-controls="subscribed-chats"><span id="chat-search-count" class="hint" role="status"></span></div>
+            <div id="subscribed-chats" class="settings-list"></div>
+            <p id="no-subscriptions" class="empty">No subscriptions yet. Add a chat to start saving its media.</p>
+            <p id="no-chat-matches" class="empty" hidden>No matching chats. Try another username, ID or filter.</p>
+            <p class="hint">Removing a subscription keeps its downloaded files and history.</p>
           </section>
           <section class="settings-card"><h3>Downloads</h3><p class="settings-description">Where to save media and how much to download at once.</p><div class="form">
 

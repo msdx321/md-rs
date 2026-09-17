@@ -10,14 +10,16 @@
   {{page_assets}}
 </head>
 <body class="{{section}}">
-  <nav class="media-nav" aria-label="Download sources">
-    <a class="media-brand" href="/" {{home_current}}>Media Downloader</a>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <nav class="media-nav" aria-label="Main navigation">
+    <a class="media-brand" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg><span>Media Downloader</span></a>
+    <a href="/" {{home_current}}>Overview</a>
     <a href="/telegram/" {{telegram_current}}>Telegram</a>
     <a href="/jav/" {{jav_current}}>JAV</a>
     <a href="/settings/" {{settings_current}}>Settings</a>
     <button id="theme-toggle" class="theme-switch" type="button" aria-label="Change color theme">Light</button>
   </nav>
-  <main class="shell">
+  <main id="main-content" class="shell" tabindex="-1">
     {{header}}
     {{content}}
   </main>

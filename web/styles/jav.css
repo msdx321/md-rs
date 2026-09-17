@@ -1,9 +1,9 @@
 .ranking-links { grid-column: 1 / -1; }
-.ranking-link { display: flex; align-items: end; gap: 12px; margin-bottom: 12px; }
-.ranking-link .link-url { flex: 1; min-width: 0; }
-.ranking-link .link-quota { width: 110px; }
-#popular-link { max-width: min(100%, 600px); }
+table[data-resizable="history"] { min-width: 850px; }
+table[data-resizable="history"] col:first-child { width: 30%; }
+table[data-resizable="history"] col:nth-child(4) { width: 230px; }
+#popular-link { flex: 1; max-width: 600px; }
+#popular-note { flex-basis: 100%; font-size: 12px; }
 @media (max-width: 600px) {
-  .ranking-link { flex-wrap: wrap; }
-  .ranking-link .link-url { flex-basis: 100%; }
+  #popular-link { flex-basis: 100%; }
 }

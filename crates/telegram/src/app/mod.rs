@@ -184,12 +184,7 @@ pub(crate) async fn run_downloader(
             );
             timer.finished();
         }
-        web_state
-            .set_status(&timer.next.map_or_else(
-                || "Schedule disabled".into(),
-                |next| format!("Next scan: {}", next.format("%Y-%m-%d %H:%M")),
-            ))
-            .await;
+        web_state.set_schedule(timer.next).await;
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = work_shutdown.cancelled() => continue,

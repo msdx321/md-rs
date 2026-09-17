@@ -1,6 +1,7 @@
 #common-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
-#common-settings [hidden] { display: none; }
-#common-settings .settings-card { background: var(--panel); }
 #common-settings h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
 #common-settings .settings-card p { color: var(--muted); margin: 6px 0 18px; font-size: 13px; }
-.settings-actions { display: flex; gap: 12px; margin-top: 20px; }
+#common-settings .settings-card { padding: 24px; }
+#settings-result { margin-top: 20px; }
+#common-settings .settings-savebar { padding-inline: 20px; border: 1px solid var(--border); border-radius: 12px; }
+@media (max-width: 520px) { #common-settings .settings-card { padding: 18px; } }

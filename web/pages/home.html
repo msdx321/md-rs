@@ -1,6 +1,6 @@
 <header class="dashboard-title">
   <div><h1>Overview</h1><p class="muted">Downloads, module status, and recent activity in one place.</p></div>
-  <span class="muted">Updates automatically</span>
+  <span class="live-note">Updates automatically</span>
 </header>
 <section class="stats-grid" aria-label="All modules summary">
   <div class="stat"><span>Active transfers <small>Both modules</small></span><strong id="overview-active">—</strong></div>
@@ -9,14 +9,16 @@
 </section>
 <section class="module-grid" aria-label="Module status">
   <article class="panel module-card">
-    <header><h2>Telegram</h2><span id="telegram-connection" class="pill" role="status">Connecting</span></header>
+    <header><h2><span class="module-mark" aria-hidden="true">T</span>Telegram</h2><span id="telegram-connection" class="pill" role="status">Connecting</span></header>
     <p id="telegram-status">Waiting for Telegram status…</p>
-    <dl><div><dt>Data saved <span data-history-days="telegram">· 30 days</span></dt><dd id="telegram-saved">—</dd></div><div><dt>Transfers</dt><dd id="telegram-transfers">—</dd></div></dl>
+    <dl><div><dt>Data saved <span data-history-days="telegram">· 30 days</span></dt><dd id="telegram-saved">—</dd></div><div><dt>Next scheduled run</dt><dd id="telegram-next-run">—</dd></div></dl>
+    <footer><span id="telegram-transfers" class="muted">—</span><a href="/telegram/">Open Telegram <span aria-hidden="true">↗</span></a></footer>
   </article>
   <article class="panel module-card">
-    <header><h2>JAV</h2><span id="jav-connection" class="pill" role="status">Connecting</span></header>
+    <header><h2><span class="module-mark" aria-hidden="true">J</span>JAV</h2><span id="jav-connection" class="pill" role="status">Connecting</span></header>
     <p id="jav-status">Waiting for JAV status…</p>
     <dl><div><dt>Data saved <span data-history-days="jav">· 30 days</span></dt><dd id="jav-saved">—</dd></div><div><dt>Next scheduled run</dt><dd id="jav-next-run">—</dd></div></dl>
+    <footer><span id="jav-transfers" class="muted">—</span><a href="/jav/">Open JAV <span aria-hidden="true">↗</span></a></footer>
   </article>
 </section>
 <section class="panel dashboard-section" aria-labelledby="activity-heading">
