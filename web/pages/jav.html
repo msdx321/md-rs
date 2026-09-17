@@ -20,6 +20,15 @@
     <div class="actions toolbar">
       <label for="popular-link">Ranking link</label>
       <select id="popular-link" aria-label="Ranking link"></select>
+      <label for="popular-sort" class="popular-sort-control">Sort by
+        <select id="popular-sort">
+          <option value="configured">Saved sort</option>
+          <option value="">Site default</option>
+          <option value="today_views">Daily views</option>
+          <option value="weekly_views">Weekly views</option>
+          <option value="monthly_views">Monthly views</option>
+        </select>
+      </label>
       <button id="btn-refresh">Refresh listing</button>
       <span class="muted" id="popular-note"></span>
     </div>
@@ -58,7 +67,7 @@
     <form id="settings-form">
     <fieldset id="settings-fields" disabled>
     <div class="settings-grid">
-<div class="settings-card ranking-links"><div class="settings-list-heading"><h3>Ranking links <span id="ranking-count" class="tag">0</span></h3><button type="button" id="btn-add-link">Add link</button></div><p class="settings-description">Open a link to edit its URL and download quota. Shared videos are downloaded once. Changes take effect after saving.</p>
+<div class="settings-card ranking-links"><div class="settings-list-heading"><h3>Ranking links <span id="ranking-count" class="tag">0</span></h3><button type="button" id="btn-add-link">Add link</button></div><p class="settings-description">Open a link to edit its URL, sort order, and download quota. Shared videos are downloaded once. Changes take effect after saving.</p>
     <div class="settings-list-search"><label for="ranking-search">Find a ranking link</label><input id="ranking-search" type="search" placeholder="Search by URL or path" autocomplete="off" aria-controls="ranking-links"><span id="ranking-search-count" class="hint" role="status"></span></div>
     <div id="ranking-links" class="settings-list"></div>
     <p id="no-ranking-matches" class="empty" hidden>No matching links. Try another URL or path.</p>

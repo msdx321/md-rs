@@ -207,6 +207,7 @@ struct VideosQuery {
     page: usize,
     #[serde(default)]
     link: usize,
+    sort: Option<String>,
 }
 
 fn default_page() -> usize {
@@ -230,7 +231,31 @@ async fn list_videos(
     let link = links
         .get(query.link)
         .ok_or_else(|| ApiError::bad_request("unknown ranking link"))?;
-    let cfg = cfg.for_link(link);
+    let mut cfg = cfg.for_link(link);
+    if let Some(sort) = query.sort {
+        if !matches!(
+            sort.as_str(),
+            "" | "today_views" | "weekly_views" | "monthly_views"
+        ) {
+            return Err(ApiError::bad_request("unknown listing sort"));
+        }
+        let mut url = url::Url::parse(&cfg.popular_url(1))
+            .map_err(|_| ApiError::bad_request("invalid ranking URL"))?;
+        let pairs: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "sort")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.set_query(None);
+        if !pairs.is_empty() || !sort.is_empty() {
+            let mut query = url.query_pairs_mut();
+            query.extend_pairs(pairs);
+            if !sort.is_empty() {
+                query.append_pair("sort", &sort);
+            }
+        }
+        cfg.popular_path = url.into();
+    }
     if !ctx.cookie_snapshot().configured && !ctx.cookie_minting_available() {
         return Err(ApiError::bad_request(
             "cf_clearance cookie is not configured — set it in Settings first",

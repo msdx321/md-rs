@@ -88,7 +88,9 @@ async function loadPopular(requestedPage = page) {
   $('popular-banner').innerHTML = '<div class="banner warn">Loading listing…</div>';
   $('popular-grid').innerHTML = '';
   try {
-    const data = await api('/jav/api/videos?page=' + requestedPage + '&link=' + ($('popular-link').value || 0), { signal: request.signal });
+    const query = new URLSearchParams({ page: requestedPage, link: $('popular-link').value || 0 });
+    if ($('popular-sort').value !== 'configured') query.set('sort', $('popular-sort').value);
+    const data = await api('/jav/api/videos?' + query, { signal: request.signal });
     page = data.page;
     $('popular-banner').innerHTML = '';
     $('page-num').textContent = data.page;
@@ -239,7 +241,7 @@ function readSettings() {
     return [key, value];
   }));
   values.links = [...document.querySelectorAll('.ranking-link')].map((row) => ({
-    url: row.querySelector('[data-link-url]').value.trim(),
+    url: sortedLink(row.querySelector('[data-link-url]').value.trim(), row.querySelector('[data-link-sort]').value),
     daily_quota: Number(row.querySelector('[data-link-quota]').value),
   }));
   return values;
@@ -261,7 +263,21 @@ function updateSettingsControls() {
   $('title_filter').placeholder = $('title_filter_regex').value === 'true' ? 'e.g. (?i)ABC-\\d+' : 'All titles';
 }
 function configuredLinks(cfg) {
-  return cfg.links?.length ? cfg.links : [{ url: cfg.popular_path, daily_quota: cfg.top_n }];
+  const links = cfg.links?.length ? cfg.links : [{ url: cfg.popular_path, daily_quota: cfg.top_n }];
+  return links.map(link => ({ ...link, url: sortedLink(link.url, linkSort(link.url) || '') }));
+}
+function linkSort(value) {
+  const query = value.split('#', 1)[0].split(/\?(.*)/s)[1];
+  return new URLSearchParams(query).get('sort');
+}
+function sortedLink(value, sort) {
+  const [address, fragment] = value.split(/#(.*)/s);
+  const [path, query] = address.split(/\?(.*)/s);
+  const params = new URLSearchParams(query);
+  params.delete('sort');
+  if (sort) params.set('sort', sort);
+  const suffix = params.toString();
+  return `${path}${suffix ? `?${suffix}` : ''}${fragment === undefined ? '' : `#${fragment}`}`;
 }
 function addLinkRow(link = { url: '', daily_quota: 10 }) {
   const row = document.createElement('details');
@@ -269,18 +285,43 @@ function addLinkRow(link = { url: '', daily_quota: 10 }) {
   row.innerHTML = `<summary><span class="settings-item-icon" aria-hidden="true">↗</span><span class="settings-item-summary"><strong data-link-name></strong><span data-link-preview></span></span><span class="settings-item-edit">Edit</span></summary>
     <div class="settings-item-fields">
       <label class="field full">Ranking URL or path
-        <input data-link-url required placeholder="https://missav.ai/cn/fc2?sort=weekly_views"><span class="hint">Use a full ranking URL or a path on your configured site.</span></label>
+        <input data-link-url required placeholder="https://missav.ai/cn/fc2"><span class="hint">Use a full ranking URL or a path on your configured site.</span></label>
+      <label class="field">Sort by
+        <select data-link-sort>
+          <option value="">Site default</option>
+          <option value="today_views">Daily views</option>
+          <option value="weekly_views">Weekly views</option>
+          <option value="monthly_views">Monthly views</option>
+        </select></label>
       <label class="field">Downloads per run
         <input data-link-quota type="number" required min="1" max="100"><span class="hint">Number of new completed downloads to save from this link.</span></label>
       <div class="settings-item-actions full"><button type="button" class="tiny danger" data-remove-link>Remove link</button></div>
     </div>`;
-  row.querySelector('[data-link-url]').value = link.url;
+  const urlInput = row.querySelector('[data-link-url]');
+  const sortInput = row.querySelector('[data-link-sort]');
+  urlInput.value = link.url;
   row.querySelector('[data-link-quota]').value = link.daily_quota;
-  const updateSummary = () => {
-    row.querySelector('[data-link-name]').textContent = row.querySelector('[data-link-url]').value.trim() || 'New ranking link';
-    const quota = row.querySelector('[data-link-quota]').value;
-    row.querySelector('[data-link-preview]').textContent = quota ? `${quota} ${quota === '1' ? 'download' : 'downloads'} per run` : 'Set a download quota';
+  const syncSort = () => {
+    sortInput.disabled = !urlInput.value.trim();
+    const sort = linkSort(urlInput.value) ?? sortInput.value;
+    sortInput.querySelector('[data-custom-sort]')?.remove();
+    if (![...sortInput.options].some(option => option.value === sort)) {
+      const option = new Option(`Custom (${sort})`, sort);
+      option.dataset.customSort = '';
+      sortInput.append(option);
+    }
+    sortInput.value = sort;
+    urlInput.value = sortedLink(urlInput.value, '');
   };
+  syncSort();
+  const updateSummary = () => {
+    row.querySelector('[data-link-name]').textContent = urlInput.value.trim() || 'New ranking link';
+    const quota = row.querySelector('[data-link-quota]').value;
+    const quotaText = quota ? `${quota} ${quota === '1' ? 'download' : 'downloads'} per run` : 'Set a download quota';
+    row.querySelector('[data-link-preview]').textContent = `${sortInput.selectedOptions[0].textContent} · ${quotaText}`;
+  };
+  urlInput.addEventListener('input', syncSort);
+  sortInput.addEventListener('change', updateSummary);
   updateSummary();
   row.addEventListener('input', updateSummary);
   row.querySelector('[data-remove-link]').onclick = () => {
@@ -322,8 +363,16 @@ $('settings-form').addEventListener('invalid', (event) => {
 function populatePopularLinks(cfg) {
   const selected = $('popular-link').value;
   $('popular-link').innerHTML = configuredLinks(cfg).map((link, index) =>
-    `<option value="${index}">${esc(link.url)} · ${link.daily_quota}/run</option>`).join('');
+    `<option value="${index}">${esc(sortedLink(link.url, ''))} · ${link.daily_quota}/run</option>`).join('');
   if ([...$('popular-link').options].some((option) => option.value === selected)) $('popular-link').value = selected;
+  else $('popular-sort').value = 'configured';
+  updatePopularSort(cfg);
+}
+function updatePopularSort(cfg = savedSettings) {
+  const link = configuredLinks(cfg)[Number($('popular-link').value)];
+  const sort = linkSort(link.url) || '';
+  const option = [...$('popular-sort').options].find(option => option.value === sort);
+  $('popular-sort').querySelector('[value="configured"]').textContent = `Saved: ${option?.textContent || `Custom (${sort})`}`;
 }
 $('btn-add-link').onclick = () => {
   $('ranking-search').value = '';
@@ -333,7 +382,12 @@ $('btn-add-link').onclick = () => {
   row.querySelector('input').focus();
   updateSettingsControls();
 };
-$('popular-link').onchange = () => loadPopular(1);
+$('popular-link').onchange = () => {
+  $('popular-sort').value = 'configured';
+  updatePopularSort();
+  loadPopular(1);
+};
+$('popular-sort').onchange = () => loadPopular(1);
 function populateSettings(cfg) {
   $('ranking-links').innerHTML = '';
   configuredLinks(cfg).forEach(addLinkRow);
