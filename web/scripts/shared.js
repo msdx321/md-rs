@@ -203,9 +203,10 @@ for (const table of document.querySelectorAll('table[data-resizable]')) {
 
   function apply(widths) {
     const total = widths.reduce((sum, width) => sum + width, 0);
-    table.style.width = `${total}px`;
+    table.style.width = '100%';
     table.style.minWidth = `${total}px`;
-    columns.forEach((column, index) => { column.style.width = `${widths[index]}px`; });
+    // The last column fills spare space while the resizable columns keep their widths.
+    columns.forEach((column, index) => { column.style.width = index === columns.length - 1 ? 'auto' : `${widths[index]}px`; });
     headers.forEach((header, index) => header.querySelector('.column-resizer')?.setAttribute('aria-valuenow', String(Math.round(widths[index]))));
     reset.disabled = false;
   }
