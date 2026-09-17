@@ -62,8 +62,8 @@ pub fn parse_duration(text: &str) -> Option<u64> {
 /// Extract the detail slug from a MissAV video URL.
 ///
 /// Video pages are `/<lang>/<slug>` (or `/<slug>`), where the slug is
-/// hyphenated: `fc2-ppv-4968310`, `abp-123`. Section pages such as
-/// `/cn/actresses` have no hyphen and are rejected, which keeps navigation
+/// separated by hyphens or underscores: `fc2-ppv-4968310`, `091326_001`.
+/// Section pages such as `/cn/actresses` have neither and are rejected, keeping navigation
 /// links out of the results.
 pub fn video_id_from_url(url: &str) -> Option<String> {
     let parsed = Url::parse(url).ok()?;
@@ -78,13 +78,13 @@ pub fn video_id_from_url(url: &str) -> Option<String> {
 }
 
 /// A slug looks like a catalogue number: lowercase alphanumerics in at least
-/// two hyphen-separated groups.
+/// two groups separated by hyphens or underscores.
 fn is_video_slug(slug: &str) -> bool {
     if slug.len() < 3 || slug.contains('.') {
         return false;
     }
     let mut groups = 0;
-    for group in slug.split('-') {
+    for group in slug.split(['-', '_']) {
         if group.is_empty() || !group.chars().all(|c| c.is_ascii_alphanumeric()) {
             return false;
         }
