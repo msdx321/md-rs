@@ -131,13 +131,17 @@ impl Fetcher {
     }
 
     /// A GET request with the browser-ish headers the site expects.
-    pub fn request(&self, url: &str, referer: Option<&str>) -> wreq::RequestBuilder {
+    fn request(
+        &self,
+        url: &str,
+        referer: Option<&str>,
+        credentials: &(String, String),
+    ) -> wreq::RequestBuilder {
         let mut req = self.client.get(url).header("accept", ACCEPT_HTML);
         if let Some(referer) = referer {
             req = req.header("referer", referer);
         }
-        let (cookie, user_agent) = self.cookies.credentials();
-        apply_cf_headers_scoped(req, url, &self.site_base, &cookie, &user_agent)
+        apply_cf_headers_scoped(req, url, &self.site_base, &credentials.0, &credentials.1)
     }
 
     /// GET media, using the page origin as referer and scoping credentials
@@ -211,7 +215,7 @@ impl Fetcher {
     /// expired cookie self-healing instead of a hard failure.
     pub async fn text(&self, url: &str, referer: Option<&str>) -> anyhow::Result<String> {
         let attempted_credentials = self.cookies.credentials();
-        match self.text_once(url, referer).await {
+        match self.text_once(url, referer, &attempted_credentials).await {
             Err(e) => {
                 let Some(signal) = ChallengeSignal::from_error(&e) else {
                     return Err(e);
@@ -219,12 +223,15 @@ impl Fetcher {
                 if !same_site(url, &self.site_base) {
                     return Err(e.context("the configured site cookie cannot clear another host"));
                 }
-                if self.cookies.credentials() == attempted_credentials
-                    && let Err(mint_err) = self.refresh_cookie(&signal.reason, false).await
+                if let Err(mint_err) = self
+                    .cookies
+                    .refresh_rejected(&signal.reason, attempted_credentials)
+                    .await
                 {
                     return Err(e.context(format!("automatic cookie refresh failed: {mint_err}")));
                 }
-                self.text_once(url, referer).await
+                self.text_once(url, referer, &self.cookies.credentials())
+                    .await
             }
             ok => ok,
         }
@@ -232,8 +239,13 @@ impl Fetcher {
 
     /// One attempt. [`ChallengeSignal`] marks the "retry with a fresh cookie"
     /// cases so [`Fetcher::text`] can tell them apart from real failures.
-    async fn text_once(&self, url: &str, referer: Option<&str>) -> anyhow::Result<String> {
-        let resp = self.request(url, referer).send().await?;
+    async fn text_once(
+        &self,
+        url: &str,
+        referer: Option<&str>,
+        credentials: &(String, String),
+    ) -> anyhow::Result<String> {
+        let resp = self.request(url, referer, credentials).send().await?;
         let status = resp.status();
         let body = resp.text().await?;
 

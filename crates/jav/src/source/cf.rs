@@ -101,22 +101,32 @@ pub struct CookieSnapshot {
 
 /// Serialises mint attempts so a burst of `403`s triggers exactly one browser
 /// run instead of one per request.
-#[derive(Default)]
 pub(crate) struct MintGate {
     last_attempt: Option<Instant>,
+    last_result: Result<(), MintError>,
+}
+
+impl Default for MintGate {
+    fn default() -> Self {
+        Self {
+            last_attempt: None,
+            last_result: Ok(()),
+        }
+    }
 }
 
 /// Holds the live `cf_clearance` cookie and knows how to refresh it.
+#[derive(Clone)]
 pub struct CookieStore {
-    inner: RwLock<CookieState>,
+    inner: Arc<RwLock<CookieState>>,
     changes: tokio::sync::watch::Sender<()>,
     /// A *tokio* mutex so its guard stays `Send` across the mint await.
-    pub(crate) gate: tokio::sync::Mutex<MintGate>,
-    generation: AtomicU64,
-    mint_fn: RwLock<Option<MintFn>>,
+    pub(crate) gate: Arc<tokio::sync::Mutex<MintGate>>,
+    generation: Arc<AtomicU64>,
+    mint_fn: Arc<RwLock<Option<MintFn>>>,
     /// How long a single mint attempt may take before it is abandoned.
     mint_timeout: Duration,
-    /// Minimum spacing between attempts, so a hard failure does not spin the
+    /// Minimum spacing after a failed attempt, so a hard failure does not spin the
     /// browser on every request.
     cooldown: Duration,
 }
@@ -148,11 +158,11 @@ impl CookieStore {
         state.value = initial.into().trim().to_string();
         state.user_agent = user_agent.into().trim().to_string();
         Self {
-            inner: RwLock::new(state),
+            inner: Arc::new(RwLock::new(state)),
             changes: tokio::sync::watch::channel(()).0,
-            gate: tokio::sync::Mutex::new(MintGate::default()),
-            generation: AtomicU64::new(0),
-            mint_fn: RwLock::new(mint_fn),
+            gate: Arc::new(tokio::sync::Mutex::new(MintGate::default())),
+            generation: Arc::new(AtomicU64::new(0)),
+            mint_fn: Arc::new(RwLock::new(mint_fn)),
             mint_timeout: Duration::from_secs(180),
             cooldown: Duration::from_secs(30),
         }
@@ -252,12 +262,67 @@ impl CookieStore {
 
     /// Mint a fresh cookie, collapsing concurrent callers into one attempt.
     ///
-    /// `force` bypasses the cooldown (the UI's explicit "refresh now" button).
+    /// `force` bypasses failure backoff (the UI's explicit "refresh now" button).
     /// When another task already minted a newer cookie by the time this caller
     /// acquires the gate, that cookie is adopted instead of minting again.
     pub async fn refresh(&self, reason: &str, force: bool) -> Result<(), MintError> {
+        self.refresh_shared(reason, force, None).await
+    }
+
+    /// Recheck the exact rejected credentials under the refresh gate, including
+    /// requests that finished after another caller already installed a cookie.
+    pub async fn refresh_rejected(
+        &self,
+        reason: &str,
+        credentials: (String, String),
+    ) -> Result<(), MintError> {
+        self.refresh_shared(reason, false, Some(credentials)).await
+    }
+
+    async fn refresh_shared(
+        &self,
+        reason: &str,
+        force: bool,
+        rejected: Option<(String, String)>,
+    ) -> Result<(), MintError> {
         let observed = self.generation.load(Ordering::Acquire);
+        let store = self.clone();
+        let reason = reason.to_string();
+        // A disconnected HTTP request must not cancel work shared by other
+        // callers. The owned task still has the mint timeout and shutdown flag.
+        tokio::spawn(async move {
+            store
+                .refresh_locked(&reason, force, rejected, observed)
+                .await
+        })
+        .await
+        .map_err(|e| format!("cookie refresh task failed: {e}"))?
+    }
+
+    async fn refresh_locked(
+        &self,
+        reason: &str,
+        force: bool,
+        rejected: Option<(String, String)>,
+        observed: u64,
+    ) -> Result<(), MintError> {
         let mut gate = self.gate.lock().await;
+        if rejected.is_some_and(|credentials| credentials != self.credentials()) {
+            return Ok(());
+        }
+        if self.generation.load(Ordering::Acquire) != observed {
+            return gate.last_result.clone();
+        }
+        // Only failed attempts back off. Return the actual failure to every
+        // waiter instead of hiding it behind a misleading cooldown error.
+        if !force
+            && gate.last_result.is_err()
+            && gate
+                .last_attempt
+                .is_some_and(|last| last.elapsed() < self.cooldown)
+        {
+            return gate.last_result.clone();
+        }
         let mint_fn = self
             .mint_fn
             .read()
@@ -267,20 +332,6 @@ impl CookieStore {
                 "automatic browser cookie minting is disabled; enable it or paste a cookie in Settings"
                     .to_string()
             })?;
-        if self.generation.load(Ordering::Acquire) != observed {
-            return Ok(());
-        }
-        if !force
-            && let Some(last) = gate.last_attempt
-            && last.elapsed() < self.cooldown
-        {
-            return Err(format!(
-                "cookie refresh is rate-limited for another {}s after a recent attempt",
-                (self.cooldown - last.elapsed()).as_secs() + 1
-            ));
-        }
-        // Holding the async guard serializes attempts and releases it on cancellation.
-        gate.last_attempt = Some(Instant::now());
         {
             let mut state = self.inner.write().expect("cookie lock poisoned");
             state.refreshing = true;
@@ -294,7 +345,6 @@ impl CookieStore {
         let result = match attempt {
             Ok(Ok(minted)) if !minted.cookie.trim().is_empty() => {
                 self.install_minted(minted);
-                self.generation.fetch_add(1, Ordering::Release);
                 Ok(())
             }
             Ok(Ok(_)) => Err("the browser returned an empty clearance cookie".into()),
@@ -306,6 +356,8 @@ impl CookieStore {
         };
         self.inner.write().expect("cookie lock poisoned").last_error =
             result.as_ref().err().cloned();
+        gate.last_result = result.clone();
+        self.generation.fetch_add(1, Ordering::Release);
         result
     }
 
@@ -325,6 +377,7 @@ impl CookieStore {
             state.minted_at = None;
         }
         gate.last_attempt = None;
+        gate.last_result = Ok(());
         self.generation.fetch_add(1, Ordering::Release);
         self.inner.write().expect("cookie lock poisoned").last_error = None;
         self.changes.send_replace(());
@@ -504,11 +557,10 @@ mod tests {
                 async move { b.refresh("b", false).await },
                 async move { c.refresh("c", false).await },
             );
-            // Exactly one caller mints; the rest either adopt the fresh cookie
-            // or are told about the cooldown, but never launch a second browser.
+            // Exactly one caller mints; every waiter adopts its result.
             assert!(
-                ra.is_ok() || rb.is_ok() || rc.is_ok(),
-                "at least one refresh should succeed"
+                ra.is_ok() && rb.is_ok() && rc.is_ok(),
+                "all refresh waiters should succeed"
             );
         });
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -516,25 +568,28 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_blocks_a_forced_free_retry() {
-        let mint: MintFn = Arc::new(|_ua| {
-            Box::pin(async {
-                Ok(MintedCookie {
-                    cookie: "fresh".into(),
-                    user_agent: "Chrome/149".into(),
-                })
-            })
+    fn cooldown_preserves_failure_until_forced_retry() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let mint: MintFn = Arc::new(move |_ua| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err("challenge failed".into()) })
         });
         let store = CookieStore::new("stale", "ua", Some(mint));
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(store.refresh("first", false)).unwrap();
-        // Same generation, inside the cooldown, not forced → refused.
+        rt.block_on(store.refresh("first", false)).unwrap_err();
+        // A failed attempt backs off without hiding the original error.
         let err = rt.block_on(store.refresh("second", false)).unwrap_err();
-        assert!(err.contains("rate-limited"), "unexpected error: {err}");
+        assert_eq!(err, "challenge failed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         // A forced refresh ignores the cooldown (used by the UI button).
-        rt.block_on(store.refresh("forced", true)).unwrap();
+        assert_eq!(
+            rt.block_on(store.refresh("forced", true)).unwrap_err(),
+            "challenge failed"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

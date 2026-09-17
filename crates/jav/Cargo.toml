@@ -31,7 +31,7 @@ percent-encoding.workspace = true
 # Drives a real Chrome over CDP to clear Cloudflare's managed challenge and mint
 # a fresh `cf_clearance` cookie. Core to the design, not an add-on.
 headless_chrome.workspace = true
+tempfile = "3.27"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-

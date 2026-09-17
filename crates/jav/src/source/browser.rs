@@ -6,8 +6,9 @@
 //! then lift the cookie out of it and hand it to the fast `wreq` client.
 //!
 //! Only cookie *minting* goes through the browser; page and segment downloads
-//! stay on the much faster `wreq` path. Every mint launches a new browser after
-//! closing the previous browser and deleting its profile.
+//! stay on the much faster `wreq` path. Chromium stays alive between mints, but
+//! each mint gets an isolated context and a short-lived DevTools connection.
+//! Disposing both leaves no challenge pages or transport polling threads idle.
 //!
 //! Two details are load-bearing and easy to get wrong:
 //!
@@ -22,13 +23,14 @@
 //!   instead of stalling the async runtime.
 
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use headless_chrome::browser::tab::Tab;
-use headless_chrome::protocol::cdp::Network::Cookie;
-use headless_chrome::{Browser, LaunchOptions};
+use headless_chrome::browser::transport::{SessionId, Transport};
+use headless_chrome::browser::{DEFAULT_ARGS, default_executable};
+use headless_chrome::protocol::cdp::{Emulation, Network, Page, Target};
 
 use crate::source::cf::MintedCookie;
 
@@ -37,7 +39,7 @@ use crate::source::cf::MintedCookie;
 pub struct BrowserOptions {
     /// Explicit Chromium/Chrome binary. Empty lets the crate auto-detect one.
     pub executable: PathBuf,
-    /// Profile directory, deleted and recreated before every mint.
+    /// Parent directory for process-owned profiles; cookies use disposable contexts.
     pub user_data_dir: PathBuf,
     /// Page the challenge is solved against.
     pub target_url: String,
@@ -70,7 +72,7 @@ impl BrowserOptions {
 /// moved onto the blocking thread that drives it.
 pub struct BrowserMinter {
     opts: BrowserOptions,
-    slot: Arc<Mutex<Option<Browser>>>,
+    slot: Arc<Mutex<Option<Process>>>,
     running: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
 }
@@ -126,21 +128,7 @@ impl BrowserMinter {
         let cancelled = Arc::new(AtomicBool::new(false));
         let _cancel_on_drop = CancelMint(Arc::clone(&cancelled));
         tokio::task::spawn_blocking(move || {
-            let result = mint_blocking(
-                Arc::clone(&slot),
-                opts,
-                user_agent,
-                &running,
-                &cancelled,
-                &stopped,
-            );
-            if result.is_err() {
-                if let Ok(mut browser) = slot.lock() {
-                    browser.take();
-                }
-                running.store(false, Ordering::Release);
-            }
-            result
+            mint_blocking(slot, opts, user_agent, &running, &cancelled, &stopped)
         })
         .await
         .map_err(|e| format!("the browser task failed: {e}"))?
@@ -155,9 +143,9 @@ impl Drop for CancelMint {
     }
 }
 
-/// The blocking half of a mint: reset the browser and profile, then drive the page.
+/// Reuse the process, connecting DevTools only while a mint is active.
 fn mint_blocking(
-    slot: Arc<Mutex<Option<Browser>>>,
+    slot: Arc<Mutex<Option<Process>>>,
     opts: BrowserOptions,
     user_agent: String,
     running: &AtomicBool,
@@ -167,23 +155,75 @@ fn mint_blocking(
     let mut guard = slot
         .lock()
         .map_err(|_| "browser slot poisoned".to_string())?;
-
     if cancelled.load(Ordering::Acquire) || stopped.load(Ordering::Acquire) {
         return Err("cookie mint cancelled".into());
     }
-    // Drop and reap the previous browser before touching its profile.
-    guard.take();
-    running.store(false, Ordering::Release);
-    match std::fs::remove_dir_all(&opts.user_data_dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(format!(
-                "cannot delete browser profile {}: {e}",
-                opts.user_data_dir.display()
-            ));
+    let connection = guard.as_ref().and_then(|process| match connect(process) {
+        Ok(connection) => Some(connection),
+        Err(error) => {
+            log::warn!("cached Chromium is unavailable; restarting it: {error}");
+            None
         }
+    });
+    let connection = match connection {
+        Some(connection) => connection,
+        None => {
+            guard.take();
+            running.store(false, Ordering::Release);
+            *guard = Some(launch(&opts, &user_agent)?);
+            running.store(true, Ordering::Release);
+            connect(guard.as_ref().expect("just launched"))?
+        }
+    };
+    let started = Instant::now();
+    let minted = mint_with_browser(&connection.0, &opts, &user_agent, cancelled, stopped)?;
+    log::info!(
+        "cf_clearance minted in {:.1}s via {}",
+        started.elapsed().as_secs_f64(),
+        describe(&opts)
+    );
+    Ok(minted)
+}
+
+/// Transport's own Drop does not stop its threads; always shut it down explicitly.
+struct MintConnection(Transport);
+
+impl Drop for MintConnection {
+    fn drop(&mut self) {
+        self.0.shutdown();
     }
+}
+
+/// Own only the OS process while idle, without a browser event loop or socket.
+struct Process {
+    child: BrowserChild,
+    debug_ws_url: url::Url,
+    // Dropped after the child is killed and reaped. Never reuse locks left by
+    // an older container, or remove locks belonging to another live process.
+    _profile: tempfile::TempDir,
+}
+
+struct BrowserChild(Child);
+
+impl Drop for BrowserChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn connect(process: &Process) -> Result<MintConnection, String> {
+    Transport::new(
+        process.debug_ws_url.clone(),
+        Some(process.child.0.id()),
+        Duration::from_secs(30),
+        None,
+    )
+    .map(MintConnection)
+    .map_err(|e| format!("cannot connect to Chromium: {e}"))
+}
+
+fn launch(opts: &BrowserOptions, user_agent: &str) -> Result<Process, String> {
     std::fs::create_dir_all(&opts.user_data_dir).map_err(|e| {
         format!(
             "cannot create browser profile {}: {e}",
@@ -191,11 +231,12 @@ fn mint_blocking(
         )
     })?;
 
-    log::info!("launching the cookie-minting browser ({})", describe(&opts));
+    log::info!("launching the cookie-minting browser ({})", describe(opts));
     let mut args: Vec<std::ffi::OsString> = vec![
         "--disable-gpu".into(),
         "--disable-dev-shm-usage".into(),
         "--no-first-run".into(),
+        "--no-startup-window".into(),
         "--no-default-browser-check".into(),
         "--disable-background-networking".into(),
         "--disable-blink-features=AutomationControlled".into(),
@@ -206,7 +247,7 @@ fn mint_blocking(
         "--disable-breakpad".into(),
         "--disable-crash-reporter".into(),
         "--no-crashpad".into(),
-        format!("--crash-dumps-dir={}", crash_dir(&opts)).into(),
+        format!("--crash-dumps-dir={}", crash_dir(opts)).into(),
     ];
     // The whole point: keep the genuine Chrome fingerprint but drop the
     // `HeadlessChrome` token that gives the headless build away.
@@ -214,119 +255,199 @@ fn mint_blocking(
         args.push(format!("--user-agent={}", user_agent.trim()).into());
     }
 
-    let options = LaunchOptions::default_builder()
-        .path(if opts.executable.as_os_str().is_empty() {
-            None
-        } else {
-            Some(opts.executable.clone())
-        })
-        .user_data_dir(Some(opts.user_data_dir.clone()))
-        .headless(true)
-        .sandbox(false)
-        .window_size(Some((1280, 900)))
-        .args(args.iter().map(|a| a.as_os_str()).collect())
-        .build()
-        .map_err(|e| format!("invalid browser configuration: {e}"))?;
-
-    let browser = Browser::new(options)
-        .map_err(|e| format!("cannot launch Chromium ({}): {e}", describe(&opts)))?;
-    *guard = Some(browser);
-    running.store(true, Ordering::Release);
-
-    let browser = guard.as_ref().expect("just ensured");
-    let started = Instant::now();
-    let minted = mint_with_browser(browser, &opts, &user_agent, cancelled, stopped)?;
-    log::info!(
-        "cf_clearance minted in {:.1}s via {}",
-        started.elapsed().as_secs_f64(),
-        describe(&opts)
+    let executable = if opts.executable.as_os_str().is_empty() {
+        default_executable()?
+    } else {
+        opts.executable.clone()
+    };
+    // Reuse this profile for the process lifetime, not across container lifetimes:
+    // Chromium's SingletonLock embeds a hostname that changes on recreation.
+    let profile = tempfile::Builder::new()
+        .prefix("mint-")
+        .tempdir_in(&opts.user_data_dir)
+        .map_err(|e| format!("cannot create a browser process profile: {e}"))?;
+    let profile_path = std::fs::canonicalize(profile.path())
+        .map_err(|e| format!("cannot resolve browser profile: {e}"))?;
+    let port_file = profile_path.join("DevToolsActivePort");
+    // Keep the library's automation setup, but restore Chrome's idle throttling.
+    let defaults = DEFAULT_ARGS.iter().filter(|arg| {
+        !matches!(
+            **arg,
+            "--disable-background-timer-throttling"
+                | "--disable-backgrounding-occluded-windows"
+                | "--disable-renderer-backgrounding"
+        )
+    });
+    let mut child = BrowserChild(
+        Command::new(executable)
+            .args(defaults)
+            .args(args)
+            .args([
+                "--headless=new",
+                "--no-sandbox",
+                "--window-size=1280,900",
+                "--remote-debugging-port=0",
+            ])
+            .arg(format!("--user-data-dir={}", profile_path.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("cannot launch Chromium ({}): {e}", describe(opts)))?,
     );
-    Ok(minted)
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = child
+            .0
+            .try_wait()
+            .map_err(|e| format!("cannot inspect Chromium: {e}"))?
+        {
+            return Err(format!("Chromium exited before opening DevTools: {status}"));
+        }
+        if let Ok(endpoint) = std::fs::read_to_string(&port_file) {
+            let mut lines = endpoint.lines();
+            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
+                let debug_ws_url = url::Url::parse(&format!("ws://127.0.0.1:{port}{path}"))
+                    .map_err(|e| format!("invalid Chromium endpoint: {e}"))?;
+                return Ok(Process {
+                    child,
+                    debug_ws_url,
+                    _profile: profile,
+                });
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("Chromium did not open DevTools within 30s".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
-/// Drive a tab until Cloudflare clears, then return the clearance cookie.
+/// The disposable context isolates stale cookies and is also removed on disconnect.
 fn mint_with_browser(
-    browser: &Browser,
+    transport: &Transport,
     opts: &BrowserOptions,
     user_agent: &str,
     cancelled: &AtomicBool,
     stopped: &AtomicBool,
 ) -> Result<MintedCookie, String> {
-    let tab = browser
-        .new_tab()
-        .map_err(|e| format!("cannot open a browser tab: {e}"))?;
-    tab.set_default_timeout(opts.nav_timeout);
-
-    tab.set_user_agent(user_agent, None, None)
-        .map_err(|e| format!("cannot set browser user agent: {e}"))?;
-    log::info!("solving the Cloudflare challenge at {}", opts.target_url);
-    tab.navigate_to(&opts.target_url)
-        .map_err(|e| format!("navigation to {} failed: {e}", opts.target_url))?;
-
-    let cookie = wait_for_clearance(&tab, opts, cancelled, stopped)?;
-    let actual_ua = browser_user_agent(&tab).unwrap_or_else(|| user_agent.to_string());
-    let _ = tab.close(true);
-
-    Ok(MintedCookie {
-        cookie,
-        user_agent: actual_ua,
-    })
+    let context = transport
+        .call_method_on_browser(Target::CreateBrowserContext {
+            dispose_on_detach: Some(true),
+            proxy_server: None,
+            proxy_bypass_list: None,
+            origins_with_universal_network_access: None,
+        })
+        .map_err(|e| format!("cannot create a mint context: {e}"))?
+        .browser_context_id;
+    let result = mint_in_context(transport, &context, opts, user_agent, cancelled, stopped);
+    if let Err(error) = transport.call_method_on_browser(Target::DisposeBrowserContext {
+        browser_context_id: context,
+    }) {
+        // disposeOnDetach is the fallback, including cancellation and failed CDP calls.
+        log::warn!("mint context cleanup deferred to disconnect: {error}");
+    }
+    result
 }
 
-/// Poll the live tab until the clearance cookie lands.
-///
-/// The cookie is the only condition that matters: it already authorises the
-/// HTTP client even if the DOM has not finished swapping in the real page.
-fn wait_for_clearance(
-    tab: &Tab,
+fn mint_in_context(
+    transport: &Transport,
+    context: &str,
     opts: &BrowserOptions,
+    user_agent: &str,
     cancelled: &AtomicBool,
     stopped: &AtomicBool,
-) -> Result<String, String> {
+) -> Result<MintedCookie, String> {
+    let target = transport
+        .call_method_on_browser(Target::CreateTarget {
+            url: "about:blank".into(),
+            browser_context_id: Some(context.into()),
+            left: None,
+            top: None,
+            width: None,
+            height: None,
+            window_state: None,
+            enable_begin_frame_control: None,
+            new_window: None,
+            background: None,
+            for_tab: None,
+            hidden: None,
+        })
+        .map_err(|e| format!("cannot open a mint tab: {e}"))?
+        .target_id;
+    let session = SessionId::from(
+        transport
+            .call_method_on_browser(Target::AttachToTarget {
+                target_id: target.clone(),
+                flatten: None,
+            })
+            .map_err(|e| format!("cannot attach to the mint tab: {e}"))?
+            .session_id,
+    );
+    transport
+        .call_method_on_target(
+            session.clone(),
+            Emulation::SetUserAgentOverride {
+                user_agent: user_agent.into(),
+                accept_language: None,
+                platform: None,
+                user_agent_metadata: None,
+            },
+        )
+        .map_err(|e| format!("cannot set browser user agent: {e}"))?;
+    log::info!("solving the Cloudflare challenge at {}", opts.target_url);
+    let navigation = transport
+        .call_method_on_target(
+            session.clone(),
+            Page::Navigate {
+                url: opts.target_url.clone(),
+                referrer: None,
+                transition_Type: None,
+                frame_id: None,
+                referrer_policy: None,
+            },
+        )
+        .map_err(|e| format!("navigation to {} failed: {e}", opts.target_url))?;
+    if let Some(error) = navigation.error_text {
+        return Err(format!("navigation to {} failed: {error}", opts.target_url));
+    }
     let deadline = Instant::now() + opts.nav_timeout;
-    let mut last_title = String::new();
-
     loop {
         if cancelled.load(Ordering::Acquire) || stopped.load(Ordering::Acquire) {
             return Err("cookie mint cancelled".into());
         }
-        if let Ok(title) = tab.get_title() {
-            last_title = title;
-        }
-        if let Some(clearance) = tab
-            .get_cookies()
-            .ok()
-            .and_then(|cookies| clearance_value(&cookies))
+        let cookies = transport
+            .call_method_on_target(
+                session.clone(),
+                Network::GetCookies {
+                    urls: Some(vec![opts.target_url.clone()]),
+                },
+            )
+            .map_err(|e| format!("cannot read clearance cookies: {e}"))?
+            .cookies;
+        if let Some(cookie) = cookies
+            .into_iter()
+            .find(|cookie| cookie.name == "cf_clearance" && !cookie.value.trim().is_empty())
         {
-            return Ok(clearance);
+            return Ok(MintedCookie {
+                cookie: cookie.value,
+                user_agent: user_agent.into(),
+            });
         }
         if Instant::now() >= deadline {
+            let title = transport
+                .call_method_on_browser(Target::GetTargetInfo {
+                    target_id: Some(target),
+                })
+                .map(|info| info.target_info.title)
+                .unwrap_or_default();
             return Err(format!(
-                "timed out after {}s waiting for the Cloudflare challenge to clear \
-                 (last page title: {last_title:?})",
+                "timed out after {}s waiting for the Cloudflare challenge to clear (last page title: {title:?})",
                 opts.nav_timeout.as_secs()
             ));
         }
         std::thread::sleep(Duration::from_millis(400));
     }
-}
-
-/// The user agent the page actually reported, if it can be read.
-fn browser_user_agent(tab: &Tab) -> Option<String> {
-    tab.evaluate("navigator.userAgent", false)
-        .ok()
-        .and_then(|v| v.value)
-        .and_then(|v| v.as_str().map(str::to_string))
-        .filter(|ua| !ua.trim().is_empty())
-}
-
-/// The `cf_clearance` value in a CDP cookie list, if present.
-fn clearance_value(cookies: &[Cookie]) -> Option<String> {
-    cookies
-        .iter()
-        .find(|c| c.name == "cf_clearance")
-        .map(|c| c.value.clone())
-        .filter(|v| !v.trim().is_empty())
 }
 
 /// A writable directory for Chromium's crash dumps.

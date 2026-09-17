@@ -485,7 +485,7 @@ async fn events(State(ctx): State<Arc<AppCtx>>) -> impl IntoResponse {
     // even when no tasks are running. Both streams then push state changes.
     let changes = futures_util::stream::select(
         WatchStream::new(ctx.subscribe_status()),
-        WatchStream::new(ctx.subscribe_cookie()),
+        WatchStream::from_changes(ctx.subscribe_cookie()),
     );
     let statuses = changes.map(move |()| {
         Ok::<_, Infallible>(

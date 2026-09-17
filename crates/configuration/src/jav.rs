@@ -53,7 +53,7 @@ pub struct Config {
     pub user_agent: String,
     /// Chromium/Chrome binary for cookie minting. Empty means auto-detect.
     pub browser_path: PathBuf,
-    /// Profile directory deleted and recreated before every cookie mint.
+    /// Parent directory for Chromium profiles, each owned by one browser process.
     pub browser_profile_dir: PathBuf,
     /// Turn off browser-driven cookie minting entirely.
     pub browser_enabled: bool,
