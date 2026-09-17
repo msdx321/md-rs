@@ -5,20 +5,16 @@ on:
   push:
     branches: [main, master]
     tags: ['v*']
-  schedule:
-    - cron: '23 4 * * 1'
   workflow_dispatch:
-    inputs:
-      refresh_runtime:
-        description: Refresh runtime packages while reusing the validated binary
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
+env:
+  DOCKER_NAMESPACE: ${{ secrets.DOCKER_HUB_USERNAME || github.repository_owner }}
+
 concurrency:
-  # Serialize branch/tag runs for the same commit so the second can reuse it.
+  # Serialize runs for the same commit; only tag pushes publish images.
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -27,28 +23,22 @@ jobs:
     name: Find reusable builds
     runs-on: ubuntu-24.04
     outputs:
-      image: ${{ steps.plan.outputs.image }}
       commit: ${{ steps.plan.outputs.commit }}
       environment: ${{ steps.plan.outputs.environment }}
       publish: ${{ steps.plan.outputs.publish }}
-      refresh: ${{ steps.plan.outputs.refresh }}
       validated: ${{ steps.reuse.outputs.validated }}
-      reuse: ${{ steps.reuse.outputs.reuse }}
     steps:
       - uses: actions/checkout@v7
       - name: Build plan
         id: plan
         env:
-          DOCKER_NAMESPACE: ${{ secrets.DOCKER_HUB_USERNAME || github.repository_owner }}
-          PUBLISH: ${{ github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
-          REFRESH: ${{ github.event_name == 'schedule' || inputs.refresh_runtime == true }}
+          PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
         run: |
-          echo "image=docker.io/${DOCKER_NAMESPACE,,}/md-rs" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=docker.io/${DOCKER_NAMESPACE,,}/md-rs" >> "$GITHUB_ENV"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           definition=$(awk '/^# Application build$/ {exit} {print}' Dockerfile | sha256sum | cut -d ' ' -f 1)
           echo "environment=$definition" >> "$GITHUB_OUTPUT"
           echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
-          echo "refresh=$REFRESH" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v4
         if: steps.plan.outputs.publish == 'true'
       - uses: docker/login-action@v4
@@ -61,15 +51,10 @@ jobs:
         id: reuse
         if: steps.plan.outputs.publish == 'true'
         env:
-          IMAGE: ${{ steps.plan.outputs.image }}
           COMMIT: ${{ steps.plan.outputs.commit }}
-          REFRESH: ${{ steps.plan.outputs.refresh }}
         run: |
           digest=$(bash .github/scripts/find-validated-image.sh)
           echo "validated=$digest" >> "$GITHUB_OUTPUT"
-          if [[ "$REFRESH" != true ]]; then
-            echo "reuse=$digest" >> "$GITHUB_OUTPUT"
-          fi
           if [[ -n "$digest" ]]; then
             echo "Reusing validation for $COMMIT ($digest)." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -122,7 +107,7 @@ jobs:
   build:
     name: Image (${{ matrix.arch }})
     needs: plan
-    if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.reuse == ''
+    if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.validated == ''
     permissions:
       contents: read
       packages: write
@@ -135,32 +120,32 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    env:
-      IMAGE: ${{ needs.plan.outputs.image }}
     steps:
       - uses: actions/checkout@v7
+      # Keep the secret-derived image name within this job: GitHub drops it from job outputs.
+      - name: Set image name
+        run: echo "IMAGE=docker.io/${DOCKER_NAMESPACE,,}/md-rs" >> "$GITHUB_ENV"
       - name: Restore tested binary
         id: binary
-        if: needs.plan.outputs.validated == ''
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/release-output
           # No fallback: skipping compilation/tests requires identical inputs.
           key: release-binary-${{ matrix.arch }}-${{ needs.plan.outputs.environment }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build.rs', 'crates/**', 'src/**', 'web/**', '.cargo/**', 'rust-toolchain*', '.github/scripts/build-release.sh', '.github/scripts/in-build-env.sh') }}
       - uses: docker/login-action@v4
-        if: needs.plan.outputs.validated == '' && steps.binary.outputs.cache-hit != 'true'
+        if: steps.binary.outputs.cache-hit != 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: ./.github/actions/build-environment
         id: environment
-        if: needs.plan.outputs.validated == '' && steps.binary.outputs.cache-hit != 'true'
+        if: steps.binary.outputs.cache-hit != 'true'
         with:
           arch: ${{ matrix.arch }}
           publish: 'true'
       - name: Configure build environment
-        if: needs.plan.outputs.validated == '' && steps.binary.outputs.cache-hit != 'true'
+        if: steps.binary.outputs.cache-hit != 'true'
         env:
           BUILD_IMAGE: ${{ steps.environment.outputs.image }}
         run: |
@@ -168,7 +153,7 @@ jobs:
           echo "CARGO_HOME=$RUNNER_TEMP/cargo-home" >> "$GITHUB_ENV"
           echo "BUILD_ENV_IMAGE=$BUILD_IMAGE" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
-        if: needs.plan.outputs.validated == '' && steps.binary.outputs.cache-hit != 'true'
+        if: steps.binary.outputs.cache-hit != 'true'
         with:
           shared-key: rust-release
           cmd-format: bash .github/scripts/in-build-env.sh {0}
@@ -176,14 +161,12 @@ jobs:
           cache-bin: false
           cache-workspace-crates: true
           cache-on-failure: true
-          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') }}
+          save-if: 'true'
       - name: Test and compile release binary
-        if: needs.plan.outputs.validated == '' && steps.binary.outputs.cache-hit != 'true'
+        if: steps.binary.outputs.cache-hit != 'true'
         run: bash .github/scripts/build-release.sh
       - name: Save tested binary
-        if: >-
-          needs.plan.outputs.validated == '' && steps.binary.outputs.cache-hit != 'true' &&
-          github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        if: steps.binary.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/release-output
@@ -201,12 +184,11 @@ jobs:
           context: .
           platforms: linux/${{ matrix.arch }}
           build-contexts: |
-            builder=${{ needs.plan.outputs.validated != '' && format('docker-image://{0}@{1}', env.IMAGE, needs.plan.outputs.validated) || format('{0}/release-output', runner.temp) }}
+            builder=${{ runner.temp }}/release-output
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.plan.outputs.commit }}
-          no-cache-filters: ${{ needs.plan.outputs.refresh == 'true' && 'runtime-base' || '' }}
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }}
           cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }},mode=max,compression=zstd
       - name: Export digest
@@ -228,16 +210,16 @@ jobs:
     if: >-
       always() && !cancelled() && needs.plan.result == 'success' &&
       needs.plan.outputs.publish == 'true' &&
-      (needs.plan.outputs.reuse != '' ||
-       (needs.build.result == 'success' &&
-        (needs.check.result == 'success' || needs.plan.outputs.validated != '')))
+      (needs.plan.outputs.validated != '' ||
+       (needs.build.result == 'success' && needs.check.result == 'success'))
     runs-on: ubuntu-24.04
     env:
-      IMAGE: ${{ needs.plan.outputs.image }}
       COMMIT: ${{ needs.plan.outputs.commit }}
     steps:
+      - name: Set image name
+        run: echo "IMAGE=docker.io/${DOCKER_NAMESPACE,,}/md-rs" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
-        if: needs.plan.outputs.reuse == ''
+        if: needs.plan.outputs.validated == ''
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
@@ -260,7 +242,7 @@ jobs:
       - name: Publish manifest
         env:
           METADATA: ${{ steps.meta.outputs.json }}
-          REUSE: ${{ needs.plan.outputs.reuse }}
+          REUSE: ${{ needs.plan.outputs.validated }}
         run: |
           mapfile -t tags < <(jq -r '.tags[]' <<< "$METADATA")
           args=()
