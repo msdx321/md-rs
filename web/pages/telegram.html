@@ -67,8 +67,21 @@
   </form>
 
   </div>
-  <div id="completed-downloads" class="downloads" role="tabpanel" aria-labelledby="completed-tab" tabindex="0" hidden>
-    <p class="empty">No recent downloads</p>
+  <div id="completed-downloads" role="tabpanel" aria-labelledby="completed-tab" tabindex="0" hidden>
+    <div class="actions toolbar">
+      <button id="btn-reload-history" type="button">Reload</button>
+      <button id="btn-clear-history" class="danger" type="button" disabled>Clear history (keep files)</button>
+    </div>
+    <p class="hint history-note">Forgetting allows the message to be requested again. Saved files are kept; chat scan positions stay unchanged.</p>
+    <div id="history-banner" class="banner" role="status" hidden></div>
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Download records"><table class="history-table" data-resizable="telegram-history">
+      <colgroup><col><col><col><col><col><col><col></colgroup>
+      <thead>
+        <tr><th data-min-width="160" scope="col">Title</th><th scope="col">Message</th><th scope="col">Size</th><th data-min-width="220" scope="col">Finished</th><th scope="col">Status</th><th scope="col">Path</th><th scope="col">Actions</th></tr>
+      </thead>
+      <tbody id="history-body"></tbody>
+    </table></div>
+    <div class="empty" id="history-empty">No recent downloads</div>
   </div>
   <div id="telegram-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0" hidden>
     <div class="settings-heading"><h2>Telegram preferences</h2><p>Changes apply at the next scan. Manage storage and schedules in <a href="/settings/">shared settings</a>.</p></div>

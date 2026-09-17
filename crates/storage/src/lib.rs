@@ -25,7 +25,7 @@ impl Database {
             .context("missing schema version")?
             .get(0)?;
         anyhow::ensure!(
-            version <= 4,
+            version <= 5,
             "database schema version {version} is newer than this app supports"
         );
         if version == 0 {
@@ -43,6 +43,10 @@ impl Database {
         if version < 4 {
             tx.execute_batch(include_str!("schema-v4.sql")).await?;
             tx.execute_batch("PRAGMA user_version=4").await?;
+        }
+        if version < 5 {
+            tx.execute_batch(include_str!("schema-v5.sql")).await?;
+            tx.execute_batch("PRAGMA user_version=5").await?;
         }
         tx.commit().await?;
         Ok(Self(Arc::new(Mutex::new(connection))))

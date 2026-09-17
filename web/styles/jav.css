@@ -1,7 +1,4 @@
 .ranking-links { grid-column: 1 / -1; }
-table[data-resizable="history"] { min-width: 850px; }
-table[data-resizable="history"] col:first-child { width: 30%; }
-table[data-resizable="history"] col:nth-child(4) { width: 230px; }
 #popular-link { flex: 1; max-width: 600px; }
 .popular-sort-control { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; max-width: 100%; }
 #popular-sort { width: auto; max-width: 100%; }

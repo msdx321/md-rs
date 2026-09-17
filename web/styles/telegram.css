@@ -9,3 +9,5 @@
 .media-options label { display: flex; align-items: center; gap: 10px; }
 .media-options input { width: 18px; min-height: 18px; height: 18px; accent-color: var(--accent); }
 .subscribed-chats { grid-column: 1 / -1; }
+.history-note { margin: 0 0 18px; }
+table[data-resizable="telegram-history"] { min-width: 1000px; }

@@ -37,8 +37,7 @@ button.tiny { padding: 6px 10px; min-height: 36px; font-size: 12px; }
 [role="tablist"] button { background: transparent; border-color: transparent; color: var(--muted); }
 [role="tablist"] button.active { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
 [role="tabpanel"] { display: none; }
-[role="tabpanel"].active, .downloads[role="tabpanel"] { display: block; }
-.downloads[hidden] { display: none; }
+[role="tabpanel"].active { display: block; }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .toolbar { margin: 0 0 18px; }
 .pill, .tag { display: inline-block; max-width: 100%; overflow-wrap: anywhere; border-radius: 999px; padding: 3px 10px; color: var(--muted); background: var(--panel-2); font-size: 12px; }
@@ -56,6 +55,9 @@ button.tiny { padding: 6px 10px; min-height: 36px; font-size: 12px; }
 .rank { font-weight: 700; color: var(--accent); }
 .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.history-table { min-width: 850px; }
+.history-table col:first-child { width: 30%; }
+.history-table col:nth-child(4) { width: 230px; }
 /* Live content changes must never redistribute the chosen column widths. */
 .task-table { table-layout: fixed; min-width: 1060px; }
 .task-table col.task-source { width: 110px; }
@@ -113,14 +115,7 @@ code { padding: 1px 5px; border-radius: 4px; background: var(--panel-2); }
 .hint, .request-status { margin: 8px 0 0; font-size: 12px; }
 .request-status { color: var(--accent); }
 .request-status.is-error { color: var(--err); }
-.download-card { padding: 14px 2px; border-bottom: 1px solid var(--border); display: grid; gap: 6px; }
-.download-card:last-child { border-bottom: 0; }
-.download-head, .download-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .file { overflow-wrap: anywhere; min-width: 0; font-size: 13px; }
-.size { white-space: nowrap; color: var(--accent); font-size: 12px; }
-.download-meta, .path { color: var(--muted); font-size: 12px; }
-.path { overflow-wrap: anywhere; }
-.downloads .empty { margin: 0; }
 @media (max-width: 760px) {
   .shell { padding: 16px; }
   .stat { display: block; padding: 12px; }
@@ -147,7 +142,6 @@ code { padding: 1px 5px; border-radius: 4px; background: var(--panel-2); }
   .header-actions { gap: 6px; }
   .header-actions button { padding-inline: 12px; }
   .header-actions .pill { font-size: 11px; padding-inline: 6px; }
-  .download-meta { flex-wrap: wrap; gap: 4px; }
 }
 @media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
 

@@ -1,6 +1,7 @@
 //! Telegram commands, login, and live status API.
 use crate::storage::history;
 use tokio_util::sync::CancellationToken;
+mod history_api;
 mod login;
 mod settings;
 
@@ -183,6 +184,7 @@ struct DashboardSnapshot {
 
 #[derive(Serialize)]
 struct CompletedSnapshot {
+    id: String,
     msg_id: i32,
     file_name: String,
     path: String,
@@ -308,7 +310,8 @@ impl ApiState {
             && completed
         {
             let now = now_millis();
-            let completed = CompletedDownload {
+            let mut completed = CompletedDownload {
+                id: 0,
                 msg_id,
                 file_name: item.file_name,
                 path: item.path,
@@ -316,7 +319,7 @@ impl ApiState {
                 completed_at: now,
             };
             let conn = self.database.connection().await;
-            match history::insert(&conn, &completed).await {
+            match history::insert(&conn, &mut completed).await {
                 Ok(()) => stats.completed.push(completed),
                 Err(error) => warn!("cannot save download history: {error:#}"),
             }
@@ -348,15 +351,10 @@ impl ApiState {
         }
         let days = self.common.borrow().history_retention_days;
         let cutoff = now.saturating_sub(history::retention_ms(days));
-        if stats
-            .completed
-            .iter()
-            .any(|item| item.completed_at <= cutoff)
-        {
-            match history::delete_expired(&*self.database.connection().await, now, days).await {
-                Ok(()) => stats.completed.retain(|item| item.completed_at > cutoff),
-                Err(error) => warn!("cannot prune download history: {error:#}"),
-            }
+        // Forgotten paths still need pruning when the visible history is empty.
+        match history::delete_expired(&*self.database.connection().await, now, days).await {
+            Ok(()) => stats.completed.retain(|item| item.completed_at > cutoff),
+            Err(error) => warn!("cannot prune download history: {error:#}"),
         }
     }
 
@@ -432,6 +430,7 @@ impl ApiState {
             .iter()
             .rev()
             .map(|item| CompletedSnapshot {
+                id: item.key(),
                 msg_id: item.msg_id,
                 file_name: item.file_name.clone(),
                 path: item.path.clone(),
@@ -471,6 +470,14 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/events", get(events))
         .route("/api/config", get(settings::get).put(settings::put))
+        .route(
+            "/api/history",
+            get(history_api::list).delete(history_api::clear),
+        )
+        .route(
+            "/api/history/{id}",
+            axum::routing::delete(history_api::forget),
+        )
         .route("/login", post(login::submit))
         .route("/downloads", post(download))
         .route("/scan", post(scan))

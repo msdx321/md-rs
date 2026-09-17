@@ -36,6 +36,7 @@ pub(crate) async fn download_media_inner(
         None => return Ok(false),
     };
     let msg_id = msg.id();
+    let (temp_path, final_path) = build_media_paths(msg, &media, cfg)?;
 
     // Check file_unique_id cache
     let fid = match &media {
@@ -47,13 +48,21 @@ pub(crate) async fn download_media_inner(
         let mut cache = file_ids.lock().await;
         cache.retain(|_, time| *time > web_state.history_cutoff());
         if cache.contains_key(&fid) {
-            debug!("msg={msg_id}: already downloaded (file_unique_id), skipped");
-            return Ok(false);
+            // History predates stored media IDs. A durable path override lets
+            // forgotten entries be requested again without resetting other media.
+            let forgotten = crate::storage::history::was_forgotten(
+                &*web_state.database.connection().await,
+                &final_path.to_string_lossy(),
+            )
+            .await?;
+            if !forgotten {
+                debug!("msg={msg_id}: already downloaded (file_unique_id), skipped");
+                return Ok(false);
+            }
+            cache.remove(&fid);
         }
         drop(cache);
     }
-
-    let (temp_path, final_path) = build_media_paths(msg, &media, cfg)?;
 
     // Already fully downloaded?
     match tokio::fs::metadata(&final_path).await {

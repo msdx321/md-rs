@@ -7,7 +7,7 @@ const filesEl = document.querySelector("#downloaded-files");
 const bytesEl = document.querySelector("#downloaded-bytes");
 const activeEl = document.querySelector("#active-count");
 const downloadsEl = document.querySelector("#tasks-body");
-const completedEl = document.querySelector("#completed-downloads");
+const completedEl = document.querySelector("#history-body");
 const tabEls = [...document.querySelectorAll('[role="tab"]')];
 const controls = Object.fromEntries(["pause", "resume", "cancel"].map(action => [action, document.querySelector(`#btn-${action}`)]));
 const taskBanner = document.querySelector("#tasks-banner");
@@ -24,8 +24,11 @@ const formEl = document.querySelector("#download-form");
 const linkEl = document.querySelector("#chat-link");
 const actionEls = [...document.querySelectorAll("button[name=action]")];
 let paused = false;
+let historyBusy = false;
 
-bindTabs(tabEls);
+bindTabs(tabEls, (tab) => {
+  if (tab.id === 'completed-tab') loadHistory();
+});
 
 formEl.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -90,6 +93,89 @@ function setText(selector, value, root = document) {
   root.querySelector(selector).textContent = value;
 }
 
+function updateHistoryControls() {
+  document.querySelector('#btn-reload-history').disabled = historyBusy;
+  document.querySelector('#btn-clear-history').disabled = historyBusy || !completedEl.children.length;
+  completedEl.querySelectorAll('button').forEach(button => { button.disabled = historyBusy; });
+}
+
+function renderHistory(items, days) {
+  const historyEmpty = document.querySelector('#history-empty');
+  historyEmpty.hidden = items.length !== 0;
+  historyEmpty.textContent = `No downloads in the last ${days} days.`;
+  const rows = [];
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.dataset.taskId = item.id;
+    row.innerHTML = `
+      <td><span class="truncate file"></span></td>
+      <td class="muted msg"></td>
+      <td class="muted size"></td>
+      <td class="muted"><time></time></td>
+      <td><span class="tag completed">Completed</span></td>
+      <td class="muted"><span class="truncate path"></span></td>
+      <td><button class="tiny" type="button" data-forget>Forget</button></td>`;
+    row.querySelector('button').dataset.forget = item.id;
+    row.querySelector('button').title = 'Forget this record and allow downloading again; keep the saved file';
+    setText(".file", item.file_name, row);
+    row.querySelector('.file').title = item.file_name;
+    setText(".size", sizeLabel(item.size), row);
+    setText(".msg", `#${item.msg_id}`, row);
+    setText(".path", item.path, row);
+    row.querySelector('.path').title = item.path;
+    const date = new Date(item.completed_at);
+    const time = row.querySelector("time");
+    time.dateTime = date.toISOString();
+    time.textContent = dateTime(item.completed_at);
+    rows.push(row);
+  }
+  reconcileTaskRows(completedEl, rows);
+  updateHistoryControls();
+}
+
+async function refreshHistory() {
+  const snapshot = await api('/telegram/api/history');
+  renderHistory(snapshot.records, snapshot.history_retention_days);
+  historyPeriod('telegram', snapshot.history_retention_days);
+  filesEl.textContent = snapshot.downloaded_files.toLocaleString();
+  bytesEl.textContent = sizeLabel(snapshot.downloaded_bytes);
+}
+
+async function historyAction(path, message) {
+  if (historyBusy) return;
+  historyBusy = true;
+  updateHistoryControls();
+  const banner = document.querySelector('#history-banner');
+  banner.hidden = true;
+  banner.className = 'banner';
+  try {
+    if (path) await api(path, { method: 'DELETE' });
+    await refreshHistory();
+    if (message) {
+      banner.textContent = message;
+      banner.hidden = false;
+    }
+  } catch (error) {
+    banner.textContent = error.message;
+    banner.className = 'banner err';
+    banner.hidden = false;
+  } finally {
+    historyBusy = false;
+    updateHistoryControls();
+  }
+}
+
+function loadHistory() { return historyAction(); }
+document.querySelector('#btn-reload-history').onclick = loadHistory;
+document.querySelector('#btn-clear-history').onclick = () => {
+  if (!confirm('Clear retained history? Saved files are kept and these messages can be requested again. Chat scan positions are unchanged.')) return;
+  historyAction('/telegram/api/history', 'History cleared. Saved files were kept.');
+};
+completedEl.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-forget]');
+  if (button) historyAction('/telegram/api/history/' + encodeURIComponent(button.dataset.forget), 'Removed from history. You can request the message again; the saved file was kept.');
+});
+
 function render(snapshot) {
   renderLogin(snapshot.login);
   historyPeriod("telegram", snapshot.history_retention_days);
@@ -108,38 +194,7 @@ function render(snapshot) {
   filesEl.textContent = snapshot.downloaded_files.toLocaleString();
   bytesEl.textContent = sizeLabel(snapshot.downloaded_bytes);
   activeEl.textContent = snapshot.active_count;
-
-  completedEl.replaceChildren();
-  if (snapshot.completed.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = `No downloads in the last ${snapshot.history_retention_days} days.`;
-    completedEl.append(empty);
-  }
-  for (const item of snapshot.completed) {
-    const card = document.createElement("div");
-    card.className = "download-card";
-    card.innerHTML = `
-      <div class="download-head">
-        <strong class="file"></strong>
-        <span class="size"></span>
-      </div>
-      <div class="download-meta">
-        <time class="completed-at"></time>
-        <span class="msg"></span>
-      </div>
-      <div class="path"></div>
-    `;
-    setText(".file", item.file_name, card);
-    setText(".size", sizeLabel(item.size), card);
-    setText(".msg", `msg ${item.msg_id}`, card);
-    setText(".path", item.path, card);
-    const date = new Date(item.completed_at);
-    const time = card.querySelector("time");
-    time.dateTime = date.toISOString();
-    time.textContent = `Saved ${dateTime(item.completed_at)}`;
-    completedEl.append(card);
-  }
+  renderHistory(snapshot.completed, snapshot.history_retention_days);
 
   const rows = [];
   document.querySelector('#tasks-empty').style.display = snapshot.active.length ? 'none' : 'block';
