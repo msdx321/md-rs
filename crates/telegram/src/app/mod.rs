@@ -4,6 +4,7 @@ mod scan;
 pub(crate) mod setup;
 mod shutdown;
 mod state;
+mod temp;
 
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
@@ -99,6 +100,7 @@ pub(crate) async fn run_downloader(
             let _cancellation = web_state.download_cancel.lock().await;
             while download_rx.try_recv().is_ok() {}
             cancellation::discard_pending(&web_state.database, &mut data_chats).await?;
+            temp::clean_empty_dirs(&cfg.temp_path).await;
             persist_state(
                 &web_state.database,
                 &file_ids,

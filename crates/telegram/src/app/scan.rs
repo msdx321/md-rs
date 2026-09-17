@@ -285,6 +285,7 @@ async fn process_chat(
             Err(e) => warn!("download task panicked: {e}"),
         }
     }
+    super::temp::clean_empty_dirs(&cfg.temp_path).await;
 
     let completed = !shutdown.is_cancelled();
     let last_id = if completed || shutdown.work_cancelled() {
@@ -336,7 +337,7 @@ pub(super) async fn run_message_download(
         permit = runtime.dl_sem.clone().acquire_owned() => permit?,
         _ = shutdown.cancelled() => anyhow::bail!("download interrupted"),
     };
-    download_media_inner(
+    let result = download_media_inner(
         client,
         &message,
         cfg,
@@ -345,8 +346,9 @@ pub(super) async fn run_message_download(
         &runtime.web_state,
         shutdown,
     )
-    .await?;
-    Ok(())
+    .await;
+    super::temp::clean_empty_dirs(&cfg.temp_path).await;
+    result.map(|_| ())
 }
 
 pub(super) async fn resolve_chat(client: &Client, chat_id: &str) -> anyhow::Result<PeerRef> {
