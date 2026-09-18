@@ -20,7 +20,7 @@ pub(super) fn require_tools() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_output(path: &Path, duration: Option<f64>) -> anyhow::Result<()> {
+fn probe(path: &Path) -> anyhow::Result<serde_json::Value> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -30,19 +30,23 @@ pub(super) fn validate_output(path: &Path, duration: Option<f64>) -> anyhow::Res
             "-analyzeduration",
             "30000000",
             "-show_entries",
-            "stream=codec_type,duration,nb_frames",
+            "stream=codec_type,codec_name,profile,duration,nb_frames",
             "-of",
             "json",
         ])
         .arg(path)
         .output()
-        .context("cannot run ffprobe to validate merged audio and video")?;
+        .context("cannot run ffprobe to inspect audio and video")?;
     anyhow::ensure!(
         output.status.success(),
-        "merged file is unreadable: {}",
+        "media file is unreadable: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    let probe: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+pub(super) fn validate_output(path: &Path, duration: Option<f64>) -> anyhow::Result<()> {
+    let probe = probe(path)?;
     let streams = probe["streams"]
         .as_array()
         .context("no media streams found")?;
@@ -115,15 +119,35 @@ pub(super) fn merge_segments(
         .as_deref()
         .map(|audio| assemble_track(&temp_dir.join("audio"), audio, &running))
         .transpose()?;
+    // Inspect the continuous track, not just its first segment: audio can start
+    // later in a muxed HLS stream. AAC-LC already works in MP4 and Emby.
+    let input = probe(audio.as_ref().unwrap_or(&video).path())?;
+    let audio_stream = input["streams"]
+        .as_array()
+        .and_then(|streams| {
+            streams
+                .iter()
+                .find(|stream| stream["codec_type"] == "audio")
+        })
+        .context("no audio stream found; refusing to produce a silent video")?;
+    let copy_audio = audio_stream["codec_name"] == "aac" && audio_stream["profile"] == "LC";
+    anyhow::ensure!(running(), "merge interrupted");
     // Stage beside the destination: temp and downloads may be different mounts.
-    let staged = tempfile::Builder::new()
-        .prefix(".jav-merge-")
-        .suffix(".mp4.part")
-        .tempfile_in(
-            final_path
-                .parent()
-                .context("output has no parent directory")?,
-        )?;
+    let mut staging = tempfile::Builder::new();
+    staging.prefix(".jav-merge-").suffix(".mp4.part");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // NamedTempFile otherwise forces 0600, which survives ffmpeg and rename
+        // and prevents media servers running as another user from reading it.
+        // Apply normal output-file permissions, respecting umask and default ACLs.
+        staging.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let staged = staging.tempfile_in(
+        final_path
+            .parent()
+            .context("output has no parent directory")?,
+    )?;
     let mut command = Command::new("ffmpeg");
     command.args([
         "-nostdin",
@@ -153,16 +177,14 @@ pub(super) fn merge_segments(
         "-map",
         if audio.is_some() { "1:a:0" } else { "0:a:0" },
     ]);
+    command.args(["-c:v", "copy", "-c:a"]);
+    if copy_audio {
+        command.arg("copy");
+    } else {
+        command.args(["aac", "-profile:a", "aac_low", "-b:a", "192k"]);
+    }
     command
         .args([
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-profile:a",
-            "aac_low",
-            "-b:a",
-            "192k",
             "-movflags",
             "+faststart",
             "-avoid_negative_ts",
