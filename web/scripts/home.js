@@ -2,14 +2,18 @@ import { $, api, connectEvents, pollWhenVisible, scheduleRender, reconcileRows, 
 
 let telegram = null;
 let jav = null;
+let p91 = null;
 let tasks = null;
+let p91Tasks = null;
 let history = null;
+let p91History = null;
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const queueSummary = scheduleRender(renderSummary);
 const queueActivity = scheduleRender(renderActivity);
 const queueHistory = scheduleRender(renderHistory);
 const renderedLists = new Map();
-let lastJavRun;
+const javRun = { value: undefined };
+const p91Run = { value: undefined };
 let lastTelegramRun;
 
 function renderTelegramRun(snapshot) {
@@ -61,36 +65,36 @@ function renderTelegramRun(snapshot) {
   }));
 }
 
-function renderJavRun(scheduler) {
-  const signature = JSON.stringify([scheduler.running, scheduler.last_result]);
-  if (signature === lastJavRun) return;
-  lastJavRun = signature;
+function renderRun(prefix, scheduler, signature) {
+  const current = JSON.stringify([scheduler.running, scheduler.last_result]);
+  if (current === signature.value) return;
+  signature.value = current;
   const result = scheduler.last_result || '';
   // The scheduler also sends free-form progress and error messages.
   const match = result.match(/^(manual|scheduled): (\d+)\/(\d+) completed, (\d+) attempted, (\d+) failed, (\d+) skipped; ([\s\S]*)$/);
   const structured = !scheduler.running && match !== null;
-  $('jav-run-counts').hidden = !structured;
-  $('jav-run-details').hidden = !structured;
+  $(`${prefix}-run-counts`).hidden = !structured;
+  $(`${prefix}-run-details`).hidden = !structured;
   if (!structured) {
-    $('jav-status').textContent = scheduler.running ? 'Scheduled job running' : result || 'Ready for downloads';
+    $(`${prefix}-status`).textContent = scheduler.running ? 'Scheduled job running' : result || 'Ready for downloads';
     return;
   }
   const [, trigger, completed, target, attempted, failed, skipped, details] = match;
   const stopped = details.endsWith('stopped by user');
-  $('jav-status').textContent = `Last ${trigger} run${stopped ? ' · Stopped' : Number(completed) < Number(target) ? ' · Incomplete' : ''}`;
+  $(`${prefix}-status`).textContent = `Last ${trigger} run${stopped ? ' · Stopped' : Number(completed) < Number(target) ? ' · Incomplete' : ''}`;
   const counts = [
     [`${completed} / ${target} completed`, 'completed'],
     [`${attempted} attempted`, ''],
     [`${failed} failed`, Number(failed) ? 'failed' : ''],
     [`${skipped} skipped`, ''],
   ];
-  $('jav-run-counts').replaceChildren(...counts.map(([text, kind]) => {
+  $(`${prefix}-run-counts`).replaceChildren(...counts.map(([text, kind]) => {
     const count = document.createElement('span');
     count.className = `tag ${kind}`;
     count.textContent = text;
     return count;
   }));
-  $('jav-run-breakdown').replaceChildren(...details.split('; ').map((text) => {
+  $(`${prefix}-run-breakdown`).replaceChildren(...details.split('; ').map((text) => {
     const item = document.createElement('li');
     item.textContent = text;
     return item;
@@ -98,7 +102,7 @@ function renderJavRun(scheduler) {
 }
 
 function renderSummary() {
-  $('overview-active').textContent = telegram && jav ? telegram.active_count + jav.active_tasks : '—';
+  $('overview-active').textContent = telegram && jav && p91 ? telegram.active_count + jav.active_tasks + p91.active_tasks : '—';
   if (telegram) {
     historyPeriod("telegram", telegram.history_retention_days);
     $('overview-telegram').textContent = telegram.downloaded_files.toLocaleString();
@@ -112,8 +116,16 @@ function renderSummary() {
     $('overview-jav').textContent = jav.downloaded.toLocaleString();
     $('jav-transfers').textContent = `${jav.active_tasks} active`;
     $('jav-saved').textContent = bytes(jav.downloaded_bytes);
-    renderJavRun(jav.scheduler);
+    renderRun('jav', jav.scheduler, javRun);
     $('jav-next-run').textContent = !jav.scheduler.enabled ? 'Disabled' : jav.scheduler.next_run_at ? dateTime(jav.scheduler.next_run_at) : 'Waiting for next run';
+  }
+  if (p91) {
+    historyPeriod("p91", p91.history_retention_days);
+    $('overview-p91').textContent = p91.downloaded.toLocaleString();
+    $('p91-transfers').textContent = `${p91.active_tasks} active`;
+    $('p91-saved').textContent = bytes(p91.downloaded_bytes);
+    renderRun('p91', p91.scheduler, p91Run);
+    $('p91-next-run').textContent = !p91.scheduler.enabled ? 'Disabled' : p91.scheduler.next_run_at ? dateTime(p91.scheduler.next_run_at) : 'Waiting for next run';
   }
 }
 
@@ -134,6 +146,13 @@ function activeDownloads() {
         : task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
       status: task.state === 'paused' ? 'Paused' : `${bytes(task.downloaded_bytes)} · ${bytes(task.speed_kbps * 1024)}/s`,
     })),
+    ...(p91Tasks || []).filter((task) => !terminal.has(task.state)).map((task) => ({
+      id: `p91:${task.id}`,
+      source: '91Porn', name: task.title || task.id,
+      detail: `${label(task.state)} · ${label(task.phase)}`,
+      progress: task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
+      status: task.state === 'paused' ? 'Paused' : `${bytes(task.downloaded_bytes)} · ${bytes(task.speed_kbps * 1024)}/s`,
+    })),
   ];
 }
 
@@ -146,6 +165,10 @@ function recentDownloads() {
     ...(history || []).map((item) => ({
       id: `jav:${item.id}`,
       source: 'JAV', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
+    })),
+    ...(p91History || []).map((item) => ({
+      id: `p91:${item.id}`,
+      source: '91Porn', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
     })),
   ].sort((a, b) => b.date - a.date).slice(0, 10);
 }
@@ -215,30 +238,31 @@ function renderRows(target, rows, empty) {
 function renderActivity() {
   const rows = activeDownloads();
   $('activity-count').textContent = `${rows.length} active`;
-  renderRows($('overview-downloads'), rows, telegram && tasks ? 'All caught up. New downloads will appear here.' : 'Waiting for all modules…');
+  renderRows($('overview-downloads'), rows, telegram && tasks && p91Tasks ? 'All caught up. New downloads will appear here.' : 'Waiting for all modules…');
 }
 function renderHistory() {
-  renderRows($('overview-history'), recentDownloads(), telegram && history ? 'No downloads recorded yet' : 'Waiting for all modules…');
+  renderRows($('overview-history'), recentDownloads(), telegram && history && p91History ? 'No downloads recorded yet' : 'Waiting for all modules…');
 }
 async function refreshTasks() {
-  try {
-    tasks = await api('/jav/api/tasks');
-    $('activity-error').hidden = true;
-    queueActivity();
-  } catch {
-    $('activity-error').textContent = 'JAV task status is unavailable. Retrying automatically.';
-    $('activity-error').hidden = false;
-  }
+  const results = await Promise.allSettled([api('/jav/api/tasks'), api('/p91/api/tasks')]);
+  if (results[0].status === 'fulfilled') tasks = results[0].value;
+  if (results[1].status === 'fulfilled') p91Tasks = results[1].value;
+  const failed = results.some((result) => result.status === 'rejected');
+  $('activity-error').hidden = !failed;
+  if (failed) $('activity-error').textContent = 'Download task status is unavailable. Retrying automatically.';
+  queueActivity();
 }
 async function refreshHistory() {
-  try {
-    history = (await api('/jav/api/history')).records;
-    $('history-error').hidden = true;
-    queueHistory();
-  } catch {
-    $('history-error').textContent = 'JAV history is unavailable. Retrying automatically.';
-    $('history-error').hidden = false;
-  }
+  const results = await Promise.allSettled([
+    api('/jav/api/history').then((data) => data.records),
+    api('/p91/api/history').then((data) => data.records),
+  ]);
+  if (results[0].status === 'fulfilled') history = results[0].value;
+  if (results[1].status === 'fulfilled') p91History = results[1].value;
+  const failed = results.some((result) => result.status === 'rejected');
+  $('history-error').hidden = !failed;
+  if (failed) $('history-error').textContent = 'Download history is unavailable. Retrying automatically.';
+  queueHistory();
 }
 connectEvents('/telegram/events', {
   message(event) {
@@ -259,5 +283,18 @@ connectEvents('/jav/api/events', {
   },
   open() { refreshTasks(); refreshHistory(); },
 }, $('jav-connection'));
+connectEvents('/p91/api/events', {
+  status(event) { p91 = JSON.parse(event.data); queueSummary(); },
+  task(event) {
+    const task = JSON.parse(event.data);
+    if (p91Tasks) {
+      p91Tasks = p91Tasks.filter((item) => item.id !== task.id);
+      p91Tasks.push(task);
+      queueActivity();
+    }
+    if (terminal.has(task.state)) refreshHistory();
+  },
+  open() { refreshTasks(); refreshHistory(); },
+}, $('p91-connection'));
 // Refresh removals and history changes made in another tab, which have no task event.
 pollWhenVisible(() => Promise.all([refreshTasks(), refreshHistory()]), 30000);

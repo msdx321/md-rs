@@ -19,7 +19,7 @@ let paused = false;
 let loading = false;
 let error = false;
 
-source.value = ['telegram', 'jav'].find(module => document.body.classList.contains(module)) || '';
+source.value = ['telegram', 'jav', 'p91'].find(module => document.body.classList.contains(module)) || '';
 
 function showScope() {
   $('logs-scope').textContent = source.selectedOptions[0].textContent;

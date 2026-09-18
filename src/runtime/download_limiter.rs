@@ -10,11 +10,12 @@ use crate::configuration::app::Config;
 pub enum DownloadModule {
     Telegram = 1,
     Jav = 2,
+    P91 = 3,
 }
 
 pub struct DownloadLimiter {
     settings: watch::Receiver<Config>,
-    buckets: Mutex<[Bucket; 3]>,
+    buckets: Mutex<[Bucket; 4]>,
 }
 
 struct Bucket {
@@ -109,11 +110,12 @@ impl DownloadLimiter {
     }
 }
 
-fn rates(config: &Config) -> [u64; 3] {
+fn rates(config: &Config) -> [u64; 4] {
     [
         config.download_limit_mb_per_sec,
         config.telegram_download_limit_mb_per_sec,
         config.jav_download_limit_mb_per_sec,
+        config.p91_download_limit_mb_per_sec,
     ]
     .map(|rate| (rate * 1_000_000.0).round() as u64)
 }

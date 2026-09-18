@@ -37,7 +37,14 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     ));
     let mut engines =
         vec![crate::telegram::start(database.clone(), updates.clone(), limiter.clone()).await?];
-    match crate::jav::start(database, updates, limiter).await {
+    match crate::jav::start(database.clone(), updates.clone(), limiter.clone()).await {
+        Ok(engine) => engines.push(engine),
+        Err(error) => {
+            crate::runtime::shutdown_all(engines).await;
+            return Err(error);
+        }
+    };
+    match crate::p91::start(database, updates, limiter).await {
         Ok(engine) => engines.push(engine),
         Err(error) => {
             crate::runtime::shutdown_all(engines).await;

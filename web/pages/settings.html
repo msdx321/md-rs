@@ -7,6 +7,7 @@
         <div class="form">
           <div class="field"><label for="telegram_download_path">Telegram download directory</label><input id="telegram_download_path" required></div>
           <div class="field"><label for="jav_download_path">JAV download directory</label><input id="jav_download_path" required></div>
+          <div class="field"><label for="p91_download_path">91Porn download directory</label><input id="p91_download_path" required></div>
           <div class="field"><label for="temp_path">Temporary directory</label><input id="temp_path" required><span class="hint">Shared by both modules while downloads are in progress.</span></div>
           <div class="field"><label for="history_retention_days">Keep history for (days)</label><input id="history_retention_days" type="number" min="1" max="36500" required><span class="hint">Downloaded files are kept. After history expires, older media can be downloaded again.</span></div>
         </div>
@@ -18,6 +19,7 @@
           <div class="field"><label for="download_limit_mb_per_sec">Combined limit (MB/s)</label><input id="download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Shared across Telegram and JAV. 0 = unlimited.</span></div>
           <div class="field"><label for="telegram_download_limit_mb_per_sec">Telegram limit (MB/s)</label><input id="telegram_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all Telegram downloads. 0 = no separate limit.</span></div>
           <div class="field"><label for="jav_download_limit_mb_per_sec">JAV limit (MB/s)</label><input id="jav_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all JAV downloads. 0 = no separate limit.</span></div>
+          <div class="field"><label for="p91_download_limit_mb_per_sec">91Porn limit (MB/s)</label><input id="p91_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all 91Porn downloads. 0 = no separate limit.</span></div>
         </div>
         <p class="hint">Each module also obeys the combined limit.</p>
       </section>
@@ -41,6 +43,17 @@
           <div class="field"><label for="jav-interval_secs">Interval (seconds)</label><input id="jav-interval_secs" type="number" min="1" max="604800" required><span class="hint">Starts after the previous run finishes.</span></div>
           <div class="field"><label for="jav-daily_time">Daily time</label><input id="jav-daily_time" type="time" required><span class="hint">Uses the server’s local timezone.</span></div>
           <div class="field"><label for="jav-run_on_start">Run on startup</label><select id="jav-run_on_start"><option value="false">No</option><option value="true">Yes</option></select></div>
+        </div>
+      </section>
+      <section class="settings-card" data-schedule="p91">
+        <h2>91Porn schedule</h2>
+        <p>Choose when to check for new media.</p>
+        <div class="form">
+          <div class="field"><label for="p91-enabled">Automatic runs</label><select id="p91-enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
+          <div class="field"><label for="p91-mode">Run mode</label><select id="p91-mode"><option value="periodic">Periodically</option><option value="daily">Daily</option></select></div>
+          <div class="field"><label for="p91-interval_secs">Interval (seconds)</label><input id="p91-interval_secs" type="number" min="1" max="604800" required><span class="hint">Starts after the previous run finishes.</span></div>
+          <div class="field"><label for="p91-daily_time">Daily time</label><input id="p91-daily_time" type="time" required><span class="hint">Uses the server’s local timezone.</span></div>
+          <div class="field"><label for="p91-run_on_start">Run on startup</label><select id="p91-run_on_start"><option value="false">No</option><option value="true">Yes</option></select></div>
         </div>
       </section>
     </div>

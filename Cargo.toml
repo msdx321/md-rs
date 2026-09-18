@@ -34,7 +34,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 url = "2"
-wreq = { version = "0.16", features = ["stream", "gzip", "brotli", "deflate", "zstd"] }
+wreq = { version = "0.16", features = ["stream", "gzip", "brotli", "deflate", "zstd", "cookies"] }
 wreq-util = "0.2"
 
 [profile.release]

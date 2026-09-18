@@ -1,5 +1,6 @@
 //! Application persistence: shared database lifecycle and provider repositories.
 pub mod jav;
+pub mod p91;
 pub mod telegram;
 use std::{path::Path, sync::Arc};
 
@@ -25,7 +26,7 @@ impl Database {
             .context("missing schema version")?
             .get(0)?;
         anyhow::ensure!(
-            version <= 5,
+            version <= 6,
             "database schema version {version} is newer than this app supports"
         );
         if version == 0 {
@@ -47,6 +48,10 @@ impl Database {
         if version < 5 {
             tx.execute_batch(include_str!("schema-v5.sql")).await?;
             tx.execute_batch("PRAGMA user_version=5").await?;
+        }
+        if version < 6 {
+            tx.execute_batch(include_str!("schema-v6.sql")).await?;
+            tx.execute_batch("PRAGMA user_version=6").await?;
         }
         tx.commit().await?;
         Ok(Self(Arc::new(Mutex::new(connection))))

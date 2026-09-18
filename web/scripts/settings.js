@@ -1,7 +1,7 @@
 import { $, api, scheduleRender } from './shared.js';
-const paths = ['host', 'telegram_download_path', 'jav_download_path', 'temp_path'];
-const numbers = ['port', 'history_retention_days', 'download_limit_mb_per_sec', 'telegram_download_limit_mb_per_sec', 'jav_download_limit_mb_per_sec'];
-const modules = ['telegram', 'jav'];
+const paths = ['host', 'telegram_download_path', 'jav_download_path', 'p91_download_path', 'temp_path'];
+const numbers = ['port', 'history_retention_days', 'download_limit_mb_per_sec', 'telegram_download_limit_mb_per_sec', 'jav_download_limit_mb_per_sec', 'p91_download_limit_mb_per_sec'];
+const modules = ['telegram', 'jav', 'p91'];
 let current;
 let saving = false;
 let saved = '';

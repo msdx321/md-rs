@@ -1,0 +1,143 @@
+<div class="stats-grid" aria-label="Download summary">
+  <div class="stat"><span>Files saved <small data-history-days="p91">· 30 days</small></span><strong id="stat-files">—</strong></div>
+  <div class="stat"><span>Data saved <small data-history-days="p91">· 30 days</small></span><strong id="stat-bytes">—</strong></div>
+  <div class="stat"><span>In progress</span><strong id="stat-active">—</strong></div>
+</div>
+<div class="control-panel">
+  <div class="control-copy"><h2>Scheduled downloads</h2><p>Save the current listing. Already saved videos are skipped.</p>
+    <div class="status-row"><span class="pill" id="pill-access" role="status">Checking access</span><span class="pill" id="pill-sched" role="status">Checking schedule</span></div>
+  </div>
+  <button class="primary" id="btn-run">Run now</button>
+</div>
+<div class="panel">
+<nav role="tablist" aria-label="Media library">
+  <button id="popular-tab" data-tab="popular" class="active" role="tab" aria-selected="true" aria-controls="tab-popular">Listing</button>
+  <button id="tasks-tab" data-tab="tasks" role="tab" aria-selected="false" aria-controls="tab-tasks" tabindex="-1">Tasks <span id="task-count"></span></button>
+  <button id="history-tab" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history" tabindex="-1">History</button>
+  <button id="settings-tab" data-tab="settings" role="tab" aria-selected="false" aria-controls="tab-settings" tabindex="-1">Settings</button>
+</nav>
+  <section id="tab-popular" role="tabpanel" aria-labelledby="popular-tab" tabindex="0" class="active">
+    <div class="actions toolbar">
+      <label for="popular-link">Listing link</label>
+      <select id="popular-link" aria-label="Listing link"></select>
+      <button id="btn-refresh">Refresh listing</button>
+      <span class="muted" id="popular-note"></span>
+    </div>
+    <div id="popular-banner"></div>
+    <div class="grid" id="popular-grid"><div class="empty">Loading videos…</div></div>
+    <div class="actions pagination">
+      <button id="btn-prev" disabled>‹ Previous</button>
+      <span class="muted">Page <b id="page-num">1</b></span>
+      <button id="btn-next" disabled>Next ›</button>
+    </div>
+  </section>
+
+  <section id="tab-tasks" role="tabpanel" aria-labelledby="tasks-tab" tabindex="0">
+    <div class="actions toolbar"><button id="btn-pause">Pause all</button><button id="btn-resume">Resume all</button><button class="danger" id="btn-cancel">Cancel all</button><button id="btn-clear-failed" disabled>Clear failed</button></div><div id="tasks-banner" role="status"></div>
+    {{task_table}}
+  </section>
+
+  <section id="tab-history" role="tabpanel" aria-labelledby="history-tab" tabindex="0">
+    <div class="actions toolbar">
+      <button id="btn-reload-history">Reload</button>
+      <button class="danger" id="btn-clear-history">Clear history (keep files)</button>
+    </div>
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Download records"><table class="history-table" data-resizable="history">
+      <colgroup><col><col><col><col><col><col></colgroup>
+      <thead>
+        <tr><th data-min-width="160">Title</th><th>Rank</th><th>Size</th><th data-min-width="220">Finished</th><th>Status</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="history-body"></tbody>
+    </table></div>
+    <div class="empty" id="history-empty">No downloads in the last 30 days.</div>
+    {{history_pagination}}
+  </section>
+
+  <section id="tab-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0">
+    <div id="settings-banner"></div>
+    <div class="settings-heading"><h2>91Porn preferences</h2><p>Choose what to save and how to download it. Manage timing in <a href="/settings/">shared settings</a>.</p></div>
+    <form id="settings-form">
+    <fieldset id="settings-fields" disabled>
+    <div class="settings-grid">
+<div class="settings-card ranking-links"><div class="settings-list-heading"><h3>Listing links <span id="ranking-count" class="tag">0</span></h3><button type="button" id="btn-add-link">Add link</button></div><p class="settings-description">Open a link to edit its URL and download quota. Shared videos are downloaded once. Changes take effect after saving.</p>
+    <div class="settings-list-search"><label for="ranking-search">Find a listing link</label><input id="ranking-search" type="search" placeholder="Search by URL or path" autocomplete="off" aria-controls="ranking-links"><span id="ranking-search-count" class="hint" role="status"></span></div>
+    <div id="ranking-links" class="settings-list"></div>
+    <p id="no-ranking-matches" class="empty" hidden>No matching links. Try another URL or path.</p>
+    <p class="hint">Keep at least one listing link. Failed downloads are replaced within each link’s page limit.</p>
+</div>
+<div class="settings-card"><h3>Downloads</h3><p class="settings-description">Choose your preferred quality and pacing.</p><div class="form">
+      <div class="field">
+        <label for="prefer_hd">Quality preference</label>
+        <select id="prefer_hd">
+          <option value="true">Prefer HD (requires VIP account cookies)</option>
+          <option value="false">Standard quality only</option>
+        </select>
+        <span class="hint">HD falls back to the standard quality when the site withholds it.</span>
+      </div>
+      <div class="field">
+        <label for="min_duration_secs">Minimum duration (seconds)</label>
+        <input id="min_duration_secs" type="number" required min="0" step="any">
+        <span class="hint">Filter listings and scheduled runs by duration. Videos with unknown duration stay eligible; direct URLs are unaffected.</span>
+      </div>
+      <div class="field">
+        <label for="concurrent_videos">Concurrent downloads</label>
+        <input id="concurrent_videos" type="number" required min="1" max="8">
+      </div></div></div>
+<div class="settings-card"><h3>Video selection</h3><p class="settings-description">Filter listing entries before choosing videos.</p><div class="form">      <div class="field">
+        <label for="hd_only">Quality filter</label>
+        <select id="hd_only">
+          <option value="false">All videos</option>
+          <option value="true">HD videos only</option>
+        </select>
+        <span class="hint">Keep HD-marked listing entries. Download quality still follows your quality preference and may fall back to standard. Direct URLs are unaffected.</span>
+      </div>
+      <div class="field">
+        <label for="title_filter">Video name filter</label>
+        <input id="title_filter" placeholder="All titles" spellcheck="false">
+        <span class="hint">Include matching titles in the listing and scheduled downloads. Blank includes all. Direct URL downloads are unaffected.</span>
+      </div>
+      <div class="field">
+        <label for="title_filter_regex">Name matching</label>
+        <select id="title_filter_regex">
+          <option value="false">Plain text (case-insensitive)</option>
+          <option value="true">Regular expression</option>
+        </select>
+        <span class="hint" id="regex-hint" hidden>Regex is case-sensitive; use (?i) to ignore case.</span>
+      </div>
+      <div class="field">
+        <label for="max_pages">Listing pages to scan</label>
+        <input id="max_pages" type="number" required min="1" max="20">
+      </div></div></div>
+<div class="settings-card"><h3>Site access</h3><p class="settings-description">Browsing as a guest works without a cookie. HD needs an account with VIP status.</p><div class="form">      <div class="field full">
+        <label for="cookie">Logged-in session cookie</label>
+        <textarea id="cookie" placeholder="leave empty to browse as a guest"></textarea>
+        <span class="hint">Paste the full Cookie request header from a signed-in browser, not just <code>CLIPSHARE</code>; the login also depends on cookies such as <code>91username</code>, <code>SUID</code> and <code>USERNAME</code>. It is stored locally in <code>config/p91.yaml</code>.</span>
+      </div>
+      <div class="field full">
+        <label for="btn-check-access">Site access</label>
+        <button type="button" id="btn-check-access" class="secondary">Check access now</button>
+        <span class="hint" id="access-detail">Checking…</span>
+      </div></div></div>
+    </div>
+    <details class="settings-advanced"><summary>Advanced settings <span>User agent and site override</span></summary>
+    <div class="settings-grid">
+<div class="settings-card"><h3>Site</h3><div class="form"><div class="field full">
+        <label for="site_base">Site base URL</label>
+        <input id="site_base">
+      </div></div></div>
+<div class="settings-card"><h3>Manual access overrides</h3><p class="settings-description">Leave empty to use the browser default.</p><div class="form">      <div class="field full">
+        <label for="user_agent">User agent (optional override)</label>
+        <input id="user_agent" placeholder="leave empty to use the browser's own">
+        <span class="hint">For a pasted cookie, use the User-Agent from the browser that issued it.</span>
+      </div></div></div>
+    </div></details>
+    </fieldset>
+    <div id="settings-error" class="banner err" role="alert" hidden></div>
+    <div class="settings-savebar">
+      <span class="muted" id="save-note" role="status">Loading settings…</span>
+      <div class="settings-save-actions"><button type="button" id="btn-discard" disabled>Discard changes</button><button type="submit" class="primary" id="btn-save" disabled>Save settings</button></div>
+    </div>
+    </form>
+    {{log_panel}}
+  </section>
+</div>

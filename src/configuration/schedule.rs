@@ -53,6 +53,7 @@ impl Schedule {
 pub struct Schedules {
     pub telegram: Schedule,
     pub jav: Schedule,
+    pub p91: Schedule,
 }
 impl Default for Schedules {
     fn default() -> Self {
@@ -62,6 +63,10 @@ impl Default for Schedules {
                 ..Schedule::default()
             },
             jav: Schedule {
+                mode: Mode::Daily,
+                ..Schedule::default()
+            },
+            p91: Schedule {
                 mode: Mode::Daily,
                 ..Schedule::default()
             },

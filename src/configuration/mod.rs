@@ -1,5 +1,6 @@
 pub mod app;
 pub mod jav;
+pub mod p91;
 pub mod schedule;
 pub mod telegram;
 
@@ -14,6 +15,7 @@ use std::{
 pub const DIRECTORY: &str = "config";
 pub const TELEGRAM_FILE: &str = "config/telegram.yaml";
 pub const JAV_FILE: &str = "config/jav.yaml";
+pub const P91_FILE: &str = "config/p91.yaml";
 
 /// A configuration file paired with its provider-owned data model.
 pub struct ConfigFile<T> {

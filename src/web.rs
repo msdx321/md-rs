@@ -7,7 +7,8 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
         .route("/settings/", get(|| async { page("settings") }))
         .route("/", get(|| async { page("home") }))
         .route("/telegram/", get(|| async { page("telegram") }))
-        .route("/jav/", get(|| async { page("jav") }));
+        .route("/jav/", get(|| async { page("jav") }))
+        .route("/p91/", get(|| async { page("p91") }));
     let app = [
         (
             "table-columns.js",
@@ -55,6 +56,7 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
             include_str!("../web/styles/telegram.css"),
         ),
         ("jav.css", "text/css", include_str!("../web/styles/jav.css")),
+        ("p91.css", "text/css", include_str!("../web/styles/p91.css")),
         (
             "theme.js",
             "text/javascript",
@@ -79,6 +81,11 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
             "jav.js",
             "text/javascript",
             include_str!("../web/scripts/jav.js"),
+        ),
+        (
+            "p91.js",
+            "text/javascript",
+            include_str!("../web/scripts/p91.js"),
         ),
     ]
     .into_iter()
@@ -112,6 +119,13 @@ fn page(section: &str) -> Html<String> {
             "Videos and scheduled downloads",
             "J",
             include_str!("../web/pages/jav.html"),
+            "",
+        ),
+        "p91" => (
+            "91Porn",
+            "Videos and scheduled downloads",
+            "91",
+            include_str!("../web/pages/p91.html"),
             "",
         ),
         _ => (
@@ -159,7 +173,7 @@ fn page(section: &str) -> Html<String> {
         .replace("{{section}}", section)
         .replace("{{page_assets}}", &assets)
         .replace("{{header}}", &header);
-    for name in ["home", "telegram", "jav", "settings"] {
+    for name in ["home", "telegram", "jav", "p91", "settings"] {
         html = html.replace(
             &format!("{{{{{name}_current}}}}"),
             if name == section {

@@ -6,12 +6,18 @@ pub const FILE: crate::configuration::ConfigFile<Config> =
         .with_defaults()
         .with_groups(&[
             &["host", "port"],
-            &["jav_download_path", "telegram_download_path", "temp_path"],
+            &[
+                "jav_download_path",
+                "p91_download_path",
+                "telegram_download_path",
+                "temp_path",
+            ],
             &["history_retention_days"],
             &[
                 "download_limit_mb_per_sec",
-                "telegram_download_limit_mb_per_sec",
                 "jav_download_limit_mb_per_sec",
+                "p91_download_limit_mb_per_sec",
+                "telegram_download_limit_mb_per_sec",
             ],
             &["schedules"],
         ]);
@@ -23,10 +29,12 @@ pub struct Config {
     pub download_limit_mb_per_sec: f64,
     pub telegram_download_limit_mb_per_sec: f64,
     pub jav_download_limit_mb_per_sec: f64,
+    pub p91_download_limit_mb_per_sec: f64,
 
     pub history_retention_days: u32,
     pub telegram_download_path: std::path::PathBuf,
     pub jav_download_path: std::path::PathBuf,
+    pub p91_download_path: std::path::PathBuf,
     pub temp_path: std::path::PathBuf,
     pub port: u16,
     pub schedules: crate::configuration::schedule::Schedules,
@@ -40,8 +48,10 @@ impl Default for Config {
             download_limit_mb_per_sec: 0.0,
             telegram_download_limit_mb_per_sec: 0.0,
             jav_download_limit_mb_per_sec: 0.0,
+            p91_download_limit_mb_per_sec: 0.0,
             telegram_download_path: "downloads/telegram".into(),
             jav_download_path: "downloads/jav".into(),
+            p91_download_path: "downloads/p91".into(),
             temp_path: "temp".into(),
             port: 8080,
             schedules: crate::configuration::schedule::Schedules::default(),
@@ -72,6 +82,7 @@ impl Config {
             self.download_limit_mb_per_sec,
             self.telegram_download_limit_mb_per_sec,
             self.jav_download_limit_mb_per_sec,
+            self.p91_download_limit_mb_per_sec,
         ] {
             anyhow::ensure!(
                 limit == 0.0 || (0.000001..=u32::MAX as f64).contains(&limit),
@@ -89,6 +100,7 @@ impl Config {
         for path in [
             &self.telegram_download_path,
             &self.jav_download_path,
+            &self.p91_download_path,
             &self.temp_path,
         ] {
             anyhow::ensure!(
@@ -98,6 +110,7 @@ impl Config {
         }
         self.schedules.telegram.validate()?;
         self.schedules.jav.validate()?;
+        self.schedules.p91.validate()?;
         Ok(())
     }
 }
