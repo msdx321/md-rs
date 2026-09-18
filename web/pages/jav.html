@@ -59,6 +59,7 @@
       <tbody id="history-body"></tbody>
     </table></div>
     <div class="empty" id="history-empty">No downloads in the last 30 days.</div>
+    {{history_pagination}}
   </section>
 
   <section id="tab-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0">
@@ -157,5 +158,6 @@
       <div class="settings-save-actions"><button type="button" id="btn-discard" disabled>Discard changes</button><button type="submit" class="primary" id="btn-save" disabled>Save settings</button></div>
     </div>
     </form>
+    {{log_panel}}
   </section>
 </div>

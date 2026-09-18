@@ -82,6 +82,7 @@
       <tbody id="history-body"></tbody>
     </table></div>
     <div class="empty" id="history-empty">No recent downloads</div>
+    {{history_pagination}}
   </div>
   <div id="telegram-settings" role="tabpanel" aria-labelledby="settings-tab" tabindex="0" hidden>
     <div class="settings-heading"><h2>Telegram preferences</h2><p>Changes apply at the next scan. Manage storage and schedules in <a href="/settings/">shared settings</a>.</p></div>
@@ -127,5 +128,6 @@
       <div id="settings-error" class="banner err" role="alert" hidden></div>
       <div class="settings-savebar"><span id="save-note" class="muted" role="status">Loading settings…</span><div class="settings-save-actions"><button id="btn-discard" type="button" disabled>Discard changes</button><button id="btn-save" class="primary" type="submit" disabled>Save settings</button></div></div>
     </form>
+    {{log_panel}}
   </div>
 </section>

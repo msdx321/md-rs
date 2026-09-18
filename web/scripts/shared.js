@@ -183,6 +183,40 @@ export function historyPeriod(module, days) {
   });
 }
 
+// Keep the selected history page when live snapshots replace the records.
+export function bindHistoryPagination(render) {
+  const previous = $('history-prev');
+  const next = $('history-next');
+  const size = $('history-page-size');
+  const status = $('history-page-status');
+  let items = [];
+  let page = 1;
+  let disabled = false;
+  const pageSize = () => Number(size.value);
+  const pages = () => Math.max(1, Math.ceil(items.length / pageSize()));
+  function controls() {
+    previous.disabled = disabled || page <= 1;
+    next.disabled = disabled || page >= pages();
+    size.disabled = disabled;
+  }
+  function show() {
+    page = Math.min(page, pages());
+    const start = (page - 1) * pageSize();
+    status.textContent = items.length
+      ? `${start + 1}–${Math.min(start + pageSize(), items.length)} of ${items.length} · Page ${page} of ${pages()}`
+      : 'No entries';
+    controls();
+    render(items.slice(start, start + pageSize()));
+  }
+  previous.addEventListener('click', () => { if (page > 1) { page--; show(); } });
+  next.addEventListener('click', () => { if (page < pages()) { page++; show(); } });
+  size.addEventListener('change', () => { page = 1; show(); });
+  return {
+    update(records) { items = records; show(); },
+    setDisabled(value) { disabled = value; controls(); },
+  };
+}
+
 // Column preferences belong to the table, so live row updates never reset them.
 for (const table of document.querySelectorAll('table[data-resizable]')) {
   const headers = [...table.querySelectorAll('th')];

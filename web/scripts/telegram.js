@@ -1,5 +1,5 @@
 import "./telegram-settings.js";
-import { api, bindTabs, connectEvents, reconcileTaskRows, historyPeriod, dateTime, label, sizeLabel } from "./shared.js";
+import { api, bindTabs, bindHistoryPagination, connectEvents, reconcileTaskRows, historyPeriod, dateTime, label, sizeLabel } from "./shared.js";
 
 const statusEl = document.querySelector("#status");
 const requestEl = document.querySelector("#request-status");
@@ -25,6 +25,7 @@ const linkEl = document.querySelector("#chat-link");
 const actionEls = [...document.querySelectorAll("button[name=action]")];
 let paused = false;
 let historyBusy = false;
+const historyPager = bindHistoryPagination(renderHistoryPage);
 
 bindTabs(tabEls, (tab) => {
   if (tab.id === 'completed-tab') loadHistory();
@@ -94,6 +95,7 @@ function setText(selector, value, root = document) {
 }
 
 function updateHistoryControls() {
+  historyPager.setDisabled(historyBusy);
   document.querySelector('#btn-reload-history').disabled = historyBusy;
   document.querySelector('#btn-clear-history').disabled = historyBusy || !completedEl.children.length;
   completedEl.querySelectorAll('button').forEach(button => { button.disabled = historyBusy; });
@@ -103,6 +105,10 @@ function renderHistory(items, days) {
   const historyEmpty = document.querySelector('#history-empty');
   historyEmpty.hidden = items.length !== 0;
   historyEmpty.textContent = `No downloads in the last ${days} days.`;
+  historyPager.update(items);
+}
+
+function renderHistoryPage(items) {
   const rows = [];
   for (const item of items) {
     const row = document.createElement("tr");

@@ -245,6 +245,9 @@ input:disabled, select:disabled, textarea:disabled { opacity: .6; }
 .skip-link:focus { top: 12px; }
 #main-content:focus { outline: none; }
 .pagination { justify-content: center; padding-top: 20px; border-top: 1px solid var(--border); }
+.history-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 20px; font-size: 12px; }
+.history-pagination label, .history-page-actions { display: flex; align-items: center; gap: 8px; }
+.history-pagination select { width: auto; }
 .settings-heading a { font-weight: 500; }
 .settings-savebar > span { font-size: 13px; }
 @media (max-width: 760px) {

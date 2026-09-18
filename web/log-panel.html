@@ -1,0 +1,24 @@
+<details id="logs-panel" class="logs-panel">
+  <summary>Application logs <span id="logs-scope" class="muted">All modules</span></summary>
+  <div class="logs-body">
+    <div class="logs-toolbar">
+      <label class="field logs-search">Search logs<input id="logs-search" type="search" placeholder="Message or source"></label>
+      <label class="field">Module<select id="logs-module">
+        <option value="">All modules</option>
+        <option value="telegram">Telegram</option>
+        <option value="jav">JAV</option>
+      </select></label>
+      <label class="field">Level<select id="logs-level">
+        <option value="">All levels</option>
+        <option value="ERROR">Error</option>
+        <option value="WARN">Warning</option>
+        <option value="INFO">Info</option>
+        <option value="DEBUG">Debug</option>
+        <option value="TRACE">Trace</option>
+      </select></label>
+      <button id="logs-pause" type="button" aria-pressed="false">Pause</button>
+    </div>
+    <div class="logs-meta"><span id="logs-status" role="status">Open to load logs</span><span>Latest 1,000 entries · Cleared on restart</span></div>
+    <div id="logs-output" class="logs-output" role="region" aria-label="Application log entries" tabindex="0"><p class="empty">Loading logs…</p></div>
+  </div>
+</details>

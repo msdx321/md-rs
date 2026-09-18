@@ -1,4 +1,4 @@
-import { $, api, bindTabs, connectEvents, pollWhenVisible, bytes, reconcileTaskRows, historyPeriod, dateTime, label } from "./shared.js";
+import { $, api, bindTabs, bindHistoryPagination, connectEvents, pollWhenVisible, bytes, reconcileTaskRows, historyPeriod, dateTime, label } from "./shared.js";
 
 const toast = (msg, kind = '') => {
   const el = document.createElement('div');
@@ -200,29 +200,34 @@ async function loadTasks() {
 }
 
 // ── history ───────────────────────────────────────────────────────────────
+const historyPager = bindHistoryPagination(renderHistoryPage);
 async function loadHistory() {
   try {
     const data = await api('/jav/api/history');
     $('history-empty').style.display = data.records.length ? 'none' : 'block';
-    $('history-body').innerHTML = data.records.map((r) => `
-      <tr>
-        <td><span class="truncate" title="${esc(r.path || r.title)}">${esc(r.title || r.url)}</span></td>
-        <td class="muted">${r.rank != null ? '#' + r.rank : '—'}</td>
-        <td class="muted">${bytes(r.size)}</td>
-        <td class="muted">${dateTime(r.finished_at)}</td>
-        <td><span class="tag ${r.status === 'completed' ? 'completed' : 'failed'}">${esc(label(r.status))}</span></td>
-        <td><button class="tiny" data-forget="${esc(r.id)}">Forget</button></td>
-      </tr>`).join('');
-    document.querySelectorAll('#history-body button[data-forget]').forEach((btn) => {
-      btn.onclick = async () => {
-        try {
-          await api('/jav/api/history/' + encodeURIComponent(btn.dataset.forget), { method: 'DELETE' });
-          toast('Removed from history — it can be downloaded again', 'ok');
-          loadHistory(); loadStatus();
-        } catch (e) { toast(e.message, 'err'); }
-      };
-    });
+    historyPager.update(data.records);
   } catch (e) { toast(e.message, 'err'); }
+}
+
+function renderHistoryPage(records) {
+  $('history-body').innerHTML = records.map((r) => `
+    <tr>
+      <td><span class="truncate" title="${esc(r.path || r.title)}">${esc(r.title || r.url)}</span></td>
+      <td class="muted">${r.rank != null ? '#' + r.rank : '—'}</td>
+      <td class="muted">${bytes(r.size)}</td>
+      <td class="muted">${dateTime(r.finished_at)}</td>
+      <td><span class="tag ${r.status === 'completed' ? 'completed' : 'failed'}">${esc(label(r.status))}</span></td>
+      <td><button class="tiny" data-forget="${esc(r.id)}">Forget</button></td>
+    </tr>`).join('');
+  document.querySelectorAll('#history-body button[data-forget]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await api('/jav/api/history/' + encodeURIComponent(btn.dataset.forget), { method: 'DELETE' });
+        toast('Removed from history — it can be downloaded again', 'ok');
+        loadHistory(); loadStatus();
+      } catch (e) { toast(e.message, 'err'); }
+    };
+  });
 }
 
 // ── settings ──────────────────────────────────────────────────────────────

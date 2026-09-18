@@ -3,11 +3,22 @@ use axum::{Router, response::Html, routing::get};
 
 pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
     let app = Router::new()
+        .route("/api/logs", get(crate::logging::snapshot))
         .route("/settings/", get(|| async { page("settings") }))
         .route("/", get(|| async { page("home") }))
         .route("/telegram/", get(|| async { page("telegram") }))
         .route("/jav/", get(|| async { page("jav") }));
     let app = [
+        (
+            "logs.js",
+            "text/javascript",
+            include_str!("../web/scripts/logs.js"),
+        ),
+        (
+            "logs.css",
+            "text/css",
+            include_str!("../web/styles/logs.css"),
+        ),
         (
             "settings.js",
             "text/javascript",
@@ -129,9 +140,14 @@ fn page(section: &str) -> Html<String> {
                 },
             )
     };
-    let assets = format!(
+    let mut assets = format!(
         r#"<link rel="stylesheet" href="/assets/{section}.css"><script type="module" src="/assets/{section}.js"></script>"#
     );
+    if !home {
+        assets.push_str(
+            r#"<link rel="stylesheet" href="/assets/logs.css"><script type="module" src="/assets/logs.js"></script>"#,
+        );
+    }
     // Every substitution is application-owned static content, never user input.
     let mut html = include_str!("../web/shell.html")
         .replace("{{title}}", &title)
@@ -150,6 +166,11 @@ fn page(section: &str) -> Html<String> {
     }
     Html(
         html.replace("{{content}}", content)
+            .replace("{{log_panel}}", include_str!("../web/log-panel.html"))
+            .replace(
+                "{{history_pagination}}",
+                include_str!("../web/history-pagination.html"),
+            )
             .replace("{{task_table}}", include_str!("../web/task-table.html")),
     )
 }
