@@ -255,3 +255,30 @@ jobs:
             for digest in "$RUNNER_TEMP"/digests/*; do args+=("$IMAGE@sha256:${digest##*/}"); done
           fi
           docker buildx imagetools create "${args[@]}"
+
+  release:
+    name: Publish GitHub release
+    needs: publish
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Generate release notes
+        run: bash .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          prerelease=false
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=true; fi
+          args=(--title "md-rs ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/release-notes.md" --prerelease="$prerelease" --verify-tag)
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" "${args[@]}"
+          else
+            gh release create "$GITHUB_REF_NAME" "${args[@]}"
+          fi
