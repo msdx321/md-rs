@@ -75,6 +75,7 @@ impl Repository {
         let tx = self.database.transaction().await?;
         let delete = tx.prepare("DELETE FROM p91_records WHERE id=?").await?;
         for id in &ids {
+            delete.reset();
             delete.execute([id.as_str()]).await?;
         }
         tx.commit().await?;

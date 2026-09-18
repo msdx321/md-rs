@@ -48,16 +48,20 @@ pub async fn save(db: &Database, data: &AppData) -> anyhow::Result<()> {
     let insert_retry = tx
         .prepare("INSERT INTO telegram_retries(chat_id,message_id) VALUES (?,?)")
         .await?;
+    // Local libsql statements must be reset before binding the next row.
     for (id, downloaded_at) in &data.downloaded_file_ids {
+        insert_file.reset();
         insert_file
             .execute((id.as_str(), i64::try_from(*downloaded_at)?))
             .await?;
     }
     for chat in &data.chat {
+        upsert_chat.reset();
         upsert_chat
             .execute((chat.chat_id.as_str(), chat.last_read_message_id))
             .await?;
         for id in &chat.ids_to_retry {
+            insert_retry.reset();
             insert_retry.execute((chat.chat_id.as_str(), *id)).await?;
         }
     }
