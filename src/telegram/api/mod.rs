@@ -130,6 +130,7 @@ fn valid_invite_hash(hash: &str) -> bool {
 
 pub struct ApiState {
     common: watch::Receiver<crate::configuration::app::Config>,
+    pub(crate) download_limiter: Arc<crate::runtime::download_limiter::DownloadLimiter>,
     pub(crate) download_cancel: Mutex<CancellationToken>,
     pub(crate) cancelling: AtomicBool,
     pub(crate) config_update: Mutex<()>,
@@ -238,12 +239,14 @@ impl ApiState {
         download_tx: mpsc::Sender<ChatRequest>,
         database: crate::storage::Database,
         common: watch::Receiver<crate::configuration::app::Config>,
+        download_limiter: Arc<crate::runtime::download_limiter::DownloadLimiter>,
     ) -> anyhow::Result<Self> {
         let (updates, _) = broadcast::channel(64);
         let (pause_tx, _) = watch::channel(false);
         let days = common.borrow().history_retention_days;
         Ok(Self {
             common,
+            download_limiter,
             login: login::new(),
             download_cancel: Mutex::new(CancellationToken::new()),
             cancelling: AtomicBool::new(false),

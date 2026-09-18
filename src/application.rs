@@ -30,8 +30,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         std::env::temp_dir().join("md-rs-http-address"),
         health_address.to_string(),
     )?;
-    let mut engines = vec![crate::telegram::start(database.clone(), updates.clone()).await?];
-    match crate::jav::start(database, updates).await {
+    let limiter = std::sync::Arc::new(crate::runtime::download_limiter::DownloadLimiter::new(
+        updates.clone(),
+    ));
+    let mut engines =
+        vec![crate::telegram::start(database.clone(), updates.clone(), limiter.clone()).await?];
+    match crate::jav::start(database, updates, limiter).await {
         Ok(engine) => engines.push(engine),
         Err(error) => {
             crate::runtime::shutdown_all(engines).await;

@@ -11,6 +11,16 @@
           <div class="field"><label for="history_retention_days">Keep history for (days)</label><input id="history_retention_days" type="number" min="1" max="36500" required><span class="hint">Downloaded files are kept. After history expires, older media can be downloaded again.</span></div>
         </div>
       </section>
+      <section class="settings-card full" id="download-speed">
+        <h2>Download speed</h2>
+        <p>Limit the combined speed of all downloads, with optional limits for each module. Changes apply to active downloads.</p>
+        <div class="form">
+          <div class="field"><label for="download_limit_mb_per_sec">Combined limit (MB/s)</label><input id="download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Shared across Telegram and JAV. 0 = unlimited.</span></div>
+          <div class="field"><label for="telegram_download_limit_mb_per_sec">Telegram limit (MB/s)</label><input id="telegram_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all Telegram downloads. 0 = no separate limit.</span></div>
+          <div class="field"><label for="jav_download_limit_mb_per_sec">JAV limit (MB/s)</label><input id="jav_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all JAV downloads. 0 = no separate limit.</span></div>
+        </div>
+        <p class="hint">Each module also obeys the combined limit.</p>
+      </section>
       <section class="settings-card" data-schedule="telegram">
         <h2>Telegram schedule</h2>
         <p>Choose when to check for new media.</p>

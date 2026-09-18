@@ -10,6 +10,9 @@ use rustc_hash::FxHashMap as HashMap;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+use crate::runtime::download_limiter::DownloadModule;
+use crate::telegram::api::ApiState;
+
 use super::finalize::preallocate;
 use super::progress::{
     DOWNLOAD_CHUNK_SIZE, DownloadProgress, PROGRESS_REPORT_INTERVAL, report_download_progress,
@@ -82,7 +85,7 @@ pub(super) async fn download_concurrent(
                 }
                 let offset = idx * chunk_size;
                 let expected = (total - offset).min(chunk_size);
-                match fetch_chunk(&client, &media, idx, expected, &shutdown).await {
+                match fetch_chunk(&client, &media, idx, expected, &web_state, &shutdown).await {
                     Ok(chunk) => {
                         if send_chunk(&tx, (offset, chunk), &shutdown).await.is_err() {
                             break; // receiver gone or shutdown requested
@@ -216,6 +219,7 @@ async fn fetch_chunk(
     media: &Media,
     idx: u64,
     expected: u64,
+    web_state: &Arc<ApiState>,
     shutdown: &Shutdown,
 ) -> anyhow::Result<Vec<u8>> {
     let mut backoff = 0u64;
@@ -228,12 +232,34 @@ async fn fetch_chunk(
         if delay > 0 && sleep_cancellable(shutdown, Duration::from_secs(delay)).await {
             break;
         }
+        // Keep the on-disk checkpoint size unchanged, but request smaller
+        // pieces at low rates so parallel workers cannot bypass the budget.
+        let request_size = web_state
+            .download_limiter
+            .limit(DownloadModule::Telegram)
+            .map_or(DOWNLOAD_CHUNK_SIZE, |rate| {
+                (rate / 10)
+                    .clamp(4096, DOWNLOAD_CHUNK_SIZE)
+                    .next_power_of_two()
+            });
         let mut stream = client
             .iter_download(media)
-            .chunk_size(DOWNLOAD_CHUNK_SIZE as i32)
-            .skip_chunks(i32::try_from(idx)?);
-        let result = tokio::select! {
-            r = stream.next() => r,
+            .chunk_size(request_size as i32)
+            .skip_chunks(i32::try_from(idx * (DOWNLOAD_CHUNK_SIZE / request_size))?);
+        let result: anyhow::Result<Option<Vec<u8>>> = tokio::select! {
+            r = async {
+                let mut data = Vec::with_capacity(expected as usize);
+                while (data.len() as u64) < expected {
+                    let amount = request_size.min(expected - data.len() as u64);
+                    web_state.download_limiter.acquire(DownloadModule::Telegram, amount as usize).await;
+                    anyhow::ensure!(wait_paused(web_state, shutdown).await, "download interrupted");
+                    let Some(chunk) = stream.next().await? else { break; };
+                    let short = (chunk.len() as u64) < amount;
+                    data.extend_from_slice(&chunk);
+                    if short { break; }
+                }
+                Ok(Some(data))
+            } => r,
             _ = shutdown.cancelled() => break,
         };
         match result {
@@ -275,4 +301,47 @@ async fn fetch_chunk(
         return Err(anyhow::anyhow!("download interrupted"));
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("chunk {idx} failed after retries")))
+}
+
+/// Unknown-size media cannot use the resumable chunk writer, but still shares
+/// the bandwidth budget and responds to pause/shutdown between requests.
+pub(super) async fn download_unknown_size(
+    client: &Client,
+    media: &Media,
+    path: &Path,
+    progress: &DownloadProgress<'_>,
+    shutdown: &Shutdown,
+) -> anyhow::Result<()> {
+    let mut file = tokio::fs::File::create(path).await?;
+    let request_size = progress
+        .web_state
+        .download_limiter
+        .limit(DownloadModule::Telegram)
+        .map_or(DOWNLOAD_CHUNK_SIZE, |rate| {
+            (rate / 10)
+                .clamp(4096, DOWNLOAD_CHUNK_SIZE)
+                .next_power_of_two()
+        });
+    let mut stream = client.iter_download(media).chunk_size(request_size as i32);
+    let mut downloaded = 0;
+    let started = Instant::now();
+    loop {
+        let chunk = tokio::select! {
+            result = async {
+                progress.web_state.download_limiter.acquire(DownloadModule::Telegram, request_size as usize).await;
+                anyhow::ensure!(wait_paused(progress.web_state, shutdown).await, "download interrupted");
+                Ok::<_, anyhow::Error>(stream.next().await?)
+            } => result?,
+            _ = shutdown.cancelled() => anyhow::bail!("download interrupted"),
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        file.write_all(&chunk).await?;
+        downloaded += chunk.len() as u64;
+        report_download_progress(progress, 0, downloaded, started).await;
+    }
+    file.flush().await?;
+    file.sync_data().await?;
+    Ok(())
 }

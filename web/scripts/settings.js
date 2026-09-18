@@ -1,5 +1,6 @@
 import { $, api, scheduleRender } from './shared.js';
 const paths = ['host', 'telegram_download_path', 'jav_download_path', 'temp_path'];
+const numbers = ['port', 'history_retention_days', 'download_limit_mb_per_sec', 'telegram_download_limit_mb_per_sec', 'jav_download_limit_mb_per_sec'];
 const modules = ['telegram', 'jav'];
 let current;
 let saving = false;
@@ -20,8 +21,7 @@ function visibility() {
 function read() {
   const config = structuredClone(current);
   for (const key of paths) config[key] = $(key).value.trim();
-  config.port = Number($('port').value);
-  config.history_retention_days = Number($('history_retention_days').value);
+  for (const key of numbers) config[key] = Number($(key).value);
   for (const name of modules) for (const [key, value] of Object.entries(config.schedules[name])) {
     const raw = $(`${name}-${key}`).value;
     config.schedules[name][key] = typeof value === 'boolean' ? raw === 'true' : typeof value === 'number' ? Number(raw) : raw;
@@ -39,7 +39,7 @@ function update() {
 function render(config) {
   current = config;
   saved = JSON.stringify(config);
-  for (const key of [...paths, 'port', 'history_retention_days']) $(key).value = config[key];
+  for (const key of [...paths, ...numbers]) $(key).value = config[key];
   for (const name of modules) for (const [key, value] of Object.entries(config.schedules[name])) $(`${name}-${key}`).value = String(value);
   visibility();
   update();

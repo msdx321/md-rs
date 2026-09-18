@@ -103,6 +103,7 @@ impl Default for SchedulerStatus {
 pub struct AppCtx {
     cfg: RwLock<Config>,
     common: watch::Receiver<crate::configuration::app::Config>,
+    pub(crate) download_limiter: Arc<crate::runtime::download_limiter::DownloadLimiter>,
     client: wreq::Client,
     /// Live `cf_clearance` cookie, shared with every `Fetcher`.
     cookies: Arc<CookieStore>,
@@ -128,6 +129,7 @@ impl AppCtx {
         cfg: Config,
         database: Database,
         common: watch::Receiver<crate::configuration::app::Config>,
+        download_limiter: Arc<crate::runtime::download_limiter::DownloadLimiter>,
     ) -> anyhow::Result<Self> {
         let client = build_client()?;
         let ledger = Repository::load(database.clone()).await?;
@@ -137,6 +139,7 @@ impl AppCtx {
         Ok(Self {
             cfg: RwLock::new(cfg),
             common,
+            download_limiter,
             client,
             cookies,
             browser: RwLock::new(browser),
@@ -554,6 +557,9 @@ mod tests {
                 Config::default(),
                 db,
                 watch::channel(crate::configuration::app::Config::default()).1,
+                Arc::new(crate::runtime::download_limiter::DownloadLimiter::new(
+                    watch::channel(crate::configuration::app::Config::default()).1,
+                )),
             )
             .await
             .expect("context builds")

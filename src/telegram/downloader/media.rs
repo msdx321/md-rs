@@ -14,7 +14,7 @@ use crate::telegram::app::{Shutdown, sleep_cancellable, wait_paused};
 use crate::telegram::config::Config;
 use crate::telegram::format::format_byte;
 
-use super::chunks::download_concurrent;
+use super::chunks::{download_concurrent, download_unknown_size};
 use super::finalize::{discard_partial, finalize_download};
 use super::paths::build_media_paths;
 use super::progress::{DownloadProgress, progress_style, resume_offset};
@@ -170,10 +170,13 @@ pub(crate) async fn download_media_inner(
                 pb.finish_and_clear();
                 break;
             }
-            let outcome = tokio::select! {
-                r = client.download_media(&media, &temp_path) => r.map_err(|e| e.into()),
-                _ = shutdown.cancelled() => Err(anyhow::anyhow!("interrupted")),
+            let progress = DownloadProgress {
+                pb: &pb,
+                web_state,
+                msg_id,
             };
+            let outcome =
+                download_unknown_size(client, &media, &temp_path, &progress, shutdown).await;
             if let Err(e) = outcome {
                 last_err = Some(e);
                 pb.finish_and_clear();

@@ -394,7 +394,12 @@ async fn run_hls(
             TaskState::Cancelled => return Ok((Outcome::Cancelled, final_path.to_path_buf())),
             _ => {}
         }
-        let prepared = while_running(ctx, id, prepare_track(fetch, page_url, track, dir)).await;
+        let prepared = while_running(
+            ctx,
+            id,
+            prepare_track(fetch, &ctx.download_limiter, page_url, track, dir),
+        )
+        .await;
         match control(ctx, id) {
             TaskState::Paused => return Ok((Outcome::Paused, final_path.to_path_buf())),
             TaskState::Cancelled => return Ok((Outcome::Cancelled, final_path.to_path_buf())),
@@ -472,6 +477,7 @@ async fn while_running<T>(
 /// Cache segments only while their URLs, ranges and encryption metadata match.
 async fn prepare_track(
     fetch: &Fetcher,
+    limiter: &crate::runtime::download_limiter::DownloadLimiter,
     page_url: &str,
     info: &M3u8Info,
     dir: &Path,
@@ -507,7 +513,16 @@ async fn prepare_track(
     if let Some(init) = &info.init_segment {
         let path = dir.join("init.mp4");
         if !is_non_empty(&path) {
-            fetch_segment(fetch, page_url, init, &path, &keys, &AtomicU64::new(0)).await?;
+            fetch_segment(
+                fetch,
+                limiter,
+                page_url,
+                init,
+                &path,
+                &keys,
+                &AtomicU64::new(0),
+            )
+            .await?;
         }
     }
     Ok(Arc::new(keys))
@@ -593,7 +608,15 @@ async fn download_segments(
             while_running(
                 &ctx,
                 &id,
-                fetch_segment(&fetch, &page_url, &segment, &path, &keys, &bytes),
+                fetch_segment(
+                    &fetch,
+                    &ctx.download_limiter,
+                    &page_url,
+                    &segment,
+                    &path,
+                    &keys,
+                    &bytes,
+                ),
             )
             .await
             .inspect_err(|e| {
@@ -639,7 +662,15 @@ async fn download_segments(
             match while_running(
                 ctx,
                 id,
-                fetch_segment(fetch, page_url, &info.segments[index], &path, &keys, &bytes),
+                fetch_segment(
+                    fetch,
+                    &ctx.download_limiter,
+                    page_url,
+                    &info.segments[index],
+                    &path,
+                    &keys,
+                    &bytes,
+                ),
             )
             .await
             {
@@ -689,6 +720,7 @@ async fn download_segments(
 #[allow(clippy::too_many_arguments)]
 async fn fetch_segment(
     fetch: &Fetcher,
+    limiter: &crate::runtime::download_limiter::DownloadLimiter,
     page_url: &str,
     segment: &Segment,
     path: &Path,
@@ -706,8 +738,16 @@ async fn fetch_segment(
         .context("media read timed out")?
     {
         let chunk = chunk?;
-        bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-        data.extend_from_slice(&chunk);
+        for part in chunk.chunks(64 * 1024) {
+            limiter
+                .acquire(
+                    crate::runtime::download_limiter::DownloadModule::Jav,
+                    part.len(),
+                )
+                .await;
+            bytes.fetch_add(part.len() as u64, Ordering::Relaxed);
+            data.extend_from_slice(part);
+        }
     }
     validate_media_body(&segment.url, &data)?;
 

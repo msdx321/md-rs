@@ -7,10 +7,11 @@ use tokio::sync::mpsc;
 pub async fn start(
     database: crate::storage::Database,
     schedule: tokio::sync::watch::Receiver<crate::configuration::app::Config>,
+    limiter: Arc<crate::runtime::download_limiter::DownloadLimiter>,
 ) -> anyhow::Result<RunningEngine> {
     let shutdown = app::Shutdown::new();
     let (tx, mut rx) = mpsc::channel(16);
-    let state = Arc::new(api::ApiState::new(tx, database, schedule.clone()).await?);
+    let state = Arc::new(api::ApiState::new(tx, database, schedule.clone(), limiter).await?);
     let router = api::router(state.clone());
     let mut retention_settings = schedule.clone();
     let worker_shutdown = shutdown.clone();
