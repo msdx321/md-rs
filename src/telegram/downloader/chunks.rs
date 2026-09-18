@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use grammers_client::Client;
 use grammers_client::media::Media;
 use log::warn;
-use rustc_hash::FxHashMap as HashMap;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::runtime::download_limiter::DownloadModule;
 use crate::telegram::api::ApiState;
@@ -25,10 +25,10 @@ const CHUNK_RETRY_LIMIT: u32 = 3;
 const PROGRESS_FLUSH_BYTES: u64 = 16 * 1024 * 1024;
 
 async fn send_chunk(
-    tx: &mpsc::Sender<(u64, Vec<u8>)>,
-    chunk: (u64, Vec<u8>),
+    tx: &mpsc::Sender<Vec<u8>>,
+    chunk: Vec<u8>,
     shutdown: &Shutdown,
-) -> Result<(), mpsc::error::SendError<(u64, Vec<u8>)>> {
+) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
     tokio::select! {
         permit = tx.reserve() => match permit {
             Ok(permit) => {
@@ -57,21 +57,24 @@ pub(super) async fn download_concurrent(
     let total_chunks = total.div_ceil(chunk_size);
     let workers = connections.min(total_chunks - start_chunk).max(1);
 
-    let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>((workers as usize).max(1));
+    // Each striped worker has a bounded queue, consumed in file order. A slow
+    // chunk therefore cannot make faster workers buffer the rest of the file.
+    let mut receivers = Vec::with_capacity(workers as usize);
     // Set by the first worker to fail so its peers stop fetching after their
     // current chunk instead of downloading data that will be discarded.
     let abort = Arc::new(AtomicBool::new(false));
-    let mut tasks = Vec::with_capacity(workers as usize);
+    let mut tasks = JoinSet::new();
 
     for worker in 0..workers {
         let client = client.clone();
         let media = media.clone();
-        let tx = tx.clone();
+        let (tx, rx) = mpsc::channel(1);
+        receivers.push(rx);
         let web_state = progress.web_state.clone();
         let abort = abort.clone();
         let shutdown = shutdown.clone();
 
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             // Striped assignment: this worker owns chunks worker, worker+n, ...
             // Each chunk is fetched with its own stream so a short read (which
             // ends grammers' stream early) only affects that one piece.
@@ -87,7 +90,7 @@ pub(super) async fn download_concurrent(
                 let expected = (total - offset).min(chunk_size);
                 match fetch_chunk(&client, &media, idx, expected, &web_state, &shutdown).await {
                     Ok(chunk) => {
-                        if send_chunk(&tx, (offset, chunk), &shutdown).await.is_err() {
+                        if send_chunk(&tx, chunk, &shutdown).await.is_err() {
                             break; // receiver gone or shutdown requested
                         }
                     }
@@ -99,9 +102,8 @@ pub(super) async fn download_concurrent(
                 idx += workers;
             }
             Ok::<(), anyhow::Error>(())
-        }));
+        });
     }
-    drop(tx);
 
     // Invalidate an old checkpoint before truncating or preallocating a fresh
     // file, so an interruption cannot make old progress describe new bytes.
@@ -121,47 +123,41 @@ pub(super) async fn download_concurrent(
     file.seek(std::io::SeekFrom::Start(start)).await?;
 
     let mut next = start;
-    let mut fetched = start;
     let mut last_flushed = start;
     let started = Instant::now();
-    let mut pending: HashMap<u64, Vec<u8>> = HashMap::default();
     let mut last_reported = start;
     let mut last_reported_at = Instant::now();
-    loop {
-        // Receiving the next chunk races against shutdown so a Ctrl+C doesn't
-        // block on a stalled worker; anything already in the pipe is still
-        // flushed below so the `.part` prefix stays contiguous.
-        let (offset, chunk) = tokio::select! {
-            m = rx.recv() => match m {
-                Some(item) => item,
+    while next < total {
+        let worker = ((next / chunk_size - start_chunk) % workers) as usize;
+        // Race the next ordered chunk against shutdown, keeping the written
+        // prefix contiguous even if another worker has already fetched ahead.
+        let chunk = tokio::select! {
+            m = receivers[worker].recv() => match m {
+                Some(chunk) => chunk,
                 None => break,
             },
             _ = shutdown.cancelled() => break,
         };
-        fetched = (fetched + chunk.len() as u64).min(total);
+        file.write_all(&chunk).await?;
+        next += chunk.len() as u64;
         if last_reported_at.elapsed() >= PROGRESS_REPORT_INTERVAL {
-            report_download_progress(progress, start, fetched, started).await;
-            last_reported = fetched;
+            report_download_progress(progress, start, next, started).await;
+            last_reported = next;
             last_reported_at = Instant::now();
         }
-
-        pending.insert(offset, chunk);
-        while let Some(chunk) = pending.remove(&next) {
-            file.write_all(&chunk).await?;
-            next += chunk.len() as u64;
-            // Periodically record the contiguous write position so an
-            // interruption can resume here. The `.part` file is preallocated to
-            // `total`, so its size can't recover this point.
-            if next - last_flushed >= PROGRESS_FLUSH_BYTES {
-                file.flush().await?;
-                file.sync_data().await?;
-                write_progress(path, next, &progress.web_state.database).await?;
-                last_flushed = next;
-            }
+        // The file is preallocated, so only this durable contiguous position
+        // can tell a later download where to resume.
+        if next - last_flushed >= PROGRESS_FLUSH_BYTES {
+            file.flush().await?;
+            file.sync_data().await?;
+            write_progress(path, next, &progress.web_state.database).await?;
+            last_flushed = next;
         }
     }
-    if last_reported != fetched {
-        report_download_progress(progress, start, fetched, started).await;
+    // Release blocked senders before joining after cancellation or a failed chunk.
+    drop(receivers);
+    if last_reported != next {
+        report_download_progress(progress, start, next, started).await;
     }
     // Final flush: persist the full contiguous position (== `total` on success)
     // so a later run can finalize without re-fetching.
@@ -172,8 +168,8 @@ pub(super) async fn download_concurrent(
     // Surface the first worker error (a chunk that exhausted its retries).
     let mut worker_err: Option<anyhow::Error> = None;
     let mut cancelled = shutdown.is_cancelled();
-    for task in tasks {
-        match task.await {
+    while let Some(result) = tasks.join_next().await {
+        match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) if worker_err.is_none() => worker_err = Some(e),
             Ok(Err(_)) => {}

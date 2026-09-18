@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
-use tokio::sync::Semaphore;
+use futures_util::{StreamExt, stream::FuturesUnordered};
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::jav::app::{AppCtx, TaskState, now_rfc3339};
 use crate::jav::source::http::{Fetcher, MediaRejected, validate_media_body};
@@ -23,6 +23,7 @@ use crate::jav::source::stream::m3u8::{M3u8Info, Segment};
 use crate::jav::source::stream::{self, StreamKind};
 use crate::jav::storage::Record;
 use crate::jav::util::{SpeedTracker, cloudflare_hint, sanitize_filename, strip_fake_header};
+use crate::runtime::BackgroundTask;
 
 /// How a download run ended.
 enum Outcome {
@@ -543,10 +544,8 @@ async fn download_segments(
         .task(id)
         .ok_or_else(|| anyhow::anyhow!("download task disappeared"))?;
     let total = task.total_segments;
-    let semaphore = Arc::new(Semaphore::new(segment_concurrency.clamp(1, 32)));
     let done = Arc::new(AtomicU64::new(task.done_segments as u64));
     let bytes = Arc::new(AtomicU64::new(task.downloaded_bytes));
-    let finished = Arc::new(AtomicBool::new(false));
 
     // Periodic progress reporter so the UI speed stays live between segments.
     let reporter = {
@@ -554,15 +553,11 @@ async fn download_segments(
         let id = id.to_string();
         let done = Arc::clone(&done);
         let bytes = Arc::clone(&bytes);
-        let finished = Arc::clone(&finished);
-        tokio::spawn(async move {
+        BackgroundTask::spawn("JAV progress reporter", async move {
             let mut tracker = SpeedTracker::new(Duration::from_secs(3));
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             loop {
                 ticker.tick().await;
-                if finished.load(Ordering::Relaxed) {
-                    break;
-                }
                 let state = control(&ctx, &id);
                 if state != TaskState::Running {
                     break;
@@ -580,59 +575,66 @@ async fn download_segments(
         })
     };
 
-    let mut handles = Vec::with_capacity(info.segments.len());
     let rejected = Arc::new(AtomicBool::new(false));
-    for (index, segment) in info.segments.iter().enumerate() {
-        let permit = Arc::clone(&semaphore);
-        let fetch = fetch.clone();
-        let ctx = Arc::clone(ctx);
-        let id = id.to_string();
-        let page_url = page_url.to_string();
-        let dir = temp_dir.to_path_buf();
-        let segment = segment.clone();
-        let keys = Arc::clone(&keys);
-        let done = Arc::clone(&done);
-        let bytes = Arc::clone(&bytes);
-        let rejected = Arc::clone(&rejected);
-
-        handles.push(tokio::spawn(async move {
-            let _permit = permit.acquire().await.expect("semaphore closed");
-            if rejected.load(Ordering::Relaxed) || control(&ctx, &id) != TaskState::Running {
-                anyhow::bail!("paused, cancelled or media rejected");
-            }
-            let path = dir.join(format!("{index}.ts"));
-            if is_non_empty(&path) {
-                done.fetch_add(1, Ordering::Relaxed);
-                return Ok(());
-            }
-            while_running(
-                &ctx,
-                &id,
-                fetch_segment(
-                    &fetch,
-                    &ctx.download_limiter,
-                    &page_url,
-                    &segment,
-                    &path,
-                    &keys,
-                    &bytes,
-                ),
-            )
-            .await
-            .inspect_err(|e| {
-                if e.is::<MediaRejected>() {
-                    rejected.store(true, Ordering::Relaxed);
-                }
-            })?;
-            done.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }));
-    }
-
     let mut failed: Vec<usize> = Vec::new();
     let mut last_error = String::new();
-    for (index, handle) in handles.into_iter().enumerate() {
-        match handle.await {
+    let mut segments = info.segments.iter().enumerate();
+    let mut downloads = FuturesUnordered::new();
+    // Spawn only the configured number of workers, rather than allocating a
+    // waiting task for every segment. Dropping the stream aborts its workers.
+    loop {
+        while downloads.len() < segment_concurrency.clamp(1, 32) {
+            let Some((index, segment)) = segments.next() else {
+                break;
+            };
+            let fetch = fetch.clone();
+            let ctx = Arc::clone(ctx);
+            let id = id.to_string();
+            let page_url = page_url.to_string();
+            let dir = temp_dir.to_path_buf();
+            let segment = segment.clone();
+            let keys = Arc::clone(&keys);
+            let done = Arc::clone(&done);
+            let bytes = Arc::clone(&bytes);
+            let rejected = Arc::clone(&rejected);
+
+            let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+                if rejected.load(Ordering::Relaxed) || control(&ctx, &id) != TaskState::Running {
+                    anyhow::bail!("paused, cancelled or media rejected");
+                }
+                let path = dir.join(format!("{index}.ts"));
+                if is_non_empty(&path) {
+                    done.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                while_running(
+                    &ctx,
+                    &id,
+                    fetch_segment(
+                        &fetch,
+                        &ctx.download_limiter,
+                        &page_url,
+                        &segment,
+                        &path,
+                        &keys,
+                        &bytes,
+                    ),
+                )
+                .await
+                .inspect_err(|e| {
+                    if e.is::<MediaRejected>() {
+                        rejected.store(true, Ordering::Relaxed);
+                    }
+                })?;
+                done.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }));
+            downloads.push(async move { (index, handle.await) });
+        }
+        let Some((index, result)) = downloads.next().await else {
+            break;
+        };
+        match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 if e.is::<MediaRejected>() || !rejected.load(Ordering::Relaxed) {
@@ -647,7 +649,8 @@ async fn download_segments(
         }
     }
 
-    // Retry transient failures a few times before giving up.
+    // Retry transient failures in playlist order a few times before giving up.
+    failed.sort_unstable();
     let mut attempt = 0;
     while !failed.is_empty() && attempt < 3 && !rejected.load(Ordering::Relaxed) {
         attempt += 1;
@@ -691,8 +694,7 @@ async fn download_segments(
         failed = still_failed;
     }
 
-    finished.store(true, Ordering::Relaxed);
-    let _ = reporter.await;
+    reporter.abort().await;
 
     // The reporter ticks once a second, so the last few segments may not have
     // been folded into the UI yet; publish the final count explicitly.
