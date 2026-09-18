@@ -1,5 +1,5 @@
 import "./telegram-settings.js";
-import { api, bindTabs, bindHistoryPagination, connectEvents, reconcileTaskRows, historyPeriod, dateTime, label, sizeLabel } from "./shared.js";
+import { api, bindTabs, bindHistoryPagination, connectEvents, scheduleRender, reconcileRows, historyPeriod, dateTime, label, sizeLabel } from "./shared.js";
 
 const statusEl = document.querySelector("#status");
 const requestEl = document.querySelector("#request-status");
@@ -112,7 +112,7 @@ function renderHistoryPage(items) {
   const rows = [];
   for (const item of items) {
     const row = document.createElement("tr");
-    row.dataset.taskId = item.id;
+    row.dataset.rowId = item.id;
     row.innerHTML = `
       <td><span class="truncate file"></span></td>
       <td class="muted msg"></td>
@@ -135,7 +135,7 @@ function renderHistoryPage(items) {
     time.textContent = dateTime(item.completed_at);
     rows.push(row);
   }
-  reconcileTaskRows(completedEl, rows);
+  reconcileRows(completedEl, rows);
   updateHistoryControls();
 }
 
@@ -206,7 +206,7 @@ function render(snapshot) {
   document.querySelector('#tasks-empty').style.display = snapshot.active.length ? 'none' : 'block';
   for (const item of snapshot.active) {
     const row = document.createElement('tr');
-    row.dataset.taskId = `${item.msg_id}:${item.path}`;
+    row.dataset.rowId = `${item.msg_id}:${item.path}`;
     const state = cancelling ? 'cancelling' : paused ? 'paused' : 'running';
     const percent = Math.min(100, Math.max(0, item.percent));
     row.innerHTML = `
@@ -225,7 +225,7 @@ function render(snapshot) {
     row.querySelector('.detail').title = item.path;
     rows.push(row);
   }
-  reconcileTaskRows(downloadsEl, rows);
+  reconcileRows(downloadsEl, rows);
 }
 
 let loginStep = null;
@@ -290,6 +290,7 @@ loginForm.addEventListener("submit", (event) => {
 });
 document.querySelector("#login-reset").addEventListener("click", () => submitLogin("credentials"));
 
+const queueSnapshot = scheduleRender(render);
 connectEvents("/telegram/events", {
-  message: (event) => render(JSON.parse(event.data)),
+  message: (event) => queueSnapshot(JSON.parse(event.data)),
 });

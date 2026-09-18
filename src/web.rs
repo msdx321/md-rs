@@ -10,6 +10,11 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
         .route("/jav/", get(|| async { page("jav") }));
     let app = [
         (
+            "table-columns.js",
+            "text/javascript",
+            include_str!("../web/scripts/table-columns.js"),
+        ),
+        (
             "logs.js",
             "text/javascript",
             include_str!("../web/scripts/logs.js"),

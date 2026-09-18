@@ -1,8 +1,10 @@
-import { $, api } from './shared.js';
+import { $, api, scheduleRender } from './shared.js';
 const paths = ['host', 'telegram_download_path', 'jav_download_path', 'temp_path'];
 const modules = ['telegram', 'jav'];
 let current;
 let saving = false;
+let saved = '';
+const queueUpdate = scheduleRender(update);
 function visibility() {
   for (const name of modules) {
     const daily = $(`${name}-mode`).value === 'daily';
@@ -26,7 +28,7 @@ function read() {
   }
   return config;
 }
-function changed() { return current && JSON.stringify(read()) !== JSON.stringify(current); }
+function changed() { return current && JSON.stringify(read()) !== saved; }
 function update() {
   const dirty = changed();
   $('save-settings').disabled = saving || !dirty;
@@ -36,13 +38,14 @@ function update() {
 }
 function render(config) {
   current = config;
+  saved = JSON.stringify(config);
   for (const key of [...paths, 'port', 'history_retention_days']) $(key).value = config[key];
   for (const name of modules) for (const [key, value] of Object.entries(config.schedules[name])) $(`${name}-${key}`).value = String(value);
   visibility();
   update();
 }
-$('common-settings').addEventListener('input', () => { $('settings-result').hidden = true; update(); });
-$('common-settings').addEventListener('change', () => { visibility(); update(); });
+$('common-settings').addEventListener('input', () => { $('settings-result').hidden = true; queueUpdate(); });
+$('common-settings').addEventListener('change', () => { visibility(); queueUpdate(); });
 $('reload-settings').addEventListener('click', () => { render(current); $('settings-result').hidden = true; });
 $('common-settings').addEventListener('submit', async event => {
   event.preventDefault();

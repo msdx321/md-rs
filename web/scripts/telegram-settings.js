@@ -1,4 +1,4 @@
-import { $, api } from './shared.js';
+import { $, api, scheduleRender } from './shared.js';
 
 const form = $('settings-form');
 const fields = $('settings-fields');
@@ -10,6 +10,8 @@ const strings = ['file_name_prefix_split', 'date_format'];
 const numbers = ['max_download_task', 'download_connections'];
 const lists = ['file_path_prefix', 'file_name_prefix'];
 const formats = ['audio', 'video', 'document'];
+const queueUpdate = scheduleRender(update);
+const queueChatSearch = scheduleRender(updateChatEmpty);
 let saved = null;
 let saving = false;
 let chatSequence = 0;
@@ -28,7 +30,7 @@ function updateChatEmpty() {
   $('no-subscriptions').hidden = rows.length > 0;
   $('no-chat-matches').hidden = rows.length === 0 || visible > 0;
 }
-$('chat-search').addEventListener('input', updateChatEmpty);
+$('chat-search').addEventListener('input', queueChatSearch);
 $('chat-search').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') event.preventDefault();
 });
@@ -116,8 +118,8 @@ function update() {
   note.textContent = saving ? 'Saving…' : dirty ? 'Unsaved changes' : saved ? 'All changes saved' : 'Loading settings…';
 }
 
-form.addEventListener('input', update);
-form.addEventListener('change', update);
+form.addEventListener('input', queueUpdate);
+form.addEventListener('change', queueUpdate);
 discard.addEventListener('click', () => {
   show(JSON.parse(saved), false);
   error.hidden = true;

@@ -1,4 +1,4 @@
-import { $, api, bindTabs, bindHistoryPagination, connectEvents, pollWhenVisible, bytes, reconcileTaskRows, historyPeriod, dateTime, label } from "./shared.js";
+import { $, api, bindTabs, bindHistoryPagination, connectEvents, pollWhenVisible, scheduleRender, bytes, reconcileRows, historyPeriod, dateTime, label } from "./shared.js";
 
 const toast = (msg, kind = '') => {
   const el = document.createElement('div');
@@ -91,6 +91,7 @@ async function loadPopular(requestedPage = page) {
     const query = new URLSearchParams({ page: requestedPage, link: $('popular-link').value || 0 });
     if ($('popular-sort').value !== 'configured') query.set('sort', $('popular-sort').value);
     const data = await api('/jav/api/videos?' + query, { signal: request.signal });
+    if (popularRequest !== request) return;
     page = data.page;
     $('popular-banner').innerHTML = '';
     $('page-num').textContent = data.page;
@@ -114,11 +115,8 @@ async function loadPopular(requestedPage = page) {
           </div>
         </div>
       </div>`).join('') || '<div class="empty">No videos found on this page.</div>';
-    document.querySelectorAll('#popular-grid button[data-id]').forEach((btn) => {
-      btn.onclick = () => download(btn.dataset);
-    });
   } catch (e) {
-    if (e.name !== 'AbortError') $('popular-banner').innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+    if (popularRequest === request && e.name !== 'AbortError') $('popular-banner').innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
   } finally {
     if (popularRequest === request) {
       $('btn-prev').disabled = page <= 1;
@@ -126,6 +124,11 @@ async function loadPopular(requestedPage = page) {
     }
   }
 }
+
+$('popular-grid').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-id]');
+  if (button) runAction(button, () => download(button.dataset));
+});
 
 async function download(ds) {
   try {
@@ -140,12 +143,12 @@ async function download(ds) {
     });
     toast(r.status === 'started' ? 'Download queued' : 'Already ' + r.status.replace('_', ' '), 'ok');
     document.querySelector('nav button[data-tab="tasks"]').click();
-    loadTasks();
   } catch (e) { toast(e.message, 'err'); }
 }
 
 // ── tasks ─────────────────────────────────────────────────────────────────
 let tasks = [];
+const queueTasks = scheduleRender(renderTasks);
 function renderTasks() {
   tasks = tasks.filter((t) => !['completed', 'cancelled'].includes(t.state));
   $('btn-clear-failed').disabled = !tasks.some((t) => t.state === 'failed');
@@ -163,7 +166,7 @@ function renderTasks() {
     const detail = t.state === 'running' || t.state === 'paused'
       ? (t.total_segments ? `${t.done_segments}/${t.total_segments} seg · ` : '') + bytes(t.downloaded_bytes)
       : (t.message || '');
-    return `<tr data-task-id="${esc(t.id)}">
+    return `<tr data-row-id="${esc(t.id)}">
       <td><span class="truncate" title="${esc(t.title || t.url)}">${esc(t.title || t.url)}</span></td>
       <td class="muted"><span class="truncate" title="${esc(t.source_url || 'Manual')}">${esc(t.source_url || 'Manual')}</span></td>
       <td><span class="tag ${t.state}">${label(t.state)}</span></td>
@@ -178,11 +181,12 @@ function renderTasks() {
       </td>
     </tr>`;
   }).join('');
-  reconcileTaskRows($('tasks-body'), [...nextRows.children]);
-  document.querySelectorAll('#tasks-body button[data-act]').forEach((btn) => {
-    btn.onclick = () => taskAction(btn.dataset.act, btn.dataset.id);
-  });
+  reconcileRows($('tasks-body'), [...nextRows.children]);
 }
+$('tasks-body').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-act]');
+  if (button) runAction(button, () => taskAction(button.dataset.act, button.dataset.id));
+});
 async function taskAction(act, id) {
   id = encodeURIComponent(id);
   const method = act === 'dismiss' ? 'DELETE' : 'POST';
@@ -196,11 +200,18 @@ async function taskAction(act, id) {
   } catch (e) { toast(e.message, 'err'); }
 }
 async function loadTasks() {
-  try { tasks = await api('/jav/api/tasks'); $('tasks-banner').textContent = ''; renderTasks(); } catch (e) { $('tasks-banner').textContent = 'Could not load tasks: ' + e.message; }
+  try {
+    tasks = await api('/jav/api/tasks');
+    $('tasks-banner').textContent = '';
+    queueTasks();
+  } catch (e) {
+    $('tasks-banner').textContent = 'Could not load tasks: ' + e.message;
+  }
 }
 
 // ── history ───────────────────────────────────────────────────────────────
 const historyPager = bindHistoryPagination(renderHistoryPage);
+const historyBody = $('history-body');
 async function loadHistory() {
   try {
     const data = await api('/jav/api/history');
@@ -210,25 +221,30 @@ async function loadHistory() {
 }
 
 function renderHistoryPage(records) {
-  $('history-body').innerHTML = records.map((r) => `
-    <tr>
+  const rows = records.map((r) => {
+    const row = document.createElement('tr');
+    row.dataset.rowId = r.id;
+    row.innerHTML = `
       <td><span class="truncate" title="${esc(r.path || r.title)}">${esc(r.title || r.url)}</span></td>
       <td class="muted">${r.rank != null ? '#' + r.rank : '—'}</td>
       <td class="muted">${bytes(r.size)}</td>
       <td class="muted">${dateTime(r.finished_at)}</td>
       <td><span class="tag ${r.status === 'completed' ? 'completed' : 'failed'}">${esc(label(r.status))}</span></td>
-      <td><button class="tiny" data-forget="${esc(r.id)}">Forget</button></td>
-    </tr>`).join('');
-  document.querySelectorAll('#history-body button[data-forget]').forEach((btn) => {
-    btn.onclick = async () => {
-      try {
-        await api('/jav/api/history/' + encodeURIComponent(btn.dataset.forget), { method: 'DELETE' });
-        toast('Removed from history — it can be downloaded again', 'ok');
-        loadHistory(); loadStatus();
-      } catch (e) { toast(e.message, 'err'); }
-    };
+      <td><button class="tiny" data-forget="${esc(r.id)}">Forget</button></td>`;
+    return row;
   });
+  reconcileRows(historyBody, rows);
 }
+
+historyBody.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-forget]');
+  if (!button) return;
+  runAction(button, async () => {
+    await api('/jav/api/history/' + encodeURIComponent(button.dataset.forget), { method: 'DELETE' });
+    toast('Removed from history — it can be downloaded again', 'ok');
+    await Promise.all([loadHistory(), loadStatus()]);
+  });
+});
 
 // ── settings ──────────────────────────────────────────────────────────────
 const FIELDS = ['cookie', 'user_agent', 'site_base',
@@ -238,6 +254,8 @@ const FIELDS = ['cookie', 'user_agent', 'site_base',
 
 let savedSettings = null;
 let settingsSaving = false;
+const queueSettings = scheduleRender(updateSettingsControls);
+const queueLinkSearch = scheduleRender(updateLinkButtons);
 function readSettings() {
   const values = Object.fromEntries(FIELDS.map((key) => {
     const el = $(key);
@@ -353,7 +371,7 @@ function updateLinkButtons() {
   $('ranking-search-count').textContent = query ? `${visible} of ${rows.length} links` : `${rows.length} ranking ${rows.length === 1 ? 'link' : 'links'}`;
   $('no-ranking-matches').hidden = visible > 0;
 }
-$('ranking-search').addEventListener('input', updateLinkButtons);
+$('ranking-search').addEventListener('input', queueLinkSearch);
 $('ranking-search').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') event.preventDefault();
 });
@@ -431,8 +449,8 @@ async function saveSettings() {
     updateSettingsControls();
   }
 }
-$('settings-form').addEventListener('input', updateSettingsControls);
-$('settings-form').addEventListener('change', updateSettingsControls);
+$('settings-form').addEventListener('input', queueSettings);
+$('settings-form').addEventListener('change', queueSettings);
 $('settings-form').addEventListener('invalid', (event) => {
   const details = event.target.closest('details');
   if (details) details.open = true;
@@ -508,7 +526,7 @@ es.addEventListener('task', (ev) => {
   const task = JSON.parse(ev.data);
   const idx = tasks.findIndex((t) => t.id === task.id);
   if (idx >= 0) tasks[idx] = task; else tasks.unshift(task);
-  renderTasks();
+  queueTasks();
   if (task.state === 'completed') {
     loadStatus();
     if ($('history-tab').getAttribute('aria-selected') === 'true') loadHistory();
@@ -525,5 +543,5 @@ loadSettings().catch((e) => {
   $('save-note').textContent = 'Could not load settings. Reload to try again.';
 });
 pollWhenVisible(() => {
-  if (es.readyState !== EventSource.OPEN) { loadStatus(); loadTasks(); }
+  if (es.readyState !== EventSource.OPEN) return Promise.all([loadStatus(), loadTasks()]);
 }, 15000);

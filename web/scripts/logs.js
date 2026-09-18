@@ -7,6 +7,12 @@ const level = $('logs-level');
 const source = $('logs-module');
 const status = $('logs-status');
 const pause = $('logs-pause');
+const rowCache = new Map();
+const dateFormatter = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: 'numeric', minute: 'numeric', second: 'numeric',
+});
+const entryKey = entry => entry.id + ':' + entry.timestamp;
 let entries = [];
 let loaded = false;
 let paused = false;
@@ -26,45 +32,61 @@ function showStatus() {
   status.classList.toggle('logs-status-error', error && !paused);
 }
 
+function createRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'log-entry';
+  row.dataset.level = entry.level;
+  const time = document.createElement('time');
+  time.className = 'log-time';
+  time.dateTime = entry.timestamp;
+  time.title = entry.timestamp;
+  time.textContent = dateFormatter.format(new Date(entry.timestamp));
+  const severity = document.createElement('span');
+  severity.className = 'log-level';
+  severity.textContent = entry.level;
+  const content = document.createElement('div');
+  content.className = 'log-content';
+  const target = document.createElement('div');
+  target.className = 'log-target';
+  target.textContent = entry.target;
+  const message = document.createElement('p');
+  message.className = 'log-message';
+  message.textContent = entry.message;
+  content.append(target, message);
+  row.append(time, severity, content);
+  return row;
+}
+
 function render() {
   const follow = output.scrollTop < 40;
   const scrollTop = output.scrollTop;
   const query = search.value.trim().toLowerCase();
   const visible = entries.filter(entry => (!level.value || entry.level === level.value)
     && (!source.value || entry.target.split('::').includes(source.value))
-    && `${entry.target} ${entry.message}`.toLowerCase().includes(query));
-  const fragment = document.createDocumentFragment();
+    && (!query || (entry.target + ' ' + entry.message).toLowerCase().includes(query)));
+  const retained = new Set();
+  let position = output.firstElementChild;
+  // Log entries are immutable. Keep existing rows mounted across refreshes.
   for (const entry of visible.reverse()) {
-    const row = document.createElement('div');
-    row.className = 'log-entry';
-    row.dataset.level = entry.level;
-    const time = document.createElement('time');
-    time.className = 'log-time';
-    time.dateTime = entry.timestamp;
-    time.title = entry.timestamp;
-    time.textContent = new Date(entry.timestamp).toLocaleString();
-    const severity = document.createElement('span');
-    severity.className = 'log-level';
-    severity.textContent = entry.level;
-    const content = document.createElement('div');
-    content.className = 'log-content';
-    const target = document.createElement('div');
-    target.className = 'log-target';
-    target.textContent = entry.target;
-    const message = document.createElement('p');
-    message.className = 'log-message';
-    message.textContent = entry.message;
-    content.append(target, message);
-    row.append(time, severity, content);
-    fragment.append(row);
+    const key = entryKey(entry);
+    let row = rowCache.get(key);
+    if (!row) {
+      row = createRow(entry);
+      rowCache.set(key, row);
+    }
+    retained.add(row);
+    if (row !== position) output.insertBefore(row, position);
+    position = row.nextElementSibling;
+  }
+  for (const row of [...output.children]) {
+    if (!retained.has(row)) row.remove();
   }
   if (!visible.length) {
     const empty = document.createElement('p');
     empty.className = 'empty';
     empty.textContent = entries.length ? 'No logs match these filters.' : 'No log entries yet.';
-    fragment.append(empty);
+    output.append(empty);
   }
-  output.replaceChildren(fragment);
   output.scrollTop = follow ? 0 : scrollTop;
 }
 
@@ -81,7 +103,14 @@ async function refresh() {
     entries = next;
     loaded = true;
     error = false;
-    if (changed) render();
+    if (changed) {
+      // Bound cached rows to the server's retained log window, including restarts.
+      const retainedKeys = new Set(entries.map(entryKey));
+      for (const key of rowCache.keys()) {
+        if (!retainedKeys.has(key)) rowCache.delete(key);
+      }
+      render();
+    }
   } catch {
     error = true;
     if (!loaded) output.querySelector('.empty').textContent = 'Logs are temporarily unavailable.';

@@ -1,12 +1,20 @@
-import { $, api, connectEvents, pollWhenVisible, bytes, historyPeriod, dateTime, label, sizeLabel } from './shared.js';
+import { $, api, connectEvents, pollWhenVisible, scheduleRender, reconcileRows, bytes, historyPeriod, dateTime, label, sizeLabel } from './shared.js';
 
 let telegram = null;
 let jav = null;
 let tasks = null;
 let history = null;
 const terminal = new Set(['completed', 'failed', 'cancelled']);
+const queueSummary = scheduleRender(renderSummary);
+const queueActivity = scheduleRender(renderActivity);
+const queueHistory = scheduleRender(renderHistory);
+const renderedLists = new Map();
+let lastJavRun;
 
 function renderJavRun(scheduler) {
+  const signature = JSON.stringify([scheduler.running, scheduler.last_result]);
+  if (signature === lastJavRun) return;
+  lastJavRun = signature;
   const result = scheduler.last_result || '';
   // The scheduler also sends free-form progress and error messages.
   const match = result.match(/^(manual|scheduled): (\d+)\/(\d+) completed, (\d+) attempted, (\d+) failed, (\d+) skipped; ([\s\S]*)$/);
@@ -63,11 +71,13 @@ function renderSummary() {
 function activeDownloads() {
   return [
     ...(telegram?.active || []).map((item) => ({
+      id: `telegram:${item.msg_id}:${item.path}`,
       source: 'Telegram', name: item.file_name,
       detail: telegram.paused ? 'Paused' : `${sizeLabel(item.downloaded)} / ${sizeLabel(item.total)}`,
       progress: item.percent, status: telegram.paused ? 'Paused' : sizeLabel(item.speed),
     })),
     ...(tasks || []).filter((task) => !terminal.has(task.state)).map((task) => ({
+      id: `jav:${task.id}`,
       source: 'JAV', name: task.title || task.id,
       detail: `${label(task.state)} · ${label(task.phase)}`,
       progress: task.total_segments ? task.done_segments / task.total_segments * 100
@@ -80,26 +90,31 @@ function activeDownloads() {
 function recentDownloads() {
   return [
     ...(telegram?.completed || []).map((item) => ({
-      source: 'Telegram', name: item.file_name, detail: `${sizeLabel(item.size)} · Completed`, date: item.completed_at,
+      id: `telegram:${item.id}`,
+      source: 'Telegram', name: item.file_name, detail: `${sizeLabel(item.size)} · Completed`, date: new Date(item.completed_at).getTime(),
     })),
     ...(history || []).map((item) => ({
+      id: `jav:${item.id}`,
       source: 'JAV', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
     })),
   ].sort((a, b) => b.date - a.date).slice(0, 10);
 }
 
 function renderRows(target, rows, empty) {
-  target.replaceChildren();
+  const signature = JSON.stringify([rows, empty]);
+  if (renderedLists.get(target) === signature) return;
+  renderedLists.set(target, signature);
   if (!rows.length) {
     const text = document.createElement('p');
     text.className = 'empty';
     text.textContent = empty;
-    target.append(text);
+    target.replaceChildren(text);
     return;
   }
-  for (const item of rows) {
+  const nextRows = rows.map(item => {
     const row = document.createElement('article');
     row.className = 'overview-row';
+    row.dataset.rowId = item.id;
     const main = document.createElement('div');
     const title = document.createElement('h3');
     title.className = 'overview-name';
@@ -142,8 +157,9 @@ function renderRows(target, rows, empty) {
       status.append(time);
     }
     row.append(main, status);
-    target.append(row);
-  }
+    return row;
+  });
+  reconcileRows(target, nextRows);
 }
 
 function renderActivity() {
@@ -158,7 +174,7 @@ async function refreshTasks() {
   try {
     tasks = await api('/jav/api/tasks');
     $('activity-error').hidden = true;
-    renderActivity();
+    queueActivity();
   } catch {
     $('activity-error').textContent = 'JAV task status is unavailable. Retrying automatically.';
     $('activity-error').hidden = false;
@@ -168,7 +184,7 @@ async function refreshHistory() {
   try {
     history = (await api('/jav/api/history')).records;
     $('history-error').hidden = true;
-    renderHistory();
+    queueHistory();
   } catch {
     $('history-error').textContent = 'JAV history is unavailable. Retrying automatically.';
     $('history-error').hidden = false;
@@ -177,21 +193,21 @@ async function refreshHistory() {
 connectEvents('/telegram/events', {
   message(event) {
     telegram = JSON.parse(event.data);
-    renderSummary(); renderActivity(); renderHistory();
+    queueSummary(); queueActivity(); queueHistory();
   },
 }, $('telegram-connection'));
 connectEvents('/jav/api/events', {
-  status(event) { jav = JSON.parse(event.data); renderSummary(); },
+  status(event) { jav = JSON.parse(event.data); queueSummary(); },
   task(event) {
     const task = JSON.parse(event.data);
     if (tasks) {
       tasks = tasks.filter((item) => item.id !== task.id);
       tasks.push(task);
-      renderActivity();
+      queueActivity();
     }
     if (terminal.has(task.state)) refreshHistory();
   },
   open() { refreshTasks(); refreshHistory(); },
 }, $('jav-connection'));
 // Refresh removals and history changes made in another tab, which have no task event.
-pollWhenVisible(() => { refreshTasks(); refreshHistory(); }, 30000);
+pollWhenVisible(() => Promise.all([refreshTasks(), refreshHistory()]), 30000);
