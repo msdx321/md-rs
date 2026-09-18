@@ -4,6 +4,10 @@
 //! Every long-running step is interruptible: pause keeps the temp directory so
 //! a later resume only fetches the missing segments.
 
+mod merge;
+
+use anyhow::Context;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,9 +22,7 @@ use crate::jav::source::scraper::VideoCard;
 use crate::jav::source::stream::m3u8::{M3u8Info, Segment};
 use crate::jav::source::stream::{self, StreamKind};
 use crate::jav::storage::Record;
-use crate::jav::util::{
-    SpeedTracker, cloudflare_hint, iv_for_segment, sanitize_filename, strip_fake_header,
-};
+use crate::jav::util::{SpeedTracker, cloudflare_hint, sanitize_filename, strip_fake_header};
 
 /// How a download run ended.
 enum Outcome {
@@ -59,7 +61,7 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
     let known_path = cfg
         .save_path
         .join(format!("{id} - {}.mp4", sanitize_filename(&card.title)));
-    if let Some((path, size)) = existing_output(&known_path) {
+    if let Some((path, size)) = existing_output(&known_path).await {
         finish_completed(&ctx, &card, &card.title, &path, size).await;
         return;
     }
@@ -98,7 +100,6 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
         return;
     }
     let final_path = save_path.join(&file_name);
-    let ts_path = final_path.with_extension("ts");
     let temp_dir = cfg.temp_path.join(format!("temp_{id}"));
 
     ctx.update_task(&id, |t| {
@@ -109,7 +110,7 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
 
     // Already on disk from an earlier run or a crash after merge. Without
     // ffmpeg the merge produces a `.ts`, so both extensions are checked.
-    if let Some((path, size)) = existing_output(&final_path) {
+    if let Some((path, size)) = existing_output(&final_path).await {
         log::info!("[{id}] output already exists at {}", path.display());
         finish_completed(&ctx, &card, &title, &path, size).await;
         return;
@@ -133,9 +134,8 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
                 &ctx,
                 &fetch,
                 &id,
-                &title,
                 &card.url,
-                &resolved.url,
+                &resolved.playlist,
                 &temp_dir,
                 &final_path,
                 &cfg,
@@ -168,8 +168,6 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
         Ok(Outcome::Cancelled) => {
             log::info!("[{id}] cancelled");
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            let _ = tokio::fs::remove_file(&final_path).await;
-            let _ = tokio::fs::remove_file(&ts_path).await;
             ctx.update_task(&id, |t| {
                 t.state = TaskState::Cancelled;
                 t.phase = "cancelled".into();
@@ -178,16 +176,8 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
             });
         }
         Err(e) => {
-            for path in [&final_path, &ts_path] {
-                if let Err(error) = tokio::fs::remove_file(path).await
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    log::warn!(
-                        "cannot remove incomplete output {}: {error}",
-                        path.display()
-                    );
-                }
-            }
+            // The merger owns its staging file; preserve any previous output
+            // when a replacement fails or is interrupted.
             let msg = cloudflare_hint(&format!("{e:#}"));
             log::warn!("[{id}] download failed: {msg}");
             finish_failed(&ctx, &cfg, &card, &msg).await;
@@ -229,13 +219,24 @@ fn is_non_empty(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn existing_output(path: &Path) -> Option<(PathBuf, u64)> {
-    [path.to_path_buf(), path.with_extension("ts")]
-        .into_iter()
-        .find_map(|path| {
-            let metadata = std::fs::metadata(&path).ok()?;
-            metadata.is_file().then_some((path, metadata.len()))
-        })
+async fn existing_output(path: &Path) -> Option<(PathBuf, u64)> {
+    for path in [path.to_path_buf(), path.with_extension("ts")] {
+        let Ok(metadata) = tokio::fs::metadata(&path).await else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() == 0 {
+            continue;
+        }
+        let candidate = path.clone();
+        match tokio::task::spawn_blocking(move || merge::validate_output(&candidate, None)).await {
+            Ok(Ok(())) => return Some((path, metadata.len())),
+            result => log::warn!(
+                "existing output {} failed media validation: {result:?}",
+                path.display()
+            ),
+        }
+    }
+    None
 }
 
 async fn finish_completed(
@@ -360,109 +361,156 @@ fn control(ctx: &AppCtx, id: &str) -> TaskState {
 // HLS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Run one HLS download. Returns the outcome plus the file that was actually
-/// written — without ffmpeg the merge lands on a `.ts`, not a `.mp4`.
+/// Download both selected tracks before merging and validating the final MP4.
 #[allow(clippy::too_many_arguments)]
 async fn run_hls(
     ctx: &Arc<AppCtx>,
     fetch: &Fetcher,
     id: &str,
-    title: &str,
     page_url: &str,
-    playlist_url: &str,
+    info: &M3u8Info,
     temp_dir: &Path,
     final_path: &Path,
     cfg: &crate::jav::config::Config,
 ) -> anyhow::Result<(Outcome, PathBuf)> {
+    tokio::task::spawn_blocking(merge::require_tools).await??;
+    let total = info.segments.len() + info.audio.as_ref().map_or(0, |audio| audio.segments.len());
     ctx.update_task(id, |t| {
-        t.phase = "playlist".into();
-        t.message = "reading playlist".into();
-    });
-
-    let info = stream::resolve_playlist(fetch, page_url, playlist_url, &cfg.resolution)
-        .await
-        .map_err(|e| anyhow::anyhow!("playlist: {e}"))?;
-    if info.segments.is_empty() {
-        anyhow::bail!("playlist contained no segments");
-    }
-    log::info!(
-        "[{id}] {} segments, {:.1} min",
-        info.segments.len(),
-        info.total_duration / 60.0
-    );
-
-    // Decryption key, when the playlist declares one.
-    let key = match info.key_url.as_deref() {
-        Some(key_url) => {
-            let resp = fetch.media_response(key_url, page_url, None).await?;
-            let data = resp.bytes().await?;
-            validate_media_body(key_url, &data)?;
-            if data.len() != 16 {
-                anyhow::bail!("unexpected AES key length {} for {key_url}", data.len());
-            }
-            Some(data.to_vec())
-        }
-        None => None,
-    };
-
-    tokio::fs::create_dir_all(temp_dir).await?;
-
-    // fMP4 init segment must lead the merged output.
-    if let Some(init) = &info.init_segment {
-        let init_path = temp_dir.join("init.mp4");
-        if !is_non_empty(&init_path) {
-            let resp = fetch
-                .media_response(&init.url, page_url, init.byte_range)
-                .await?;
-            let mut data = resp.bytes().await?.to_vec();
-            validate_media_body(&init.url, &data)?;
-            if let Some(key) = key.as_deref() {
-                data = decrypt(&data, key, &info.iv, 0)?;
-            }
-            tokio::fs::write(&init_path, &data).await?;
-        }
-    }
-
-    ctx.update_task(id, |t| {
-        t.total_segments = info.segments.len();
+        t.total_segments = total;
+        t.done_segments = 0;
+        t.downloaded_bytes = 0;
         t.phase = "downloading".into();
-        t.message = format!("0/{} segments", info.segments.len());
+        t.message = format!("0/{total} segments");
     });
-
-    let outcome = download_segments(
-        ctx,
-        fetch,
-        id,
-        title,
-        page_url,
-        &info,
-        key.as_deref(),
-        temp_dir,
-        cfg.segment_concurrency,
-    )
-    .await?;
-
-    match outcome {
-        Outcome::Done => {}
-        other => return Ok((other, final_path.to_path_buf())),
+    let audio_dir = temp_dir.join("audio");
+    let tracks = std::iter::once((info, temp_dir)).chain(
+        info.audio
+            .as_deref()
+            .map(|audio| (audio, audio_dir.as_path())),
+    );
+    for (track, dir) in tracks {
+        match control(ctx, id) {
+            TaskState::Paused => return Ok((Outcome::Paused, final_path.to_path_buf())),
+            TaskState::Cancelled => return Ok((Outcome::Cancelled, final_path.to_path_buf())),
+            _ => {}
+        }
+        let prepared = while_running(ctx, id, prepare_track(fetch, page_url, track, dir)).await;
+        match control(ctx, id) {
+            TaskState::Paused => return Ok((Outcome::Paused, final_path.to_path_buf())),
+            TaskState::Cancelled => return Ok((Outcome::Cancelled, final_path.to_path_buf())),
+            _ => {}
+        }
+        let keys = prepared?;
+        let outcome = download_segments(
+            ctx,
+            fetch,
+            id,
+            page_url,
+            track,
+            keys,
+            dir,
+            cfg.segment_concurrency,
+        )
+        .await?;
+        if !matches!(outcome, Outcome::Done) {
+            return Ok((outcome, final_path.to_path_buf()));
+        }
     }
-
     ctx.update_task(id, |t| {
         t.phase = "merging".into();
-        t.message = "merging segments".into();
+        t.message = "merging and validating audio/video".into();
         t.speed_kbps = 0.0;
     });
-
-    let is_fmp4 = info.init_segment.is_some();
     let temp = temp_dir.to_path_buf();
     let final_owned = final_path.to_path_buf();
-    let total = info.segments.len();
-    let produced =
-        tokio::task::spawn_blocking(move || merge_segments(&temp, total, &final_owned, is_fmp4))
-            .await??;
-
+    let info = info.clone();
+    let merge_ctx = Arc::clone(ctx);
+    let merge_id = id.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        merge::merge_segments(&temp, &info, &final_owned, || {
+            control(&merge_ctx, &merge_id) == TaskState::Running
+        })
+    })
+    .await?;
+    match control(ctx, id) {
+        TaskState::Paused => return Ok((Outcome::Paused, final_path.to_path_buf())),
+        TaskState::Cancelled => return Ok((Outcome::Cancelled, final_path.to_path_buf())),
+        _ => {}
+    }
+    let produced = result?;
     let _ = tokio::fs::remove_dir_all(temp_dir).await;
     Ok((Outcome::Done, produced))
+}
+
+/// Dropping a throttled transfer on pause/cancel leaves only completed segments
+/// in the cache, and releases its bandwidth waiter immediately.
+async fn while_running<T>(
+    ctx: &AppCtx,
+    id: &str,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let mut changes = ctx.subscribe();
+    let stopped = async {
+        loop {
+            if control(ctx, id) != TaskState::Running {
+                return;
+            }
+            if changes.recv().await.is_err_and(|error| {
+                matches!(error, tokio::sync::broadcast::error::RecvError::Closed)
+            }) {
+                return;
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = stopped => anyhow::bail!("download paused or cancelled"),
+        result = work => result,
+    }
+}
+
+/// Cache segments only while their URLs, ranges and encryption metadata match.
+async fn prepare_track(
+    fetch: &Fetcher,
+    page_url: &str,
+    info: &M3u8Info,
+    dir: &Path,
+) -> anyhow::Result<Arc<HashMap<String, Vec<u8>>>> {
+    anyhow::ensure!(!info.segments.is_empty(), "playlist contained no segments");
+    let manifest = serde_json::to_vec(&(&info.segments, &info.init_segment))?;
+    let manifest_path = dir.join("playlist.json");
+    if tokio::fs::read(&manifest_path).await.ok().as_deref() != Some(&manifest) {
+        if tokio::fs::try_exists(dir).await? {
+            tokio::fs::remove_dir_all(dir).await?;
+        }
+        tokio::fs::create_dir_all(dir).await?;
+        tokio::fs::write(&manifest_path, manifest).await?;
+    }
+    let mut keys = HashMap::new();
+    for encryption in info
+        .init_segment
+        .iter()
+        .chain(&info.segments)
+        .filter_map(|s| s.encryption.as_ref())
+    {
+        if keys.contains_key(&encryption.key_url) {
+            continue;
+        }
+        let resp = fetch
+            .media_response(&encryption.key_url, page_url, None)
+            .await?;
+        let data = resp.bytes().await?;
+        validate_media_body(&encryption.key_url, &data)?;
+        anyhow::ensure!(data.len() == 16, "unexpected AES key length {}", data.len());
+        keys.insert(encryption.key_url.clone(), data.to_vec());
+    }
+    if let Some(init) = &info.init_segment {
+        let path = dir.join("init.mp4");
+        if !is_non_empty(&path) {
+            fetch_segment(fetch, page_url, init, &path, &keys, &AtomicU64::new(0)).await?;
+        }
+    }
+    Ok(Arc::new(keys))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -470,17 +518,19 @@ async fn download_segments(
     ctx: &Arc<AppCtx>,
     fetch: &Fetcher,
     id: &str,
-    title: &str,
     page_url: &str,
     info: &M3u8Info,
-    key: Option<&[u8]>,
+    keys: Arc<HashMap<String, Vec<u8>>>,
     temp_dir: &Path,
     segment_concurrency: usize,
 ) -> anyhow::Result<Outcome> {
-    let total = info.segments.len();
+    let task = ctx
+        .task(id)
+        .ok_or_else(|| anyhow::anyhow!("download task disappeared"))?;
+    let total = task.total_segments;
     let semaphore = Arc::new(Semaphore::new(segment_concurrency.clamp(1, 32)));
-    let done = Arc::new(AtomicU64::new(0));
-    let bytes = Arc::new(AtomicU64::new(0));
+    let done = Arc::new(AtomicU64::new(task.done_segments as u64));
+    let bytes = Arc::new(AtomicU64::new(task.downloaded_bytes));
     let finished = Arc::new(AtomicBool::new(false));
 
     // Periodic progress reporter so the UI speed stays live between segments.
@@ -515,7 +565,7 @@ async fn download_segments(
         })
     };
 
-    let mut handles = Vec::with_capacity(total);
+    let mut handles = Vec::with_capacity(info.segments.len());
     let rejected = Arc::new(AtomicBool::new(false));
     for (index, segment) in info.segments.iter().enumerate() {
         let permit = Arc::clone(&semaphore);
@@ -525,8 +575,7 @@ async fn download_segments(
         let page_url = page_url.to_string();
         let dir = temp_dir.to_path_buf();
         let segment = segment.clone();
-        let key = key.map(|k| k.to_vec());
-        let iv = info.iv.clone();
+        let keys = Arc::clone(&keys);
         let done = Arc::clone(&done);
         let bytes = Arc::clone(&bytes);
         let rejected = Arc::clone(&rejected);
@@ -541,15 +590,10 @@ async fn download_segments(
                 done.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
-            fetch_segment(
-                &fetch,
-                &page_url,
-                &segment,
-                &path,
-                key.as_deref(),
-                &iv,
-                index,
-                &bytes,
+            while_running(
+                &ctx,
+                &id,
+                fetch_segment(&fetch, &page_url, &segment, &path, &keys, &bytes),
             )
             .await
             .inspect_err(|e| {
@@ -592,15 +636,10 @@ async fn download_segments(
         let mut still_failed = Vec::new();
         for &index in &failed {
             let path = temp_dir.join(format!("{index}.ts"));
-            match fetch_segment(
-                fetch,
-                page_url,
-                &info.segments[index],
-                &path,
-                key,
-                &info.iv,
-                index,
-                &bytes,
+            match while_running(
+                ctx,
+                id,
+                fetch_segment(fetch, page_url, &info.segments[index], &path, &keys, &bytes),
             )
             .await
             {
@@ -643,10 +682,7 @@ async fn download_segments(
                 failed.len()
             )
         }
-        _ => {
-            let _ = title;
-            Ok(Outcome::Done)
-        }
+        _ => Ok(Outcome::Done),
     }
 }
 
@@ -656,27 +692,39 @@ async fn fetch_segment(
     page_url: &str,
     segment: &Segment,
     path: &Path,
-    key: Option<&[u8]>,
-    iv: &Option<Vec<u8>>,
-    index: usize,
+    keys: &HashMap<String, Vec<u8>>,
     bytes: &AtomicU64,
 ) -> anyhow::Result<()> {
     let resp = fetch
-        .media_response(&segment.url, page_url, segment.byte_range)
+        .download_response(&segment.url, page_url, segment.byte_range)
         .await?;
 
     let mut data = Vec::new();
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(60), stream.next())
+        .await
+        .context("media read timed out")?
+    {
         let chunk = chunk?;
         bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         data.extend_from_slice(&chunk);
     }
     validate_media_body(&segment.url, &data)?;
 
-    let data = match key {
-        Some(key) => decrypt(&data, key, iv, index)?,
-        None => data,
+    if let Some((_, length)) = segment.byte_range {
+        anyhow::ensure!(
+            data.len() as u64 == length,
+            "incomplete HLS byte range for {}",
+            segment.url
+        );
+    }
+    let data = if let Some(encryption) = &segment.encryption {
+        let key = keys
+            .get(&encryption.key_url)
+            .ok_or_else(|| anyhow::anyhow!("segment key is missing"))?;
+        decrypt(&data, key, &encryption.iv)?
+    } else {
+        data
     };
 
     // SupJav prefixes every segment with a decoy image header. If no MPEG-TS
@@ -684,7 +732,10 @@ async fn fetch_segment(
     // fMP4 part, for instance), so it is stored untouched.
     let stripped = strip_fake_header(&data);
     let payload: &[u8] = if stripped.is_empty() && !data.is_empty() {
-        log::debug!("segment {index}: no MPEG-TS sync found, keeping the raw payload");
+        log::debug!(
+            "segment {}: no MPEG-TS sync found, keeping the raw payload",
+            path.display()
+        );
         &data
     } else {
         stripped
@@ -692,176 +743,40 @@ async fn fetch_segment(
 
     // Write via a temp name so a crash mid-write cannot look like a
     // complete segment on the next resume.
-    let tmp = path.with_extension("ts.part");
+    let tmp = path.with_extension("part");
     tokio::fs::write(&tmp, payload).await?;
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
 }
 
-/// AES-128-CBC decrypt one segment. TS payloads are block aligned, but a
-/// truncated final block is dropped rather than failing the whole segment.
-fn decrypt(data: &[u8], key: &[u8], iv: &Option<Vec<u8>>, index: usize) -> anyhow::Result<Vec<u8>> {
-    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::NoPadding};
+/// HLS AES-128 uses PKCS#7 padding. Reject truncation so the segment is retried.
+fn decrypt(data: &[u8], key: &[u8], iv: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
+    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
     type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
-
-    if key.len() != 16 {
-        anyhow::bail!("unexpected AES key length {}", key.len());
-    }
-    let usable = data.len() - (data.len() % 16);
-    if usable == 0 {
-        return Ok(Vec::new());
-    }
-    let mut buf = data[..usable].to_vec();
-    let iv = iv_for_segment(index, iv);
+    anyhow::ensure!(key.len() == 16, "unexpected AES key length {}", key.len());
+    anyhow::ensure!(
+        !data.is_empty() && data.len().is_multiple_of(16),
+        "truncated AES segment"
+    );
+    let mut buf = data.to_vec();
     let cipher =
-        Aes128CbcDec::new_from_slices(key, &iv).map_err(|e| anyhow::anyhow!("cipher init: {e}"))?;
+        Aes128CbcDec::new_from_slices(key, iv).map_err(|e| anyhow::anyhow!("cipher init: {e}"))?;
     let out = cipher
-        .decrypt_padded::<NoPadding>(&mut buf)
+        .decrypt_padded::<Pkcs7>(&mut buf)
         .map_err(|e| anyhow::anyhow!("decrypt: {e}"))?;
+    anyhow::ensure!(!out.is_empty(), "empty decrypted segment");
     Ok(out.to_vec())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Merge
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Merge the downloaded segments into `final_path`, returning the file that was
-/// actually produced.
-///
-/// fMP4 (declared via `#EXT-X-MAP`) is concatenated binary-wise because the
-/// concat demuxer cannot handle it; TS goes through ffmpeg's concat demuxer
-/// with a plain binary concatenation as the fallback. Without ffmpeg the
-/// fallback writes `final_path` with a `.ts` extension instead, since the
-/// result is a raw MPEG-TS stream rather than an MP4 container.
-pub fn merge_segments(
-    temp_dir: &Path,
-    total: usize,
-    final_path: &Path,
-    is_fmp4: bool,
-) -> anyhow::Result<PathBuf> {
-    let ffmpeg = which_ffmpeg();
-
-    if is_fmp4 {
-        let raw = temp_dir.join("raw_fragmented.mp4");
-        {
-            use std::io::Write;
-            let mut writer = std::io::BufWriter::new(std::fs::File::create(&raw)?);
-            let init = temp_dir.join("init.mp4");
-            if !init.exists() {
-                anyhow::bail!("fMP4 init segment is missing");
-            }
-            std::io::copy(&mut std::fs::File::open(&init)?, &mut writer)?;
-            for i in 0..total {
-                let mut f = std::fs::File::open(temp_dir.join(format!("{i}.ts")))?;
-                std::io::copy(&mut f, &mut writer)?;
-            }
-            writer.flush()?;
-        }
-
-        let remuxed = ffmpeg
-            .as_ref()
-            .map(|ffmpeg| {
-                let out = std::process::Command::new(ffmpeg)
-                    .args(["-y", "-loglevel", "error", "-i"])
-                    .arg(&raw)
-                    .args(["-c", "copy", "-movflags", "+faststart"])
-                    .arg(final_path)
-                    .output();
-                match out {
-                    Ok(o) if o.status.success() => true,
-                    Ok(o) => {
-                        log::debug!(
-                            "ffmpeg fMP4 remux failed: {}",
-                            String::from_utf8_lossy(&o.stderr).trim()
-                        );
-                        false
-                    }
-                    Err(e) => {
-                        log::debug!("cannot run ffmpeg: {e}");
-                        false
-                    }
-                }
-            })
-            .unwrap_or(false);
-
-        if !remuxed {
-            // Still a valid (fragmented) MP4 — copy it into place.
-            std::fs::copy(&raw, final_path)?;
-        }
-        let _ = std::fs::remove_file(&raw);
-        return Ok(final_path.to_path_buf());
-    }
-
-    if let Some(ffmpeg) = ffmpeg.as_ref() {
-        let concat_file = temp_dir.join("concat.txt");
-        let mut listing = String::new();
-        for i in 0..total {
-            listing.push_str(&format!("file '{i}.ts'\n"));
-        }
-        std::fs::write(&concat_file, listing)?;
-        match std::process::Command::new(ffmpeg)
-            .args([
-                "-y",
-                "-loglevel",
-                "error",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-            ])
-            .arg(&concat_file)
-            .args([
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                "-avoid_negative_ts",
-                "make_zero",
-            ])
-            .arg(final_path)
-            .output()
-        {
-            Ok(o) if o.status.success() => return Ok(final_path.to_path_buf()),
-            Ok(o) => log::warn!(
-                "ffmpeg concat failed ({}), falling back to a binary merge",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            Err(e) => log::warn!("cannot run ffmpeg ({e}), falling back to a binary merge"),
-        }
-    } else {
-        log::info!("ffmpeg not found — merging segments without remuxing");
-    }
-
-    // Binary merge: the result is a valid MPEG-TS even without ffmpeg.
-    let ts_path = final_path.with_extension("ts");
-    {
-        use std::io::Write;
-        let mut writer = std::io::BufWriter::new(std::fs::File::create(&ts_path)?);
-        for i in 0..total {
-            let mut f = std::fs::File::open(temp_dir.join(format!("{i}.ts")))?;
-            std::io::copy(&mut f, &mut writer)?;
-        }
-        writer.flush()?;
-    }
-    log::info!("merged into {}", ts_path.display());
-    Ok(ts_path)
-}
-
-fn which_ffmpeg() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("ffmpeg"))
-        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jav::source::stream::m3u8::parse_media_m3u8;
+    use crate::jav::util::iv_for_segment;
 
     #[test]
     fn decrypts_aes_cbc_round_trip() {
-        use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
+        use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
         type Enc = cbc::Encryptor<aes::Aes128>;
 
         let key = [7u8; 16];
@@ -869,56 +784,55 @@ mod tests {
         let plaintext = vec![0x47u8; 32];
         let mut buf = plaintext.clone();
         let len = buf.len();
+        buf.resize(len + 16, 0);
         let enc = Enc::new_from_slices(&key, &iv).unwrap();
-        let ciphertext = enc
-            .encrypt_padded::<NoPadding>(&mut buf, len)
-            .unwrap()
-            .to_vec();
+        let ciphertext = enc.encrypt_padded::<Pkcs7>(&mut buf, len).unwrap().to_vec();
 
-        let out = decrypt(&ciphertext, &key, &None, 0).unwrap();
+        let out = decrypt(&ciphertext, &key, &iv_for_segment(0, &None)).unwrap();
         assert_eq!(out, plaintext);
     }
 
     #[test]
     fn decrypt_uses_segment_index_as_iv() {
-        use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
+        use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
         type Enc = cbc::Encryptor<aes::Aes128>;
 
         let key = [3u8; 16];
         let plaintext = vec![9u8; 16];
         let mut buf = plaintext.clone();
         let len = buf.len();
+        buf.resize(len + 16, 0);
         let enc = Enc::new_from_slices(&key, &iv_for_segment(5, &None)).unwrap();
-        let ciphertext = enc
-            .encrypt_padded::<NoPadding>(&mut buf, len)
-            .unwrap()
-            .to_vec();
+        let ciphertext = enc.encrypt_padded::<Pkcs7>(&mut buf, len).unwrap().to_vec();
 
-        assert_eq!(decrypt(&ciphertext, &key, &None, 5).unwrap(), plaintext);
+        assert_eq!(
+            decrypt(&ciphertext, &key, &iv_for_segment(5, &None)).unwrap(),
+            plaintext
+        );
         // Wrong index → wrong IV → garbage, never the plaintext.
-        assert_ne!(decrypt(&ciphertext, &key, &None, 6).unwrap(), plaintext);
+        assert_ne!(
+            decrypt(&ciphertext, &key, &iv_for_segment(6, &None)).unwrap(),
+            plaintext
+        );
     }
 
     #[test]
-    fn decrypt_drops_a_trailing_partial_block() {
-        use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
+    fn decrypt_rejects_a_trailing_partial_block() {
+        use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
         type Enc = cbc::Encryptor<aes::Aes128>;
         let key = [1u8; 16];
         let mut buf = vec![5u8; 16];
         let len = buf.len();
+        buf.resize(len + 16, 0);
         let enc = Enc::new_from_slices(&key, &iv_for_segment(0, &None)).unwrap();
-        let mut ciphertext = enc
-            .encrypt_padded::<NoPadding>(&mut buf, len)
-            .unwrap()
-            .to_vec();
+        let mut ciphertext = enc.encrypt_padded::<Pkcs7>(&mut buf, len).unwrap().to_vec();
         ciphertext.extend_from_slice(&[0xde, 0xad]); // truncated tail
-        let out = decrypt(&ciphertext, &key, &None, 0).unwrap();
-        assert_eq!(out.len(), 16);
+        assert!(decrypt(&ciphertext, &key, &iv_for_segment(0, &None)).is_err());
     }
 
     #[test]
     fn rejects_wrong_key_length() {
-        assert!(decrypt(&[0u8; 16], &[0u8; 8], &None, 0).is_err());
+        assert!(decrypt(&[0u8; 16], &[0u8; 8], &iv_for_segment(0, &None)).is_err());
     }
 
     #[test]
@@ -929,22 +843,16 @@ mod tests {
         for i in 0..3 {
             std::fs::write(dir.join(format!("{i}.ts")), vec![i as u8; 4]).unwrap();
         }
-        let final_path = dir.join("out.mp4");
-        // Force the fMP4 path, which concatenates without needing ffmpeg.
+        let info = parse_media_m3u8("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.ts\n#EXTINF:1,\n1.ts\n#EXTINF:1,\n2.ts", &url::Url::parse("https://example.com/media.m3u8").unwrap()).unwrap();
         std::fs::write(dir.join("init.mp4"), [0xff, 0xfe]).unwrap();
-        let produced = merge_segments(&dir, 3, &final_path, true).unwrap();
-        assert_eq!(produced, final_path);
-        let merged = std::fs::read(&produced).unwrap();
-        // 2 init bytes + 3 segments × 4 bytes (an ffmpeg remux may rewrite the
-        // container, so only the lower bound is asserted).
-        assert!(merged.len() >= 14, "got {} bytes", merged.len());
+        let produced = merge::assemble_track(&dir, &info, || true).unwrap();
+        let merged = std::fs::read(produced.path()).unwrap();
+        assert_eq!(merged, [0xff, 0xfe, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn ts_merge_falls_back_to_a_dot_ts_file_without_ffmpeg() {
-        // Only meaningful when ffmpeg is unavailable; with ffmpeg present the
-        // concat demuxer rejects these fake segments and we still fall back.
+    fn ts_merge_rejects_invalid_media() {
         let dir = std::env::temp_dir().join(format!("javd-merge-ts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -952,11 +860,13 @@ mod tests {
             std::fs::write(dir.join(format!("{i}.ts")), vec![0x47u8; 188]).unwrap();
         }
         let final_path = dir.join("out.mp4");
-        let produced = merge_segments(&dir, 2, &final_path, false).unwrap();
-        // Whatever path is returned must actually exist and be non-empty.
-        assert!(produced.exists(), "{} should exist", produced.display());
-        assert!(std::fs::metadata(&produced).unwrap().len() > 0);
-        assert!(produced == final_path || produced.extension().unwrap() == "ts");
+        let info = parse_media_m3u8(
+            "#EXTM3U\n#EXTINF:1,\n0.ts\n#EXTINF:1,\n1.ts",
+            &url::Url::parse("https://example.com/media.m3u8").unwrap(),
+        )
+        .unwrap();
+        assert!(merge::merge_segments(&dir, &info, &final_path, || true).is_err());
+        assert!(!final_path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -965,7 +875,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("javd-merge-bad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(merge_segments(&dir, 0, &dir.join("out.mp4"), true).is_err());
+        let info = parse_media_m3u8(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.ts",
+            &url::Url::parse("https://example.com/media.m3u8").unwrap(),
+        )
+        .unwrap();
+        assert!(merge::assemble_track(&dir, &info, || true).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

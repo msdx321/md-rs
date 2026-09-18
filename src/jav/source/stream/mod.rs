@@ -15,9 +15,9 @@ use url::Url;
 
 use crate::jav::source::http::{Fetcher, MediaRejected, validate_media_body};
 
-use m3u8::{M3u8Info, parse_master_variants, parse_media_m3u8, select_variant};
+use m3u8::{M3u8Info, parse_master_variants, parse_media_m3u8, select_audio_uri, select_variant};
 
-/// What kind of payload `ResolvedStream::url` points at.
+/// What kind of payload a resolved stream contains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamKind {
@@ -27,7 +27,7 @@ pub enum StreamKind {
 #[derive(Debug, Clone)]
 pub struct ResolvedStream {
     pub title: String,
-    pub url: String,
+    pub playlist: M3u8Info,
     pub kind: StreamKind,
 }
 
@@ -124,7 +124,7 @@ pub async fn resolve_stream(
 
     Ok(ResolvedStream {
         title,
-        url: info.variant.uri.clone(),
+        playlist: info,
         kind: StreamKind::Hls,
     })
 }
@@ -268,26 +268,30 @@ fn resolve_recursive<'a>(
 
         let mut last_err = String::new();
         let mut text = String::new();
+        let mut effective_url = playlist_url.to_string();
         for attempt in 1..=3 {
             match fetch.media_response(playlist_url, origin_url, None).await {
-                Ok(resp) => match resp.text().await {
-                    Ok(t) => {
-                        validate_media_body(playlist_url, t.as_bytes())?;
-                        if !t
-                            .trim_start_matches('\u{feff}')
-                            .trim_start()
-                            .starts_with("#EXTM3U")
-                        {
-                            return Err(format!(
-                                "invalid HLS playlist at {playlist_url}: missing #EXTM3U"
-                            )
-                            .into());
+                Ok(resp) => {
+                    effective_url = resp.uri().to_string();
+                    match resp.text().await {
+                        Ok(t) => {
+                            validate_media_body(playlist_url, t.as_bytes())?;
+                            if !t
+                                .trim_start_matches('\u{feff}')
+                                .trim_start()
+                                .starts_with("#EXTM3U")
+                            {
+                                return Err(format!(
+                                    "invalid HLS playlist at {playlist_url}: missing #EXTM3U"
+                                )
+                                .into());
+                            }
+                            text = t;
+                            break;
                         }
-                        text = t;
-                        break;
+                        Err(e) => last_err = e.to_string(),
                     }
-                    Err(e) => last_err = e.to_string(),
-                },
+                }
                 Err(e) if e.is::<MediaRejected>() => return Err(e.into()),
                 Err(e) => last_err = e.to_string(),
             }
@@ -299,7 +303,7 @@ fn resolve_recursive<'a>(
             return Err(last_err.into());
         }
 
-        let base_url = Url::parse(playlist_url)?;
+        let base_url = Url::parse(&effective_url)?;
 
         // 1. Master playlist.
         if text.contains("#EXT-X-STREAM-INF") {
@@ -321,6 +325,7 @@ fn resolve_recursive<'a>(
                     Ok(mut info) => {
                         info.variant.resolution = info.variant.resolution.or(variant.resolution);
                         info.variant.bandwidth = info.variant.bandwidth.or(variant.bandwidth);
+                        info.variant.audio_group = variant.audio_group;
                         resolved.push(info);
                     }
                     Err(e) => {
@@ -337,14 +342,30 @@ fn resolve_recursive<'a>(
             // to the caller, which decides whether to warn or reject.
             let list: Vec<m3u8::Variant> =
                 resolved.iter().map(|info| info.variant.clone()).collect();
-            if let Some(best) = select_variant(&list, resolution)
-                && let Some(index) = resolved
-                    .iter()
-                    .position(|info| info.variant.uri == best.uri)
-            {
-                return Ok(resolved.swap_remove(index));
+            let index = select_variant(&list, resolution)
+                .and_then(|best| {
+                    resolved
+                        .iter()
+                        .position(|info| info.variant.uri == best.uri)
+                })
+                .unwrap_or(0);
+            let mut info = resolved.swap_remove(index);
+            let audio_uri = info
+                .variant
+                .audio_group
+                .as_deref()
+                .map(|group| select_audio_uri(&text, &base_url, group))
+                .transpose()?
+                .flatten();
+            if let Some(uri) = audio_uri {
+                let audio =
+                    resolve_recursive(fetch, origin_url, &uri, resolution, depth + 1).await?;
+                if audio.segments.is_empty() || audio.audio.is_some() {
+                    return Err("invalid external HLS audio playlist".into());
+                }
+                info.audio = Some(Box::new(audio));
             }
-            return Ok(resolved.swap_remove(0));
+            return Ok(info);
         }
 
         // 2. Media playlist.

@@ -10,14 +10,21 @@ use std::error::Error;
 use regex::Regex;
 use url::Url;
 
-use crate::jav::util::parse_hex;
+use crate::jav::util::{iv_for_segment, parse_hex};
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Encryption {
+    pub key_url: String,
+    pub iv: [u8; 16],
+}
 
 /// One media segment (or init segment) of an HLS playlist.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Segment {
     pub url: String,
     /// `(start, length)` from `#EXT-X-BYTERANGE:length@start`.
     pub byte_range: Option<(u64, u64)>,
+    pub encryption: Option<Encryption>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,8 +34,8 @@ pub struct M3u8Info {
     pub segments: Vec<Segment>,
     /// fMP4 init segment from `#EXT-X-MAP`, prepended when merging.
     pub init_segment: Option<Segment>,
-    pub key_url: Option<String>,
-    pub iv: Option<Vec<u8>>,
+    /// The selected external audio rendition, if audio is not muxed in video.
+    pub audio: Option<Box<M3u8Info>>,
     pub total_duration: f64,
 }
 
@@ -37,6 +44,7 @@ pub struct Variant {
     pub uri: String,
     pub bandwidth: Option<usize>,
     pub resolution: Option<(usize, usize)>,
+    pub audio_group: Option<String>,
 }
 
 fn parse_extinf_duration(line: &str) -> Option<f64> {
@@ -64,7 +72,11 @@ fn parse_byterange_attr(value: &str, last_end: Option<u64>) -> Option<(u64, u64)
 
 /// Extract a quoted attribute such as `URI="init.mp4"`.
 fn extract_attr(attrs: &str, name: &str) -> Option<String> {
-    let re = Regex::new(&format!(r#"{}=\"([^\"]+)\""#, regex::escape(name))).ok()?;
+    let re = Regex::new(&format!(
+        r#"(?:^|,)\s*{}=\"([^\"]+)\""#,
+        regex::escape(name)
+    ))
+    .ok()?;
     re.captures(attrs)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
@@ -72,7 +84,7 @@ fn extract_attr(attrs: &str, name: &str) -> Option<String> {
 
 /// Extract an unquoted attribute such as `METHOD=AES-128`.
 fn extract_unquoted_attr(attrs: &str, name: &str) -> Option<String> {
-    let re = Regex::new(&format!(r#"{}=([^,\s]+)"#, regex::escape(name))).ok()?;
+    let re = Regex::new(&format!(r#"(?:^|,)\s*{}=([^,\s]+)"#, regex::escape(name))).ok()?;
     re.captures(attrs)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
@@ -83,6 +95,7 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
     let mut init_segment = None;
     let mut key_url = None;
     let mut iv = None;
+    let mut sequence = 0usize;
     let mut total_duration = 0.0f64;
     let mut current_duration: Option<f64> = None;
     let mut pending_byterange: Option<(u64, u64)> = None;
@@ -98,18 +111,30 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
             let _ = rest;
             if line.starts_with("#EXTINF:") {
                 current_duration = parse_extinf_duration(line);
-            } else if line.starts_with("#EXT-X-KEY") {
+            } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
+                sequence = value.trim().parse()?;
+            } else if line.starts_with("#EXT-X-KEY:") {
                 let attrs = line.strip_prefix("#EXT-X-KEY:").unwrap_or_default();
-                if attrs.contains("METHOD=NONE") {
-                    key_url = None;
-                    iv = None;
-                } else if extract_unquoted_attr(attrs, "METHOD").as_deref() == Some("AES-128") {
-                    if let Some(uri) = extract_attr(attrs, "URI") {
+                match extract_unquoted_attr(attrs, "METHOD").as_deref() {
+                    Some("NONE") => {
+                        key_url = None;
+                        iv = None;
+                    }
+                    Some("AES-128") => {
+                        if extract_attr(attrs, "KEYFORMAT").is_some_and(|v| v != "identity") {
+                            return Err("unsupported HLS key format".into());
+                        }
+                        let uri = extract_attr(attrs, "URI").ok_or("AES key URI is missing")?;
                         key_url = Some(base_url.join(&uri)?.to_string());
+                        iv = extract_unquoted_attr(attrs, "IV")
+                            .map(|value| {
+                                parse_hex(&value)
+                                    .filter(|bytes| !bytes.is_empty() && bytes.len() <= 16)
+                                    .ok_or("invalid AES IV")
+                            })
+                            .transpose()?;
                     }
-                    if let Some(iv_hex) = extract_unquoted_attr(attrs, "IV") {
-                        iv = parse_hex(&iv_hex);
-                    }
+                    _ => return Err("unsupported HLS encryption method".into()),
                 }
             } else if line.starts_with("#EXT-X-MAP") {
                 let attrs = line.strip_prefix("#EXT-X-MAP:").unwrap_or_default().trim();
@@ -120,10 +145,24 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
                     if let Some((start, len)) = range {
                         last_byterange_end = Some(start + len);
                     }
-                    init_segment = Some(Segment {
+                    if key_url.is_some() && iv.is_none() {
+                        return Err("encrypted HLS init segment requires an explicit IV".into());
+                    }
+                    let init = Segment {
                         url: resolved.to_string(),
                         byte_range: range,
-                    });
+                        encryption: key_url.as_ref().map(|key_url| Encryption {
+                            key_url: key_url.clone(),
+                            iv: iv_for_segment(0, &iv),
+                        }),
+                    };
+                    if init_segment
+                        .as_ref()
+                        .is_some_and(|previous| previous != &init)
+                    {
+                        return Err("changing HLS init segments are not supported".into());
+                    }
+                    init_segment = Some(init);
                 }
             } else if line.starts_with("#EXT-X-BYTERANGE") {
                 let value = line.strip_prefix("#EXT-X-BYTERANGE:").unwrap_or_default();
@@ -136,7 +175,14 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
             segments.push(Segment {
                 url: base_url.join(line)?.to_string(),
                 byte_range: pending_byterange.take(),
+                encryption: key_url.as_ref().map(|key_url| Encryption {
+                    key_url: key_url.clone(),
+                    iv: iv_for_segment(sequence, &iv),
+                }),
             });
+            sequence = sequence
+                .checked_add(1)
+                .ok_or("HLS media sequence overflow")?;
             if let Some(dur) = current_duration.take() {
                 total_duration += dur;
             }
@@ -153,11 +199,11 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
             uri: base_url.to_string(),
             bandwidth: None,
             resolution: None,
+            audio_group: None,
         },
         segments,
         init_segment,
-        key_url,
-        iv,
+        audio: None,
         total_duration,
     })
 }
@@ -235,6 +281,12 @@ pub fn parse_master_variants(text: &str, base_url: &Url) -> Vec<Variant> {
                             uri: uri.to_string(),
                             bandwidth,
                             resolution,
+                            audio_group: extract_attr(
+                                lines[i]
+                                    .strip_prefix("#EXT-X-STREAM-INF:")
+                                    .unwrap_or_default(),
+                                "AUDIO",
+                            ),
                         });
                     }
                     break;
@@ -246,6 +298,35 @@ pub fn parse_master_variants(text: &str, base_url: &Url) -> Vec<Variant> {
         i += 1;
     }
     variants
+}
+
+/// Prefer the group's default rendition, then autoselect, then playlist order.
+/// A rendition without a URI declares audio carried in the video playlist.
+pub fn select_audio_uri(
+    text: &str,
+    base_url: &Url,
+    group: &str,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let mut renditions: Vec<_> = text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("#EXT-X-MEDIA:"))
+        .filter(|attrs| {
+            extract_unquoted_attr(attrs, "TYPE").as_deref() == Some("AUDIO")
+                && extract_attr(attrs, "GROUP-ID").as_deref() == Some(group)
+        })
+        .collect();
+    renditions.sort_by_key(|attrs| {
+        (
+            extract_unquoted_attr(attrs, "DEFAULT").as_deref() != Some("YES"),
+            extract_unquoted_attr(attrs, "AUTOSELECT").as_deref() != Some("YES"),
+        )
+    });
+    let attrs = renditions
+        .first()
+        .ok_or("HLS audio group has no renditions")?;
+    extract_attr(attrs, "URI")
+        .map(|uri| base_url.join(&uri).map(String::from).map_err(Into::into))
+        .transpose()
 }
 
 #[cfg(test)]
@@ -272,7 +353,7 @@ mod tests {
         );
         assert_eq!(info.segments[0].byte_range, None);
         assert!(info.init_segment.is_none());
-        assert!(info.key_url.is_none());
+        assert!(info.segments[0].encryption.is_none());
         assert_eq!(info.total_duration, 19.5);
     }
 
@@ -282,12 +363,15 @@ mod tests {
 #EXTINF:10.0,\ns0.ts\n";
         let info = parse_media_m3u8(text, &base()).unwrap();
         assert_eq!(
-            info.key_url.as_deref(),
+            info.segments[0]
+                .encryption
+                .as_ref()
+                .map(|e| e.key_url.as_str()),
             Some("https://cdn.example.com/video/key.bin")
         );
         let mut expected = [0u8; 16];
         expected[15] = 0x2a;
-        assert_eq!(info.iv.as_deref(), Some(&expected[..]));
+        assert_eq!(info.segments[0].encryption.as_ref().unwrap().iv, expected);
     }
 
     #[test]
@@ -329,8 +413,8 @@ mod tests {
 #EXTINF:10.0,\ns1.ts\n";
         let info = parse_media_m3u8(text, &base()).unwrap();
         assert!(
-            info.key_url.is_none(),
-            "later METHOD=NONE must clear the key"
+            info.segments[1].encryption.is_none(),
+            "later METHOD=NONE must clear the key for subsequent segments"
         );
         assert_eq!(info.segments.len(), 2);
     }
@@ -352,7 +436,10 @@ mod tests {
 #EXTINF:10.0,\ns0.ts\n";
         let info = parse_media_m3u8(text, &base()).unwrap();
         assert_eq!(
-            info.key_url.as_deref(),
+            info.segments[0]
+                .encryption
+                .as_ref()
+                .map(|e| e.key_url.as_str()),
             Some("https://cdn.example.com/video/key.bin")
         );
         assert_eq!(info.segments.len(), 1, "BOM line must not become a segment");
@@ -377,16 +464,19 @@ mod tests {
         let variants = vec![
             Variant {
                 uri: "a".into(),
+                audio_group: None,
                 bandwidth: Some(1),
                 resolution: Some((640, 360)),
             },
             Variant {
                 uri: "b".into(),
+                audio_group: None,
                 bandwidth: Some(2),
                 resolution: Some((1280, 720)),
             },
             Variant {
                 uri: "c".into(),
+                audio_group: None,
                 bandwidth: Some(3),
                 resolution: Some((1920, 1080)),
             },

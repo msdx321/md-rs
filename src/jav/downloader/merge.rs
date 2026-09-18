@@ -1,0 +1,207 @@
+//! Merge only complete tracks, and publish an MP4 only after validating it.
+
+use std::io::{Seek, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use anyhow::Context;
+
+use crate::jav::source::stream::m3u8::M3u8Info;
+
+pub(super) fn require_tools() -> anyhow::Result<()> {
+    for tool in ["ffmpeg", "ffprobe"] {
+        let output = Command::new(tool)
+            .arg("-version")
+            .output()
+            .with_context(|| format!("{tool} is required for verified video downloads"))?;
+        anyhow::ensure!(output.status.success(), "cannot run {tool}");
+    }
+    Ok(())
+}
+
+pub(super) fn validate_output(path: &Path, duration: Option<f64>) -> anyhow::Result<()> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-probesize",
+            "50000000",
+            "-analyzeduration",
+            "30000000",
+            "-show_entries",
+            "stream=codec_type,duration,nb_frames",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .context("cannot run ffprobe to validate merged audio and video")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "merged file is unreadable: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let probe: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let streams = probe["streams"]
+        .as_array()
+        .context("no media streams found")?;
+    for kind in ["video", "audio"] {
+        let stream = streams
+            .iter()
+            .find(|s| s["codec_type"] == kind)
+            .with_context(|| {
+                format!("no {kind} stream found; refusing to mark the download complete")
+            })?;
+        if let Some(frames) = stream["nb_frames"]
+            .as_str()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            anyhow::ensure!(frames > 0, "merged {kind} stream is empty");
+        }
+        if let Some(expected) = duration {
+            let actual = stream["duration"]
+                .as_str()
+                .and_then(|v| v.parse::<f64>().ok())
+                .with_context(|| format!("merged {kind} stream has no duration"))?;
+            let tolerance = 2.0f64.max(expected * 0.01);
+            anyhow::ensure!(
+                actual.is_finite() && actual > 0.0 && actual + tolerance >= expected,
+                "merged {kind} is too short ({actual:.1}s, expected {expected:.1}s)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Assemble a continuous input so probing is not limited to the first TS segment.
+pub(super) fn assemble_track(
+    dir: &Path,
+    info: &M3u8Info,
+    running: impl Fn() -> bool,
+) -> anyhow::Result<tempfile::NamedTempFile> {
+    anyhow::ensure!(!info.segments.is_empty(), "playlist contained no segments");
+    let mut raw = tempfile::NamedTempFile::new_in(dir)?;
+    let mut writer = std::io::BufWriter::new(raw.as_file_mut());
+    let init = info.init_segment.as_ref().map(|_| dir.join("init.mp4"));
+    for path in init
+        .into_iter()
+        .chain((0..info.segments.len()).map(|i| dir.join(format!("{i}.ts"))))
+    {
+        anyhow::ensure!(running(), "merge interrupted");
+        let mut file = std::fs::File::open(&path)
+            .with_context(|| format!("missing media segment {}", path.display()))?;
+        anyhow::ensure!(
+            file.metadata()?.len() > 0,
+            "empty media segment {}",
+            path.display()
+        );
+        std::io::copy(&mut file, &mut writer)?;
+    }
+    writer.flush()?;
+    drop(writer);
+    Ok(raw)
+}
+
+pub(super) fn merge_segments(
+    temp_dir: &Path,
+    info: &M3u8Info,
+    final_path: &Path,
+    running: impl Fn() -> bool,
+) -> anyhow::Result<PathBuf> {
+    let video = assemble_track(temp_dir, info, &running)?;
+    let audio = info
+        .audio
+        .as_deref()
+        .map(|audio| assemble_track(&temp_dir.join("audio"), audio, &running))
+        .transpose()?;
+    // Stage beside the destination: temp and downloads may be different mounts.
+    let staged = tempfile::Builder::new()
+        .prefix(".jav-merge-")
+        .suffix(".mp4.part")
+        .tempfile_in(
+            final_path
+                .parent()
+                .context("output has no parent directory")?,
+        )?;
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-nostdin",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-xerror",
+        "-abort_on",
+        "empty_output+empty_output_stream",
+    ]);
+    for input in std::iter::once(&video).chain(audio.iter()) {
+        command
+            .args([
+                "-probesize",
+                "50000000",
+                "-analyzeduration",
+                "30000000",
+                "-i",
+            ])
+            .arg(input.path());
+    }
+    // Audio is mandatory. Optional maps would quietly produce a silent video.
+    command.args([
+        "-map",
+        "0:v:0",
+        "-map",
+        if audio.is_some() { "1:a:0" } else { "0:a:0" },
+    ]);
+    command
+        .args([
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-f",
+            "mp4",
+        ])
+        .arg(staged.path());
+    // Use a file instead of a pipe so stderr cannot block a long merge.
+    let mut errors = tempfile::tempfile()?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(errors.try_clone()?)
+        .spawn()
+        .context("cannot start ffmpeg")?;
+    let status = loop {
+        if !running() {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("merge interrupted");
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    if !status.success() {
+        use std::io::Read;
+        errors.rewind()?;
+        let mut message = String::new();
+        errors.read_to_string(&mut message)?;
+        anyhow::bail!("ffmpeg merge failed: {}", message.trim());
+    }
+    validate_output(staged.path(), Some(info.total_duration))?;
+    anyhow::ensure!(running(), "merge interrupted");
+    staged.as_file().sync_all()?;
+    staged
+        .persist(final_path)
+        .context("cannot publish merged MP4")?;
+    Ok(final_path.to_path_buf())
+}

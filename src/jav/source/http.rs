@@ -34,7 +34,7 @@ pub fn build_client() -> anyhow::Result<wreq::Client> {
     wreq::Client::builder()
         .emulation(EMULATION)
         .redirect(wreq::redirect::Policy::limited(10))
-        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(60))
         .build()
         .context("failed to build HTTP client")
 }
@@ -137,7 +137,11 @@ impl Fetcher {
         referer: Option<&str>,
         credentials: &(String, String),
     ) -> wreq::RequestBuilder {
-        let mut req = self.client.get(url).header("accept", ACCEPT_HTML);
+        let mut req = self
+            .client
+            .get(url)
+            .header("accept", ACCEPT_HTML)
+            .timeout(std::time::Duration::from_secs(60));
         if let Some(referer) = referer {
             req = req.header("referer", referer);
         }
@@ -146,7 +150,7 @@ impl Fetcher {
 
     /// GET media, using the page origin as referer and scoping credentials
     /// to the configured site that issued them.
-    pub fn media_request(
+    fn media_request(
         &self,
         url: &str,
         origin: &str,
@@ -173,7 +177,37 @@ impl Fetcher {
         origin: &str,
         range: Option<(u64, u64)>,
     ) -> anyhow::Result<wreq::Response> {
-        let resp = self.media_request(url, origin, range).send().await?;
+        self.media_response_inner(url, origin, range, false).await
+    }
+
+    /// Payload streams have per-read deadlines in the downloader. Their total
+    /// duration may legitimately be long when bandwidth is limited.
+    pub async fn download_response(
+        &self,
+        url: &str,
+        origin: &str,
+        range: Option<(u64, u64)>,
+    ) -> anyhow::Result<wreq::Response> {
+        self.media_response_inner(url, origin, range, true).await
+    }
+
+    async fn media_response_inner(
+        &self,
+        url: &str,
+        origin: &str,
+        range: Option<(u64, u64)>,
+        download: bool,
+    ) -> anyhow::Result<wreq::Response> {
+        let timeout = std::time::Duration::from_secs(60);
+        let request = self.media_request(url, origin, range);
+        let request = if download {
+            request
+        } else {
+            request.timeout(timeout)
+        };
+        let resp = tokio::time::timeout(timeout, request.send())
+            .await
+            .context("media response timed out")??;
         let status = resp.status();
         let headers = resp.headers();
         let challenge = headers
@@ -204,6 +238,23 @@ impl Fetcher {
         }
         if !status.is_success() {
             anyhow::bail!("media request for {}: HTTP {status}", resp.uri());
+        }
+        if let Some((start, length)) = range {
+            let end = start
+                .checked_add(length)
+                .and_then(|end| end.checked_sub(1))
+                .filter(|_| length > 0)
+                .ok_or_else(|| anyhow::anyhow!("invalid HLS byte range"))?;
+            let expected = format!("bytes {start}-{end}/");
+            anyhow::ensure!(
+                status == wreq::StatusCode::PARTIAL_CONTENT
+                    && headers
+                        .get("content-range")
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.starts_with(&expected)),
+                "server did not honor HLS byte range for {}",
+                resp.uri()
+            );
         }
         Ok(resp)
     }
