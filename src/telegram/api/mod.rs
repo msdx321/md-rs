@@ -142,6 +142,7 @@ pub struct ApiState {
     pause_tx: watch::Sender<bool>,
     request_status: Mutex<String>,
     status: Mutex<DashboardStatus>,
+    scan: Mutex<ScanStatus>,
     stats: Mutex<DashboardStats>,
     updates: broadcast::Sender<String>,
 }
@@ -150,6 +151,34 @@ pub struct ApiState {
 struct DashboardStatus {
     message: String,
     next_run_at: Option<String>,
+}
+
+#[derive(Clone, Default, Serialize)]
+struct ScanStatus {
+    running: bool,
+    last_run: Option<ScanReport>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct ScanReport {
+    pub trigger: &'static str,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub total_chats: usize,
+    pub chats: Vec<ChatScanReport>,
+    pub stopped: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Default, Serialize)]
+pub(crate) struct ChatScanReport {
+    pub chat_id: String,
+    pub scanned: u64,
+    pub downloaded: u64,
+    pub skipped: u64,
+    pub failed: u64,
+    pub completed: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Default)]
@@ -172,6 +201,7 @@ struct DashboardSnapshot {
     login: login::LoginSnapshot,
     status: String,
     next_run_at: Option<String>,
+    scan: ScanStatus,
     request_status: String,
     paused: bool,
     cancelling: bool,
@@ -230,6 +260,7 @@ impl ApiState {
                 message: "starting".to_string(),
                 next_run_at: None,
             }),
+            scan: Mutex::new(ScanStatus::default()),
             stats: Mutex::new(DashboardStats {
                 completed: history::load(&database, now_millis(), days).await?,
                 ..DashboardStats::default()
@@ -243,6 +274,19 @@ impl ApiState {
         *self.status.lock().await = DashboardStatus {
             message: status.to_string(),
             next_run_at: None,
+        };
+        self.publish().await;
+    }
+
+    pub(crate) async fn start_scan(&self) {
+        self.scan.lock().await.running = true;
+        self.publish().await;
+    }
+
+    pub(crate) async fn finish_scan(&self, report: ScanReport) {
+        *self.scan.lock().await = ScanStatus {
+            running: false,
+            last_run: Some(report),
         };
         self.publish().await;
     }
@@ -402,6 +446,7 @@ impl ApiState {
 
     async fn snapshot(&self) -> DashboardSnapshot {
         let status = self.status.lock().await.clone();
+        let scan = self.scan.lock().await.clone();
         let request_status = self.request_status.lock().await.clone();
         let stats = self.stats.lock().await;
         let active = stats
@@ -445,6 +490,7 @@ impl ApiState {
             login: self.login.lock().await.snapshot.clone(),
             status: status.message,
             next_run_at: status.next_run_at,
+            scan,
             request_status,
             paused: self.paused.load(Ordering::Relaxed),
             cancelling: self.cancelling.load(Ordering::Relaxed),

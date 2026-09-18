@@ -12,6 +12,7 @@
 .module-card p { color: var(--muted); margin: 18px 0 24px; font-size: 13px; overflow-wrap: anywhere; }
 .run-summary { margin: 18px 0 24px; font-size: 13px; }
 .run-summary p { margin: 0; }
+.run-summary > p:not([hidden]) + #telegram-last-run { margin-top: 12px; }
 .run-counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; font-variant-numeric: tabular-nums; }
 .run-counts[hidden] { display: none; }
 .run-summary details { margin-top: 12px; color: var(--muted); font-size: 12px; }

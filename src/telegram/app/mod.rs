@@ -19,7 +19,7 @@ use log::{debug, info};
 use rustc_hash::FxHashMap as HashMap;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 
-use crate::telegram::api::{ApiState, ChatRequest, ChatTarget};
+use crate::telegram::api::{ApiState, ChatRequest, ChatTarget, ScanReport};
 use crate::telegram::config::{ChatConfig, Config, FILE};
 use crate::telegram::storage::ChatData;
 
@@ -93,7 +93,7 @@ pub(crate) async fn run_downloader(
         schedule.clone(),
         crate::runtime::schedule::Module::Telegram,
     );
-    let mut scan_due = false;
+    let mut scan_due = None;
     let mut cycle_no: u64 = 0;
     loop {
         if web_state.cancelling.load(Ordering::Relaxed) {
@@ -150,23 +150,46 @@ pub(crate) async fn run_downloader(
         }
         runtime.dl_sem = Arc::new(Semaphore::new(cfg.max_download_task));
         std::fs::create_dir_all(&cfg.save_path)?;
-        if scan_due {
-            scan_due = false;
+        if let Some(trigger) = scan_due.take() {
             cycle_no += 1;
             let cycle_started = Instant::now();
-            let completed =
-                run_check_cycle(&client, &mut cfg, &runtime, &mut data_chats, &work_shutdown)
-                    .await?;
+            let mut report = ScanReport {
+                trigger,
+                started_at: chrono::Utc::now().to_rfc3339(),
+                finished_at: None,
+                total_chats: cfg.chat.len(),
+                chats: Vec::new(),
+                stopped: false,
+                error: None,
+            };
+            web_state.start_scan().await;
+            let result: anyhow::Result<bool> = async {
+                let completed = run_check_cycle(
+                    &client,
+                    &mut cfg,
+                    &runtime,
+                    &mut data_chats,
+                    &work_shutdown,
+                    &mut report,
+                )
+                .await?;
 
-            // Persist after every cycle (full or interrupted) so SQLite tracks
-            // the live file-id cache and per-chat retry sets even on shutdown.
-            persist_state(
-                &web_state.database,
-                &file_ids,
-                &data_chats,
-                web_state.history_cutoff(),
-            )
-            .await?;
+                // Persist after full and interrupted cycles before reporting success.
+                persist_state(
+                    &web_state.database,
+                    &file_ids,
+                    &data_chats,
+                    web_state.history_cutoff(),
+                )
+                .await?;
+                Ok(completed)
+            }
+            .await;
+            report.finished_at = Some(chrono::Utc::now().to_rfc3339());
+            report.stopped = work_shutdown.is_cancelled() || matches!(result, Ok(false));
+            report.error = result.as_ref().err().map(|error| format!("{error:#}"));
+            web_state.finish_scan(report).await;
+            let completed = result?;
             debug!(
                 "cycle {cycle_no}: persisted state to SQLite ({} file ids, {} chats pending)",
                 file_ids.lock().await.len(),
@@ -193,7 +216,7 @@ pub(crate) async fn run_downloader(
             _ = shutdown.cancelled() => break,
             _ = work_shutdown.cancelled() => continue,
             _ = settings_rx.changed() => {},
-            due = timer.tick() => { scan_due = due; }
+            due = timer.tick() => { scan_due = due.then_some("scheduled"); }
             request = download_rx.recv() => {
                 cfg = FILE.load_optional()?.unwrap_or(cfg);
             cfg.save_path = schedule.borrow().telegram_download_path.clone();
@@ -201,7 +224,7 @@ pub(crate) async fn run_downloader(
                 runtime.dl_sem = Arc::new(Semaphore::new(cfg.max_download_task));
                 std::fs::create_dir_all(&cfg.save_path)?;
                 match request {
-                    Some(ChatRequest::Scan) => { scan_due = true; }
+                    Some(ChatRequest::Scan) => { scan_due = Some("manual"); }
                     Some(ChatRequest::Once(target, message_id)) => {
                         let label = target.label();
                         web_state.set_status("running").await;

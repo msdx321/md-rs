@@ -11,7 +11,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::telegram::api::ApiState;
+use crate::telegram::api::{ApiState, ChatScanReport, ScanReport};
 use crate::telegram::config::{ChatConfig, Config};
 use crate::telegram::downloader::{
     download_media_inner, file_extension_value, media_duration_value, media_file_name_value,
@@ -33,6 +33,7 @@ use super::state::{persist_state, sync_retry_set};
 struct ChatOutcome {
     completed: bool,
     last_id: i32,
+    report: ChatScanReport,
 }
 
 pub(super) struct DownloadRuntime {
@@ -62,6 +63,7 @@ pub(super) async fn run_check_cycle(
     runtime: &DownloadRuntime,
     data_chats: &mut HashMap<String, ChatData>,
     shutdown: &Shutdown,
+    report: &mut ScanReport,
 ) -> anyhow::Result<bool> {
     let chats = cfg.chat.clone();
     for chat_cfg in &chats {
@@ -92,6 +94,7 @@ pub(super) async fn run_check_cycle(
         .await
         {
             Ok(outcome) => {
+                report.chats.push(outcome.report);
                 sync_retry_set(data_chats, &chat_id, &live_retry).await;
 
                 if outcome.completed || shutdown.work_cancelled() {
@@ -124,6 +127,11 @@ pub(super) async fn run_check_cycle(
                 }
             }
             Err(e) => {
+                report.chats.push(ChatScanReport {
+                    chat_id: chat_id.clone(),
+                    error: Some(format!("{e:#}")),
+                    ..ChatScanReport::default()
+                });
                 // A real error (peer resolution, etc.). Still flush the live
                 // retry set so partial progress survives, then keep going unless
                 // we were also asked to shut down.
@@ -304,7 +312,19 @@ async fn process_chat(
         if completed { "" } else { " [interrupted]" }
     );
 
-    Ok(ChatOutcome { completed, last_id })
+    Ok(ChatOutcome {
+        completed,
+        last_id,
+        report: ChatScanReport {
+            chat_id: chat_cfg.chat_id.clone(),
+            scanned: stats.scanned.load(Ordering::Relaxed),
+            downloaded: stats.downloaded.load(Ordering::Relaxed),
+            skipped: stats.skipped.load(Ordering::Relaxed),
+            failed: stats.failed.load(Ordering::Relaxed),
+            completed,
+            error: None,
+        },
+    })
 }
 
 pub(super) async fn run_message_download(

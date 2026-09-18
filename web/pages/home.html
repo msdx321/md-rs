@@ -10,7 +10,14 @@
 <section class="module-grid" aria-label="Module status">
   <article class="panel module-card">
     <header><h2><span class="module-mark" aria-hidden="true">T</span>Telegram</h2><span id="telegram-connection" class="pill" role="status">Connecting</span></header>
-    <p id="telegram-status">Waiting for Telegram status…</p>
+    <div class="run-summary">
+      <p id="telegram-status">Waiting for Telegram status…</p>
+      <div id="telegram-last-run" hidden>
+        <p id="telegram-run-label"></p>
+        <div id="telegram-run-counts" class="run-counts"></div>
+        <details id="telegram-run-details"><summary>Run details</summary><ul id="telegram-run-breakdown"></ul></details>
+      </div>
+    </div>
     <dl><div><dt>Data saved <span data-history-days="telegram">· 30 days</span></dt><dd id="telegram-saved">—</dd></div><div><dt>Next scheduled run</dt><dd id="telegram-next-run">—</dd></div></dl>
     <footer><span id="telegram-transfers" class="muted">—</span><a href="/telegram/">Open Telegram <span aria-hidden="true">↗</span></a></footer>
   </article>

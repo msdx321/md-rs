@@ -10,6 +10,56 @@ const queueActivity = scheduleRender(renderActivity);
 const queueHistory = scheduleRender(renderHistory);
 const renderedLists = new Map();
 let lastJavRun;
+let lastTelegramRun;
+
+function renderTelegramRun(snapshot) {
+  const scan = snapshot.scan;
+  const run = scan?.last_run;
+  const status = $('telegram-status');
+  status.hidden = Boolean(run) && snapshot.login.step === 'ready' && !scan.running
+    && !snapshot.paused && !snapshot.cancelling
+    && ['Ready for downloads', 'running', 'Schedule disabled'].includes(snapshot.status);
+  status.textContent = snapshot.login.step !== 'ready' ? snapshot.login.message
+    : snapshot.cancelling ? 'Cancelling' : snapshot.paused ? 'Paused'
+    : scan?.running ? 'Scan running'
+    : label(snapshot.status);
+  const signature = JSON.stringify(run);
+  if (signature === lastTelegramRun) return;
+  lastTelegramRun = signature;
+  $('telegram-last-run').hidden = !run;
+  if (!run) return;
+  const totals = run.chats.reduce((sum, chat) => {
+    for (const key of ['downloaded', 'scanned', 'failed', 'skipped']) sum[key] += chat[key];
+    return sum;
+  }, { downloaded: 0, scanned: 0, failed: 0, skipped: 0 });
+  const incomplete = run.chats.filter(chat => chat.completed).length < run.total_chats;
+  const outcome = run.stopped ? ' · Stopped' : run.error || run.chats.some(chat => chat.error) || totals.failed ? ' · With errors' : incomplete ? ' · Incomplete' : '';
+  $('telegram-run-label').textContent = `Last ${run.trigger} run${outcome}`;
+  $('telegram-run-counts').replaceChildren(...[
+    [`${totals.downloaded} downloaded`, 'completed'],
+    [`${totals.scanned} scanned`, ''],
+    [`${totals.failed} failed`, totals.failed ? 'failed' : ''],
+    [`${totals.skipped} skipped`, ''],
+  ].map(([text, kind]) => {
+    const count = document.createElement('span');
+    count.className = `tag ${kind}`;
+    count.textContent = text;
+    return count;
+  }));
+  const details = [
+    `Started ${dateTime(run.started_at)} · Finished ${dateTime(run.finished_at)}`,
+    `${run.chats.filter(chat => chat.completed).length} / ${run.total_chats} chats scanned`,
+    ...run.chats.map(chat => `${chat.chat_id}: ${chat.downloaded} downloaded, ${chat.scanned} scanned, ${chat.failed} failed, ${chat.skipped} skipped${chat.error ? ` · ${chat.error}` : !chat.completed ? ' · Interrupted' : ''}`),
+  ];
+  if (!run.total_chats) details.push('No subscribed chats to scan');
+  if (run.error) details.push(run.error);
+  if (run.stopped) details.push('Run stopped before completion');
+  $('telegram-run-breakdown').replaceChildren(...details.map(text => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    return item;
+  }));
+}
 
 function renderJavRun(scheduler) {
   const signature = JSON.stringify([scheduler.running, scheduler.last_result]);
@@ -53,7 +103,7 @@ function renderSummary() {
     historyPeriod("telegram", telegram.history_retention_days);
     $('overview-telegram').textContent = telegram.downloaded_files.toLocaleString();
     $('telegram-saved').textContent = sizeLabel(telegram.downloaded_bytes);
-    $('telegram-status').textContent = telegram.login.step === 'ready' ? label(telegram.status) : telegram.login.message;
+    renderTelegramRun(telegram);
     $('telegram-next-run').textContent = telegram.paused ? 'Paused' : telegram.next_run_at ? dateTime(telegram.next_run_at) : '—';
     $('telegram-transfers').textContent = telegram.paused ? 'Paused' : `${telegram.active_count} active`;
   }
