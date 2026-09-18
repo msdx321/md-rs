@@ -105,7 +105,7 @@ function renderSummary() {
   $('overview-active').textContent = telegram && jav && p91 ? telegram.active_count + jav.active_tasks + p91.active_tasks : '—';
   if (telegram) {
     historyPeriod("telegram", telegram.history_retention_days);
-    $('overview-telegram').textContent = telegram.downloaded_files.toLocaleString();
+    $('overview-telegram-size').textContent = sizeLabel(telegram.downloaded_bytes);
     $('telegram-saved').textContent = sizeLabel(telegram.downloaded_bytes);
     renderTelegramRun(telegram);
     $('telegram-next-run').textContent = telegram.paused ? 'Paused' : telegram.next_run_at ? dateTime(telegram.next_run_at) : '—';
@@ -113,7 +113,7 @@ function renderSummary() {
   }
   if (jav) {
     historyPeriod("jav", jav.history_retention_days);
-    $('overview-jav').textContent = jav.downloaded.toLocaleString();
+    $('overview-jav-size').textContent = bytes(jav.downloaded_bytes);
     $('jav-transfers').textContent = `${jav.active_tasks} active`;
     $('jav-saved').textContent = bytes(jav.downloaded_bytes);
     renderRun('jav', jav.scheduler, javRun);
@@ -121,7 +121,7 @@ function renderSummary() {
   }
   if (p91) {
     historyPeriod("p91", p91.history_retention_days);
-    $('overview-p91').textContent = p91.downloaded.toLocaleString();
+    $('overview-p91-size').textContent = bytes(p91.downloaded_bytes);
     $('p91-transfers').textContent = `${p91.active_tasks} active`;
     $('p91-saved').textContent = bytes(p91.downloaded_bytes);
     renderRun('p91', p91.scheduler, p91Run);
