@@ -41,21 +41,24 @@ pub async fn save(db: &Database, data: &AppData) -> anyhow::Result<()> {
     let tx = db.transaction().await?;
     tx.execute("DELETE FROM telegram_files", ()).await?;
     tx.execute("DELETE FROM telegram_retries", ()).await?;
-    for (id, downloaded_at) in &data.downloaded_file_ids {
-        tx.execute(
-            "INSERT INTO telegram_files(file_id,downloaded_at) VALUES (?,?)",
-            (id.as_str(), i64::try_from(*downloaded_at)?),
-        )
+    let insert_file = tx
+        .prepare("INSERT INTO telegram_files(file_id,downloaded_at) VALUES (?,?)")
         .await?;
+    let upsert_chat = tx.prepare("INSERT INTO telegram_chats(chat_id,last_read_message_id) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET last_read_message_id=excluded.last_read_message_id").await?;
+    let insert_retry = tx
+        .prepare("INSERT INTO telegram_retries(chat_id,message_id) VALUES (?,?)")
+        .await?;
+    for (id, downloaded_at) in &data.downloaded_file_ids {
+        insert_file
+            .execute((id.as_str(), i64::try_from(*downloaded_at)?))
+            .await?;
     }
     for chat in &data.chat {
-        tx.execute("INSERT INTO telegram_chats(chat_id,last_read_message_id) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET last_read_message_id=excluded.last_read_message_id", (chat.chat_id.clone(),chat.last_read_message_id)).await?;
-        for id in &chat.ids_to_retry {
-            tx.execute(
-                "INSERT INTO telegram_retries(chat_id,message_id) VALUES (?,?)",
-                (chat.chat_id.clone(), *id),
-            )
+        upsert_chat
+            .execute((chat.chat_id.as_str(), chat.last_read_message_id))
             .await?;
+        for id in &chat.ids_to_retry {
+            insert_retry.execute((chat.chat_id.as_str(), *id)).await?;
         }
     }
     tx.commit().await?;
