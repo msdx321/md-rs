@@ -8,6 +8,7 @@
 pub mod m3u8;
 
 use std::error::Error;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use dom_query::Document;
@@ -131,14 +132,17 @@ pub async fn resolve_stream(
 
 /// Find a `.m3u8` URL, including inside a packed player script.
 pub fn extract_m3u8_url(body: &str) -> Option<String> {
-    let re_play = regex::Regex::new(r#"urlPlay[\s=:'"]+(https?://[^\s'"\\]+\.m3u8[^\s'"\\]*)"#)
-        .expect("valid regex");
-    if let Some(caps) = re_play.captures(body) {
+    static PLAY: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"urlPlay[\s=:'"]+(https?://[^\s'"\\]+\.m3u8[^\s'"\\]*)"#)
+            .expect("valid regex")
+    });
+    if let Some(caps) = PLAY.captures(body) {
         return caps.get(1).map(|m| m.as_str().to_string());
     }
-    let re_any =
-        regex::Regex::new(r#"(https?://[^\s'"\\]+\.m3u8[^\s'"\\]*)"#).expect("valid regex");
-    if let Some(url) = re_any
+    static ANY: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(https?://[^\s'"\\]+\.m3u8[^\s'"\\]*)"#).expect("valid regex")
+    });
+    if let Some(url) = ANY
         .captures(body)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
@@ -149,12 +153,13 @@ pub fn extract_m3u8_url(body: &str) -> Option<String> {
     // MissAV's player hides the playlist in a packed script; prefer its
     // master playlist over the quality variants beside it.
     let packed = decode_packed_scripts(body);
-    let re_dedicated =
-        regex::Regex::new(r#"https?://[^\s'"\\]+/playlist\.m3u8[^\s'"\\]*"#).expect("valid regex");
-    if let Some(url) = re_dedicated.find(&packed).map(|m| m.as_str().to_string()) {
+    static DEDICATED: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"https?://[^\s'"\\]+/playlist\.m3u8[^\s'"\\]*"#).expect("valid regex")
+    });
+    if let Some(url) = DEDICATED.find(&packed).map(|m| m.as_str().to_string()) {
         return Some(url);
     }
-    if let Some(url) = re_any
+    if let Some(url) = ANY
         .captures(&packed)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
@@ -173,12 +178,14 @@ pub fn extract_m3u8_url(body: &str) -> Option<String> {
 ///
 /// The dictionary is treated purely as data — received code is never executed.
 fn decode_packed_scripts(body: &str) -> String {
-    let packed = regex::Regex::new(
-        r#"\}\(\s*'((?:\\.|[^'\\])*)'\s*,\s*(\d+)\s*,\s*\d+\s*,\s*'((?:\\.|[^'\\])*)'\.split\('\|'\)"#,
-    )
-    .expect("valid regex");
+    static PACKED: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r#"\}\(\s*'((?:\\.|[^'\\])*)'\s*,\s*(\d+)\s*,\s*\d+\s*,\s*'((?:\\.|[^'\\])*)'\.split\('\|'\)"#,
+        )
+        .expect("valid regex")
+    });
     let mut out = String::new();
-    for captures in packed.captures_iter(body) {
+    for captures in PACKED.captures_iter(body) {
         let payload = unescape_packed_string(&captures[1]);
         let Some(radix) = captures[2]
             .parse::<u32>()
@@ -200,8 +207,9 @@ fn decode_packed_scripts(body: &str) -> String {
 /// indexes `playlist` and `a` indexes `720p`.
 pub fn unpack_script(payload: &str, radix: u32, dictionary: &str) -> String {
     let words: Vec<&str> = dictionary.split('|').collect();
-    let word = regex::Regex::new(r"\b[0-9a-z]+\b").expect("valid regex");
-    word.replace_all(payload, |token: &regex::Captures<'_>| {
+    static WORD: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\b[0-9a-z]+\b").expect("valid regex"));
+    WORD.replace_all(payload, |token: &regex::Captures<'_>| {
         usize::from_str_radix(&token[0], radix)
             .ok()
             .and_then(|index| words.get(index).copied())
