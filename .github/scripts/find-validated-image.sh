@@ -2,7 +2,16 @@
 set -euo pipefail
 
 # Only the publish job writes this tag, after all validation jobs succeed.
-if ! manifest=$(docker buildx imagetools inspect "$IMAGE:validated-$COMMIT" --format '{{json .Manifest}}'); then
+# New release commits normally miss; this shortcut is mainly useful on reruns.
+errors=$(mktemp)
+trap 'rm -f "$errors"' EXIT
+if ! manifest=$(docker buildx imagetools inspect "$IMAGE:validated-$COMMIT" --format '{{json .Manifest}}' 2> "$errors"); then
+  if grep -Eq ': not found$|manifest unknown|MANIFEST_UNKNOWN' "$errors"; then
+    echo "No previously published image for this commit (expected on a first release)." >&2
+  else
+    echo "::warning::Could not check the published image; running full validation and builds instead." >&2
+    cat "$errors" >&2
+  fi
   exit 0
 fi
 

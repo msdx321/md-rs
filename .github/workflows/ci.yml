@@ -20,7 +20,11 @@ concurrency:
 
 jobs:
   plan:
-    name: Find reusable builds
+    name: Plan CI and release
+    # Release preparation commits are validated by the tag run instead.
+    if: >-
+      !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') &&
+        startsWith(github.event.head_commit.message, 'chore(release):'))
     runs-on: ubuntu-24.04
     outputs:
       commit: ${{ steps.plan.outputs.commit }}
@@ -29,7 +33,7 @@ jobs:
       validated: ${{ steps.reuse.outputs.validated }}
     steps:
       - uses: actions/checkout@v7
-      - name: Build plan
+      - name: Determine validation and release mode
         id: plan
         env:
           PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
@@ -39,6 +43,10 @@ jobs:
           definition=$(awk '/^# Application build$/ {exit} {print}' Dockerfile | sha256sum | cut -d ' ' -f 1)
           echo "environment=$definition" >> "$GITHUB_OUTPUT"
           echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          if [[ "$PUBLISH" != true ]]; then
+            echo "### CI only" >> "$GITHUB_STEP_SUMMARY"
+            echo "Run Rust checks; no release binary or container publishing." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: docker/setup-buildx-action@v4
         if: steps.plan.outputs.publish == 'true'
       - uses: docker/login-action@v4
@@ -47,7 +55,7 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
-      - name: Look up validated commit
+      - name: Check for an already-published release of this commit
         id: reuse
         if: steps.plan.outputs.publish == 'true'
         env:
@@ -55,11 +63,17 @@ jobs:
         run: |
           digest=$(bash .github/scripts/find-validated-image.sh)
           echo "validated=$digest" >> "$GITHUB_OUTPUT"
-          if [[ -n "$digest" ]]; then
-            echo "Reusing validation for $COMMIT ($digest)." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "No validated image for $COMMIT; running checks and builds." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "### Release plan"
+            if [[ -n "$digest" ]]; then
+              echo "Reuse the already-validated image for $COMMIT ($digest); skip Rust checks and builds."
+            else
+              echo "No reusable published image for $COMMIT. This is normal for a new release, not a build failure."
+              echo "Run Rust checks, build or restore tested binaries, then package and publish containers."
+            fi
+            echo ""
+            echo "This lookup is separate from the build-environment, Cargo, binary, and Docker-layer caches."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   check:
     name: Rust checks
@@ -100,12 +114,12 @@ jobs:
           cache-bin: false
           cache-workspace-crates: true
           cache-on-failure: true
-          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') }}
+          save-if: ${{ github.event_name == 'push' }}
       - run: bash .github/scripts/in-build-env.sh cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: bash .github/scripts/in-build-env.sh cargo test --locked --all-targets --all-features
 
   build:
-    name: Image (${{ matrix.arch }})
+    name: Binary and container (${{ matrix.arch }})
     needs: plan
     if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.validated == ''
     permissions:
@@ -131,6 +145,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/release-output
           # No fallback: skipping compilation/tests requires identical inputs.
+          # GitHub caches are ref-scoped: this mainly helps retries of the same tag.
           key: release-binary-${{ matrix.arch }}-${{ needs.plan.outputs.environment }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build.rs', 'src/**', 'web/**', '.cargo/**', 'rust-toolchain*', '.github/scripts/build-release.sh', '.github/scripts/in-build-env.sh') }}
       - uses: docker/login-action@v4
         if: steps.binary.outputs.cache-hit != 'true'
@@ -165,6 +180,20 @@ jobs:
       - name: Test and compile release binary
         if: steps.binary.outputs.cache-hit != 'true'
         run: bash .github/scripts/build-release.sh
+      - name: Summarize binary reuse
+        env:
+          CACHE_HIT: ${{ steps.binary.outputs.cache-hit }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          {
+            echo "### Release binary ($ARCH)"
+            if [[ "$CACHE_HIT" == true ]]; then
+              echo "Exact binary cache hit: restored a tested binary; skipped compilation and release tests."
+            else
+              echo "Exact binary cache miss: ran release tests and compiled the binary using the Cargo cache when available."
+            fi
+            echo "Docker packaging uses this binary directly and caches runtime layers separately."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Save tested binary
         if: steps.binary.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
@@ -177,7 +206,7 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
-      - name: Package binary
+      - name: Package tested binary into container (no Rust compilation)
         id: build
         uses: docker/build-push-action@v7
         with:
@@ -205,7 +234,7 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish validated image
+    name: Publish multi-platform container
     needs: [plan, check, build]
     if: >-
       always() && !cancelled() && needs.plan.result == 'success' &&
