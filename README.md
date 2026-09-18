@@ -50,6 +50,27 @@ Docker creates this file under `data/config/` with `host: 0.0.0.0`. On first sta
 
 History and download IDs expire after `history_retention_days` for both modules. Cleanup runs at startup, when settings change, and every minute. Downloaded files are kept; expired IDs no longer prevent downloads.
 
+## Logging
+
+Logs go to stderr with timestamps (UTC, milliseconds), severity and module target. The UI log panel shows the latest 1,000 enabled entries, including `DEBUG` and `TRACE`; its filters only narrow captured logs, not enable disabled levels. This buffer is in memory and resets on restart. Use `docker compose logs -f md-rs` for container logs, or redirect stderr for longer retention.
+
+The default `RUST_LOG=warn,md_rs=info` shows application activity and dependency warnings/errors, suppressing noisy browser and protocol internals. Set `RUST_LOG` before starting (or recreating the Docker container):
+
+```sh
+# Application diagnostics, without verbose dependency logs
+RUST_LOG=warn,md_rs=debug cargo run --release --bin md-rs
+
+# Trace only one downloader, including individual chunks/segments
+RUST_LOG=warn,md_rs=info,md_rs::jav::downloader=trace cargo run --release --bin md-rs
+
+# Docker also reads RUST_LOG from your shell or .env
+RUST_LOG=warn,md_rs=debug docker compose up -d
+```
+
+Levels are `error`, `warn`, `info`, `debug`, `trace`, or `off`. `RUST_LOG` replaces the default filter; module-specific directives take precedence over global levels. For Telegram tracing use `md_rs::telegram::downloader=trace`; for browser internals add `headless_chrome=debug`. Global `debug`/`trace` also enables dependencies, which can emit sensitive protocol data, cookies and URLs. Prefer application-scoped diagnostics and review logs before sharing.
+
+`INFO` covers lifecycle and download outcomes; `DEBUG` covers stages, resume decisions and HTTP response status/timing; `TRACE` covers individual chunks/segments and HTTP request starts. HTTP diagnostics use route templates, never query strings, headers or bodies. Timings end when response headers are ready, not when a streaming body closes. Successful `/api/logs` polling is excluded to avoid filling the buffer with its own reads. Logs can still contain filenames, chat IDs and upstream error details.
+
 ## Import existing data
 
 Place old Telegram `config.yaml` and `data.yaml` in `config/telegram/`, and the old JAV config in `config/jav/config.yaml`. With Docker, use `data/config/` instead. Migration runs at startup and preserves the originals. Keep Telegram's login session at `sessions/tmd.session` (`data/sessions/tmd.session` with Docker).

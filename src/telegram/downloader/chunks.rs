@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use grammers_client::Client;
 use grammers_client::media::Media;
-use log::warn;
+use log::{debug, trace, warn};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -56,6 +56,10 @@ pub(super) async fn download_concurrent(
     let start_chunk = start / chunk_size;
     let total_chunks = total.div_ceil(chunk_size);
     let workers = connections.min(total_chunks - start_chunk).max(1);
+    let msg_id = progress.msg_id;
+    debug!(
+        "msg={msg_id}: transfer start offset={start} total={total} chunks={total_chunks} workers={workers}"
+    );
 
     // Each striped worker has a bounded queue, consumed in file order. A slow
     // chunk therefore cannot make faster workers buffer the rest of the file.
@@ -88,7 +92,11 @@ pub(super) async fn download_concurrent(
                 }
                 let offset = idx * chunk_size;
                 let expected = (total - offset).min(chunk_size);
-                match fetch_chunk(&client, &media, idx, expected, &web_state, &shutdown).await {
+                match fetch_chunk(
+                    &client, &media, msg_id, idx, expected, &web_state, &shutdown,
+                )
+                .await
+                {
                     Ok(chunk) => {
                         if send_chunk(&tx, chunk, &shutdown).await.is_err() {
                             break; // receiver gone or shutdown requested
@@ -140,6 +148,10 @@ pub(super) async fn download_concurrent(
         };
         file.write_all(&chunk).await?;
         next += chunk.len() as u64;
+        trace!(
+            "msg={msg_id}: wrote chunk bytes={} offset={next}/{total}",
+            chunk.len()
+        );
         if last_reported_at.elapsed() >= PROGRESS_REPORT_INTERVAL {
             report_download_progress(progress, start, next, started).await;
             last_reported = next;
@@ -151,6 +163,7 @@ pub(super) async fn download_concurrent(
             file.flush().await?;
             file.sync_data().await?;
             write_progress(path, next, &progress.web_state.database).await?;
+            trace!("msg={msg_id}: durable checkpoint offset={next}/{total}");
             last_flushed = next;
         }
     }
@@ -164,6 +177,10 @@ pub(super) async fn download_concurrent(
     file.flush().await?;
     file.sync_data().await?;
     write_progress(path, next, &progress.web_state.database).await?;
+    debug!(
+        "msg={msg_id}: transfer stopped offset={next}/{total} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
 
     // Surface the first worker error (a chunk that exhausted its retries).
     let mut worker_err: Option<anyhow::Error> = None;
@@ -213,6 +230,7 @@ pub(super) async fn download_concurrent(
 async fn fetch_chunk(
     client: &Client,
     media: &Media,
+    msg_id: i32,
     idx: u64,
     expected: u64,
     web_state: &Arc<ApiState>,
@@ -238,6 +256,11 @@ async fn fetch_chunk(
                     .clamp(4096, DOWNLOAD_CHUNK_SIZE)
                     .next_power_of_two()
             });
+        trace!(
+            "msg={msg_id}: fetching chunk={idx} attempt={}/{} expected_bytes={expected} request_bytes={request_size}",
+            attempt + 1,
+            CHUNK_RETRY_LIMIT
+        );
         let mut stream = client
             .iter_download(media)
             .chunk_size(request_size as i32)
@@ -262,7 +285,7 @@ async fn fetch_chunk(
             Ok(Some(chunk)) if chunk.len() as u64 == expected => return Ok(chunk),
             Ok(Some(chunk)) => {
                 warn!(
-                    "chunk {idx}: short read {} B (expected {expected}), retry {}/{}",
+                    "msg={msg_id}: chunk {idx}: short read {} B (expected {expected}), attempt {}/{}",
                     chunk.len(),
                     attempt + 1,
                     CHUNK_RETRY_LIMIT
@@ -275,7 +298,7 @@ async fn fetch_chunk(
             }
             Ok(None) => {
                 warn!(
-                    "chunk {idx}: stream ended early, retry {}/{}",
+                    "msg={msg_id}: chunk {idx}: stream ended early, attempt {}/{}",
                     attempt + 1,
                     CHUNK_RETRY_LIMIT
                 );
@@ -285,7 +308,7 @@ async fn fetch_chunk(
             Err(e) => {
                 backoff = flood_wait_secs(&e.to_string()).unwrap_or(RETRY_DELAY_SECS);
                 warn!(
-                    "chunk {idx}: fetch error: {e}; retry {}/{} in {backoff}s",
+                    "msg={msg_id}: chunk {idx}: fetch error: {e}; attempt {}/{} backoff={backoff}s",
                     attempt + 1,
                     CHUNK_RETRY_LIMIT
                 );
@@ -308,6 +331,8 @@ pub(super) async fn download_unknown_size(
     progress: &DownloadProgress<'_>,
     shutdown: &Shutdown,
 ) -> anyhow::Result<()> {
+    let msg_id = progress.msg_id;
+    debug!("msg={msg_id}: starting non-resumable transfer (unknown size)");
     let mut file = tokio::fs::File::create(path).await?;
     let request_size = progress
         .web_state
@@ -335,9 +360,17 @@ pub(super) async fn download_unknown_size(
         };
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
+        trace!(
+            "msg={msg_id}: wrote chunk bytes={} downloaded={downloaded}",
+            chunk.len()
+        );
         report_download_progress(progress, 0, downloaded, started).await;
     }
     file.flush().await?;
     file.sync_data().await?;
+    debug!(
+        "msg={msg_id}: transfer complete bytes={downloaded} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     Ok(())
 }

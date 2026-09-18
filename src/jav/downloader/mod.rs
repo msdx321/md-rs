@@ -57,6 +57,8 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
         return;
     }
 
+    log::info!("[{id}] download started");
+
     // A listing or manual request may already supply the final title. Adopt
     // that output before contacting the source, even if the source is offline.
     let known_path = cfg
@@ -68,6 +70,7 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
     }
 
     // ── resolve ──────────────────────────────────────────────────────────
+    log::debug!("[{id}] resolving stream resolution={}", cfg.resolution);
     let resolved =
         match stream::resolve_stream(&fetch, &card.url, &cfg.resolution, cfg.min_duration_secs)
             .await
@@ -75,7 +78,6 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
             Ok(r) => r,
             Err(e) => {
                 let msg = cloudflare_hint(&format!("{e:#}"));
-                log::warn!("[{id}] resolve failed: {msg}");
                 finish_failed(&ctx, &cfg, &card, &msg).await;
                 return;
             }
@@ -180,7 +182,6 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
             // The merger owns its staging file; preserve any previous output
             // when a replacement fails or is interrupted.
             let msg = cloudflare_hint(&format!("{e:#}"));
-            log::warn!("[{id}] download failed: {msg}");
             finish_failed(&ctx, &cfg, &card, &msg).await;
         }
     }
@@ -247,6 +248,11 @@ async fn finish_completed(
     path: &Path,
     size: u64,
 ) {
+    log::info!(
+        "[{}] download complete bytes={size} path={}",
+        card.id,
+        path.display()
+    );
     let record = Record {
         id: card.id.clone(),
         url: card.url.clone(),
@@ -283,6 +289,7 @@ async fn finish_failed(
     card: &VideoCard,
     message: &str,
 ) {
+    log::error!("[{}] download failed: {message}", card.id);
     // Clean before publishing Failed: a retry must not race with deletion.
     for directory in [
         cfg.temp_path.join(format!("temp_{}", card.id)),
@@ -376,6 +383,12 @@ async fn run_hls(
 ) -> anyhow::Result<(Outcome, PathBuf)> {
     tokio::task::spawn_blocking(merge::require_tools).await??;
     let total = info.segments.len() + info.audio.as_ref().map_or(0, |audio| audio.segments.len());
+    log::debug!(
+        "[{id}] HLS prepared segments={total} separate_audio={} duration_secs={:.1} workers={}",
+        info.audio.is_some(),
+        info.total_duration,
+        cfg.segment_concurrency.clamp(1, 32)
+    );
     ctx.update_task(id, |t| {
         t.total_segments = total;
         t.done_segments = 0;
@@ -427,6 +440,8 @@ async fn run_hls(
         t.message = "merging and validating audio/video".into();
         t.speed_kbps = 0.0;
     });
+    log::debug!("[{id}] merging and validating {total} segments");
+    let merge_started = Instant::now();
     let temp = temp_dir.to_path_buf();
     let final_owned = final_path.to_path_buf();
     let info = info.clone();
@@ -444,6 +459,10 @@ async fn run_hls(
         _ => {}
     }
     let produced = result?;
+    log::debug!(
+        "[{id}] merge complete elapsed_ms={}",
+        merge_started.elapsed().as_millis()
+    );
     let _ = tokio::fs::remove_dir_all(temp_dir).await;
     Ok((Outcome::Done, produced))
 }
@@ -604,9 +623,12 @@ async fn download_segments(
                 }
                 let path = dir.join(format!("{index}.ts"));
                 if is_non_empty(&path) {
+                    log::trace!("[{id}] segment={index} cached path={}", path.display());
                     done.fetch_add(1, Ordering::Relaxed);
                     return Ok(());
                 }
+                log::trace!("[{id}] segment={index} fetching path={}", path.display());
+                let started = Instant::now();
                 while_running(
                     &ctx,
                     &id,
@@ -626,6 +648,10 @@ async fn download_segments(
                         rejected.store(true, Ordering::Relaxed);
                     }
                 })?;
+                log::trace!(
+                    "[{id}] segment={index} complete elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
                 done.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }));
@@ -637,13 +663,14 @@ async fn download_segments(
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                log::debug!("[{id}] segment={index} fetch failed: {e:#}");
                 if e.is::<MediaRejected>() || !rejected.load(Ordering::Relaxed) {
                     last_error = format!("{e:#}");
                 }
                 failed.push(index);
             }
             Err(e) => {
-                log::debug!("[{id}] segment {index} task panicked: {e}");
+                log::error!("[{id}] segment {index} task failed: {e}");
                 failed.push(index);
             }
         }
@@ -654,6 +681,10 @@ async fn download_segments(
     let mut attempt = 0;
     while !failed.is_empty() && attempt < 3 && !rejected.load(Ordering::Relaxed) {
         attempt += 1;
+        log::debug!(
+            "[{id}] retry round={attempt}/3 failed_segments={}",
+            failed.len()
+        );
         tokio::time::sleep(Duration::from_millis(300 * attempt as u64)).await;
         let state = control(ctx, id);
         if state != TaskState::Running {
@@ -678,6 +709,7 @@ async fn download_segments(
             .await
             {
                 Ok(()) => {
+                    log::trace!("[{id}] segment={index} retry={attempt}/3 complete");
                     done.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
@@ -774,7 +806,7 @@ async fn fetch_segment(
     // fMP4 part, for instance), so it is stored untouched.
     let stripped = strip_fake_header(&data);
     let payload: &[u8] = if stripped.is_empty() && !data.is_empty() {
-        log::debug!(
+        log::trace!(
             "segment {}: no MPEG-TS sync found, keeping the raw payload",
             path.display()
         );

@@ -9,6 +9,7 @@ services:
     environment:
       TZ: ${TZ:-UTC}
       MEDIA_PORT: ${MEDIA_PORT:-8080}
+      RUST_LOG: ${RUST_LOG:-warn,md_rs=info}
     volumes:
       - ./data:/data
     shm_size: 1gb

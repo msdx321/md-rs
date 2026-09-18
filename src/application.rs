@@ -2,8 +2,10 @@
 
 pub(crate) async fn run() -> anyhow::Result<()> {
     std::fs::create_dir_all(crate::configuration::DIRECTORY)?;
+    log::debug!("Opening application database and running migrations");
     let database = crate::storage::Database::open(crate::storage::DATABASE_FILE).await?;
     crate::migration::run(&database).await?;
+    log::debug!("Database and migrations ready");
     let config = crate::configuration::app::load_or_create()?;
     config.validate()?;
     let (settings, updates) = tokio::sync::watch::channel(config.clone());
@@ -42,7 +44,9 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             return Err(error);
         }
     };
-    let app = crate::web::router(&engines).merge(crate::settings::router(settings));
+    let app = crate::web::router(&engines)
+        .merge(crate::settings::router(settings))
+        .layer(axum::middleware::from_fn(crate::logging::request_log));
     log::info!("md-rs: http://{}", listener.local_addr()?);
     let result = tokio::select! {
         result = axum::serve(listener, app) => result,

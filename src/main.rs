@@ -10,7 +10,17 @@ mod telegram;
 mod web;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
     logging::init();
-    application::run().await
+    log::info!("Starting md-rs {}", env!("CARGO_PKG_VERSION"));
+    match application::run().await {
+        Ok(()) => {
+            log::info!("Shutdown complete");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            log::error!("Application failed: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
