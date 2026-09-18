@@ -86,15 +86,7 @@ async fn status(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
 
 fn status_snapshot(ctx: &AppCtx) -> Value {
     let cfg = ctx.config();
-    let state = ctx.state_snapshot();
-    let history = state.history(ctx.history_retention_days());
-    let completed = history.iter().filter(|r| r.is_completed()).count();
-    let failed = history.iter().filter(|r| !r.is_completed()).count();
-    let total_bytes: u64 = history
-        .iter()
-        .filter(|r| r.is_completed())
-        .map(|r| r.size)
-        .sum();
+    let history = ctx.history_summary();
     let tasks = ctx.tasks();
     let active = tasks
         .iter()
@@ -115,11 +107,11 @@ fn status_snapshot(ctx: &AppCtx) -> Value {
         "top_n": cfg.listing_links().iter().map(|link| link.daily_quota).sum::<usize>(),
         "links": cfg.listing_links(),
         "history_retention_days": ctx.history_retention_days(),
-        "downloaded": completed,
-        "failed_records": failed,
-        "downloaded_bytes": total_bytes,
+        "downloaded": history.completed,
+        "failed_records": history.failed,
+        "downloaded_bytes": history.total_bytes,
         "active_tasks": active,
-        "last_daily_run": state.last_daily_run,
+        "last_daily_run": history.last_daily_run,
         "scheduler": ctx.scheduler_status(),
         "version": env!("CARGO_PKG_VERSION"),
     })
@@ -470,8 +462,7 @@ async fn resume_all(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
 }
 
 async fn list_history(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
-    let state = ctx.state_snapshot();
-    let records = state.history(ctx.history_retention_days());
+    let records = ctx.history();
     Json(json!({
         "history_retention_days": ctx.history_retention_days(),
         "count": records.len(),

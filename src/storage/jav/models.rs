@@ -35,6 +35,14 @@ pub struct State {
     pub last_daily_run: Option<String>,
 }
 
+#[derive(Debug, Default)]
+pub struct HistorySummary {
+    pub completed: usize,
+    pub failed: usize,
+    pub total_bytes: u64,
+    pub last_daily_run: Option<String>,
+}
+
 impl State {
     /// True when this post has a completed download on record.
     pub fn is_completed(&self, id: &str) -> bool {
@@ -56,18 +64,39 @@ impl State {
         self.records.len() != before
     }
 
-    /// Time-limited history, newest first.
-    pub fn history(&self, days: u32) -> Vec<Record> {
+    /// Share the retention window and timestamp validation across history operations.
+    pub(super) fn recent_records(
+        &self,
+        days: u32,
+    ) -> impl Iterator<Item = (chrono::DateTime<chrono::FixedOffset>, &Record)> {
         let now = chrono::Utc::now();
         let cutoff = now - chrono::Duration::days(i64::from(days));
-        let mut recent: Vec<_> = self
-            .records
-            .iter()
-            .filter_map(|record| {
-                let finished = chrono::DateTime::parse_from_rfc3339(&record.finished_at).ok()?;
-                (finished > cutoff && finished <= now).then_some((finished, record))
-            })
-            .collect();
+        self.records.iter().filter_map(move |record| {
+            let finished = chrono::DateTime::parse_from_rfc3339(&record.finished_at).ok()?;
+            (finished > cutoff && finished <= now).then_some((finished, record))
+        })
+    }
+
+    /// Aggregate status without cloning or sorting the history records.
+    pub fn history_summary(&self, days: u32) -> HistorySummary {
+        let mut summary = HistorySummary {
+            last_daily_run: self.last_daily_run.clone(),
+            ..HistorySummary::default()
+        };
+        for (_, record) in self.recent_records(days) {
+            if record.is_completed() {
+                summary.completed += 1;
+                summary.total_bytes += record.size;
+            } else {
+                summary.failed += 1;
+            }
+        }
+        summary
+    }
+
+    /// Time-limited history, newest first.
+    pub fn history(&self, days: u32) -> Vec<Record> {
+        let mut recent: Vec<_> = self.recent_records(days).collect();
         recent.sort_by(|(a, _), (b, _)| b.cmp(a));
         recent
             .into_iter()

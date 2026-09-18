@@ -1,5 +1,5 @@
 //! Serializes durable mutations and publishes cache changes only after commit.
-use super::{Record, State};
+use super::{HistorySummary, Record, State};
 use crate::storage::{Connection, Database, params};
 use std::sync::Mutex;
 
@@ -19,8 +19,18 @@ impl Repository {
         })
     }
 
-    pub fn snapshot(&self) -> State {
-        self.state.lock().expect("state lock poisoned").clone()
+    pub fn history(&self, days: u32) -> Vec<Record> {
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .history(days)
+    }
+
+    pub fn history_summary(&self, days: u32) -> HistorySummary {
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .history_summary(days)
     }
 
     pub fn is_completed(&self, id: &str) -> bool {
@@ -56,15 +66,16 @@ impl Repository {
     pub async fn clear_history(&self, days: u32) -> anyhow::Result<usize> {
         let _write = self.state_write.lock().await;
         let ids: std::collections::HashSet<_> = self
-            .snapshot()
-            .history(days)
-            .into_iter()
-            .map(|r| r.id)
+            .state
+            .lock()
+            .expect("state lock poisoned")
+            .recent_records(days)
+            .map(|(_, record)| record.id.clone())
             .collect();
         let tx = self.database.transaction().await?;
+        let delete = tx.prepare("DELETE FROM jav_records WHERE id=?").await?;
         for id in &ids {
-            tx.execute("DELETE FROM jav_records WHERE id=?", [id.as_str()])
-                .await?;
+            delete.execute([id.as_str()]).await?;
         }
         tx.commit().await?;
         let mut state = self.state.lock().expect("state lock poisoned");

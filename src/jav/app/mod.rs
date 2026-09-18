@@ -13,7 +13,7 @@ use crate::jav::config::{Config, FILE};
 use crate::jav::source::browser::{BrowserMinter, BrowserOptions};
 use crate::jav::source::cf::{CookieSnapshot, CookieStore, MintFn};
 use crate::jav::source::http::{Fetcher, build_client};
-use crate::jav::storage::{Record, Repository, State};
+use crate::jav::storage::{HistorySummary, Record, Repository};
 use crate::storage::Database;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,8 +261,12 @@ impl AppCtx {
         Ok(())
     }
 
-    pub fn state_snapshot(&self) -> State {
-        self.ledger.snapshot()
+    pub fn history(&self) -> Vec<Record> {
+        self.ledger.history(self.history_retention_days())
+    }
+
+    pub fn history_summary(&self) -> HistorySummary {
+        self.ledger.history_summary(self.history_retention_days())
     }
 
     pub fn is_completed(&self, id: &str) -> bool {
