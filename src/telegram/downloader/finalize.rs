@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use crate::telegram::api::ApiState;
 use crate::telegram::format::format_byte;
 
+use super::paths::MediaPaths;
 use super::progress::clear_progress;
 
 const MAX_FILE_ID_CACHE: usize = 4096;
@@ -24,12 +25,16 @@ pub(super) async fn finalize_download(
     msg_id: i32,
     fid: &str,
     file_ids: &Arc<Mutex<HashMap<String, u64>>>,
-    temp_path: &Path,
-    final_path: &Path,
+    paths: &MediaPaths,
     actual: u64,
     web_state: &Arc<ApiState>,
 ) -> anyhow::Result<()> {
+    paths.validate_temp()?;
+    paths.validate_final()?;
+    let temp_path = &paths.temp;
+    let final_path = &paths.final_path;
     tokio::fs::create_dir_all(final_path.parent().unwrap_or(Path::new("."))).await?;
+    paths.validate_final()?;
     match tokio::fs::rename(temp_path, final_path).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
@@ -70,7 +75,12 @@ pub(super) async fn finalize_download(
 
 /// Drop a partial `.part` download and its sidecar so the next attempt starts
 /// fresh.
-pub(super) async fn discard_partial(temp_path: &Path, database: &crate::storage::Database) {
+pub(super) async fn discard_partial(paths: &MediaPaths, database: &crate::storage::Database) {
+    if let Err(error) = paths.validate_temp() {
+        log::warn!("refusing unsafe partial cleanup: {error}");
+        return;
+    }
+    let temp_path = &paths.temp;
     let _ = tokio::fs::remove_file(temp_path).await;
     if let Err(error) = clear_progress(temp_path, database).await {
         log::warn!("cannot clear resume checkpoint: {error}");

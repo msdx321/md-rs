@@ -1,12 +1,6 @@
-use regex::Regex;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 const BYTE_UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
-
-static RE_DATETIME_LIT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2}"#).unwrap()
-});
 
 pub fn validate_title(title: &str) -> String {
     title
@@ -22,7 +16,10 @@ pub fn parse_byte_str(s: &str) -> Option<u64> {
     let compact: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     for (power, unit) in BYTE_UNITS.iter().enumerate().rev() {
         if let Some(num) = compact.strip_suffix(unit) {
-            return Some(num.parse::<u64>().ok()? * 1024u64.pow(power as u32));
+            return num
+                .parse::<u64>()
+                .ok()?
+                .checked_mul(1024u64.pow(power as u32));
         }
     }
     None
@@ -71,24 +68,34 @@ pub fn truncate_filename(path: &Path, limit: usize) -> PathBuf {
     }
 }
 
-/// Replace date/time placeholders in filter strings (e.g. `>= 2023-01-01 00:00:00`).
-/// Returns the string unchanged if no date patterns are found.
-pub fn replace_date_time(text: &str, fmt: &str) -> String {
-    use chrono::NaiveDateTime;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut result = String::new();
-    let mut last_end = 0;
-
-    for m in RE_DATETIME_LIT.find_iter(text) {
-        result.push_str(&text[last_end..m.start()]);
-        let raw = m.as_str().replace(['/', '.'], "-");
-        if let Ok(dt) = NaiveDateTime::parse_from_str(&raw, "%Y-%m-%d %H:%M:%S") {
-            result.push_str(&dt.format(fmt).to_string());
-        } else {
-            result.push_str(m.as_str());
+    #[test]
+    fn parse_byte_str_checks_overflow_for_every_unit() {
+        for (power, unit) in BYTE_UNITS.iter().enumerate() {
+            let scale = 1024u64.pow(power as u32);
+            let largest = u64::MAX / scale;
+            assert_eq!(
+                parse_byte_str(&format!("{largest}{unit}")),
+                Some(largest * scale)
+            );
+            if scale > 1 {
+                assert_eq!(parse_byte_str(&format!("{}{unit}", largest + 1)), None);
+                assert_eq!(parse_byte_str(&format!("{}{unit}", u64::MAX)), None);
+            }
         }
-        last_end = m.end();
+        assert_eq!(parse_byte_str("18446744073709551616B"), None);
     }
-    result.push_str(&text[last_end..]);
-    result
+
+    #[test]
+    fn parse_byte_str_preserves_existing_input_rules() {
+        assert_eq!(parse_byte_str(" 1 \t0 MB\n"), Some(10 * 1024 * 1024));
+        assert_eq!(parse_byte_str("0PB"), Some(0));
+        assert_eq!(parse_byte_str("+1KB"), Some(1024));
+        for invalid in ["", "1", "1kb", "1.5MB", "-1KB", "MB", "1EB", "1\u{a0}KB"] {
+            assert_eq!(parse_byte_str(invalid), None, "{invalid:?}");
+        }
+    }
 }

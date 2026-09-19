@@ -61,7 +61,8 @@ impl fmt::Display for Value {
 
 #[derive(Debug, Clone)]
 enum Token {
-    Num(i64),
+    Num(u64),
+    Invalid(String),
     Str(String),
     ReStr(Regex),
     Time(NaiveDateTime),
@@ -170,12 +171,12 @@ impl<'a> Lexer<'a> {
                 for _ in 0..tail.len() {
                     self.next_char();
                 }
-                return Token::Num(bytes as i64);
+                return Token::Num(bytes);
             }
         }
         match s.parse() {
             Ok(n) => Token::Num(n),
-            Err(_) => Token::Name(s),
+            Err(_) => Token::Invalid(format!("invalid numeric literal: {s}")),
         }
     }
 
@@ -196,29 +197,22 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_datetime(&mut self) -> Token {
-        let mut s = String::new();
-        // Read digits, hyphens, colons, spaces
-        while let Some(c) = self.peek_char() {
-            if c.is_ascii_digit() || c == '-' || c == '.' || c == '/' || c == ' ' || c == ':' {
-                s.push(c);
-                self.next_char();
-            } else {
-                break;
-            }
+    fn read_datetime(&mut self, literal: &str) -> Token {
+        // The leading digit was consumed by next(); consume exactly the matched
+        // token, not following whitespace/operators or the next date.
+        for _ in literal.chars().skip(1) {
+            self.next_char();
         }
-        let normalized = s.replace(['/', '.'], "-");
+        let normalized = literal.replace(['/', '.'], "-");
         if let Ok(dt) = NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%d %H:%M:%S") {
             return Token::Time(dt);
         }
-        // Try just date
-        if let Ok(date) = chrono::NaiveDate::parse_from_str(normalized.trim(), "%Y-%m-%d")
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(&normalized, "%Y-%m-%d")
             && let Some(dt) = date.and_hms_opt(0, 0, 0)
         {
             return Token::Time(dt);
         }
-        // Fallback: treat as string
-        Token::Str(s)
+        Token::Invalid(format!("invalid datetime literal: {literal}"))
     }
 }
 
@@ -292,10 +286,13 @@ impl<'a> Iterator for Lexer<'a> {
             }
             d if d.is_ascii_digit() => {
                 // Peek ahead: if date-like pattern, parse as datetime
-                let rest: String = self.chars.clone().take(20).collect();
+                let rest = self.chars.as_str();
                 let candidate = format!("{d}{rest}");
-                if RE_DATETIME_FULL.is_match(&candidate) || RE_DATETIME_DATE.is_match(&candidate) {
-                    self.read_datetime()
+                if let Some(matched) = RE_DATETIME_FULL
+                    .find(&candidate)
+                    .or_else(|| RE_DATETIME_DATE.find(&candidate))
+                {
+                    self.read_datetime(matched.as_str())
                 } else {
                     self.read_number(d)
                 }
@@ -364,7 +361,10 @@ impl Expr {
                 .get_var(name)
                 .ok_or_else(|| format!("undefined variable: {name}")),
             Expr::UnaryMinus(expr) => match expr.eval(vars)? {
-                Value::Int(v) => Ok(Value::Int(-v)),
+                Value::Int(v) => v
+                    .checked_neg()
+                    .map(Value::Int)
+                    .ok_or_else(|| "integer negation overflow".into()),
                 Value::Float(v) => Ok(Value::Float(-v)),
                 _ => Err("cannot negate non-numeric value".into()),
             },
@@ -523,6 +523,11 @@ impl ExprParser<'_> {
     fn unary(&mut self) -> Result<Expr, String> {
         if matches!(self.peek(), Token::Minus) {
             self.advance();
+            // The magnitude of MIN is representable only under its minus sign.
+            if matches!(self.peek(), Token::Num(n) if *n == (i64::MAX as u64) + 1) {
+                self.advance();
+                return Ok(Expr::Literal(Value::Int(i64::MIN)));
+            }
             return Ok(Expr::UnaryMinus(Box::new(self.unary()?)));
         }
         self.primary()
@@ -530,8 +535,9 @@ impl ExprParser<'_> {
 
     fn primary(&mut self) -> Result<Expr, String> {
         match self.peek() {
+            Token::Invalid(error) => Err(error.clone()),
             Token::Num(n) => {
-                let v = *n;
+                let v = i64::try_from(*n).map_err(|_| "integer literal overflow")?;
                 self.advance();
                 Ok(Expr::Literal(Value::Int(v)))
             }
@@ -592,7 +598,15 @@ fn truthy_or(a: Value, b: Value) -> Value {
 
 fn compare(left: &Value, op: BinaryOp, right: &Value) -> Value {
     let result = match (left, right) {
-        (Value::Int(l), Value::Int(r)) => cmp_num(*l as f64, *r as f64, op),
+        (Value::Int(l), Value::Int(r)) => match op {
+            BinaryOp::Eq => l == r,
+            BinaryOp::Ne => l != r,
+            BinaryOp::Gt => l > r,
+            BinaryOp::Lt => l < r,
+            BinaryOp::Ge => l >= r,
+            BinaryOp::Le => l <= r,
+            _ => false,
+        },
         (Value::Float(l), Value::Float(r)) => cmp_num(*l, *r, op),
         (Value::Int(l), Value::Float(r)) => cmp_num(*l as f64, *r, op),
         (Value::Float(l), Value::Int(r)) => cmp_num(*l, *r as f64, op),
@@ -694,6 +708,13 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_byte_suffix_is_rejected_without_panicking() {
+        for input in ["18446744073709551615KB", "file_size >= 16384PB"] {
+            assert!(Parser::new(input).parse(&var("file_size", 10)).is_err());
+        }
+    }
+
+    #[test]
     fn byte_suffix_in_comparison() {
         let p = Parser::new("file_size >= 10MB");
         assert!(matches!(
@@ -704,6 +725,98 @@ mod tests {
         assert!(matches!(
             p.parse(&var("file_size", 10)).unwrap(),
             Value::Bool(false)
+        ));
+    }
+    #[test]
+    fn signed_integer_and_byte_boundaries_reject_overflow_without_wrap_or_panic() {
+        for (text, expected) in [
+            ("9223372036854775807", i64::MAX),
+            ("9223372036854775807B", i64::MAX),
+            ("-9223372036854775808", i64::MIN),
+            ("-9223372036854775808B", i64::MIN),
+            ("8191PB", 8191 * 1024i64.pow(5)),
+            ("--7", 7),
+        ] {
+            assert!(
+                matches!(Parser::new(text).parse(&HashMap::new()), Ok(Value::Int(n)) if n == expected),
+                "{text}"
+            );
+        }
+        for text in [
+            "9223372036854775808",
+            "9223372036854775808B",
+            "18446744073709551615B",
+            "18446744073709551616",
+            "8192PB",
+            "--9223372036854775808",
+            "-9223372036854775809",
+            "-minimum",
+            "12XB",
+            "12MBjunk",
+        ] {
+            assert!(
+                Parser::new(text).parse(&var("minimum", i64::MIN)).is_err(),
+                "{text}"
+            );
+        }
+        for text in [
+            "9223372036854775807 > 9223372036854775806",
+            "9223372036854775807 != 9223372036854775806",
+            "-9223372036854775808 < -9223372036854775807",
+        ] {
+            assert!(
+                matches!(
+                    Parser::new(text).parse(&HashMap::new()),
+                    Ok(Value::Bool(true))
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_tokens_keep_first_digit_boundaries_and_reject_malformed_dates() {
+        for text in [
+            "2024-02-29",
+            "2024/2/29",
+            "2024.02.29",
+            "2024-02-29 12:34:56",
+            "2024/2/29 1:2:3",
+        ] {
+            let Value::DateTime(date) = Parser::new(text).parse(&HashMap::new()).unwrap() else {
+                panic!("{text}")
+            };
+            assert_eq!(chrono::Datelike::year(&date), 2024);
+            assert_eq!(chrono::Datelike::day(&date), 29);
+        }
+        for text in [
+            "2024-02-29 12:34:56 == 2024/02/29 12:34:56",
+            "2024-02-29 < 2024-03-01",
+            "(2024-02-29 == 2024.02.29) AND 10MB > 1KB",
+            "2024-02-29  == 2024-02-29",
+        ] {
+            assert!(
+                matches!(
+                    Parser::new(text).parse(&HashMap::new()),
+                    Ok(Value::Bool(true))
+                ),
+                "{text}"
+            );
+        }
+        for text in [
+            "2023-02-29",
+            "2024-13-01",
+            "2024-01-32",
+            "2024-01-01 25:00:00",
+            "2024-01-01 12:60:00",
+            "2024-01-011",
+            "2024-01-01 12:34",
+        ] {
+            assert!(Parser::new(text).parse(&HashMap::new()).is_err(), "{text}");
+        }
+        assert!(matches!(
+            Parser::new("10 - 2 / 2").parse(&HashMap::new()),
+            Ok(Value::Int(9))
         ));
     }
 }

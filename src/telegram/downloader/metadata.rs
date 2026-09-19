@@ -92,7 +92,7 @@ pub(super) fn media_kind_and_ext(media: &Media) -> Option<(&str, String)> {
                 .name()
                 .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext.to_string()))
                 .unwrap_or_else(|| mime_to_ext(mime).to_string());
-            Some((document_kind(mime), ext))
+            Some((document_kind(mime), super::paths::safe_component(&ext)))
         }
         _ => None,
     }

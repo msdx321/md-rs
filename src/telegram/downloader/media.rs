@@ -36,7 +36,9 @@ pub(crate) async fn download_media_inner(
         None => return Ok(false),
     };
     let msg_id = msg.id();
-    let (temp_path, final_path) = build_media_paths(msg, &media, cfg)?;
+    let paths = build_media_paths(msg, &media, cfg)?;
+    let temp_path = &paths.temp;
+    let final_path = &paths.final_path;
 
     // Check file_unique_id cache
     let fid = match &media {
@@ -65,7 +67,7 @@ pub(crate) async fn download_media_inner(
     }
 
     // Already fully downloaded?
-    match tokio::fs::metadata(&final_path).await {
+    match tokio::fs::metadata(final_path).await {
         Ok(metadata) => {
             anyhow::ensure!(
                 metadata.is_file(),
@@ -81,7 +83,7 @@ pub(crate) async fn download_media_inner(
             }
             let size = metadata.len();
             web_state
-                .download_started(msg_id, &final_path, size, size)
+                .download_started(msg_id, final_path, size, size)
                 .await;
             web_state.download_finished(msg_id, size, true).await;
             return Ok(true);
@@ -92,16 +94,18 @@ pub(crate) async fn download_media_inner(
 
     tokio::fs::create_dir_all(temp_path.parent().unwrap_or(Path::new("."))).await?;
 
-    crate::migration::relocate_partial(&final_path, &temp_path, &web_state.database).await?;
+    paths.validate_temp()?;
+    paths.validate_final()?;
+    crate::migration::relocate_partial(final_path, temp_path, &web_state.database).await?;
 
     let total = match &media {
         Media::Photo(p) => p.size().unwrap_or(0) as u64,
         Media::Document(d) => d.size().unwrap_or(0) as u64,
         _ => 0,
     };
-    let existing = resume_offset(&temp_path, total, &web_state.database).await?;
+    let existing = resume_offset(temp_path, total, &web_state.database).await?;
     web_state
-        .download_started(msg_id, &final_path, existing, total)
+        .download_started(msg_id, final_path, existing, total)
         .await;
 
     // The database checkpoint marks a prior run as fully fetched but not yet renamed into
@@ -111,16 +115,7 @@ pub(crate) async fn download_media_inner(
             "msg={msg_id}: already complete, finalizing {}",
             format_byte(total as f64)
         );
-        finalize_download(
-            msg_id,
-            &fid,
-            file_ids,
-            &temp_path,
-            &final_path,
-            total,
-            web_state,
-        )
-        .await?;
+        finalize_download(msg_id, &fid, file_ids, &paths, total, web_state).await?;
         return Ok(true);
     }
 
@@ -150,12 +145,13 @@ pub(crate) async fn download_media_inner(
             }
         }
 
+        paths.validate_temp()?;
         // Re-evaluate the resume offset each attempt: a failed attempt leaves
         // the valid prefix on disk, so we only re-fetch what is missing.
         let downloaded = if attempt == 0 {
             existing
         } else {
-            resume_offset(&temp_path, total, &web_state.database).await?
+            resume_offset(temp_path, total, &web_state.database).await?
         };
 
         let pb = mp.add(ProgressBar::new(total));
@@ -176,7 +172,7 @@ pub(crate) async fn download_media_inner(
                 msg_id,
             };
             let outcome =
-                download_unknown_size(client, &media, &temp_path, &progress, shutdown).await;
+                download_unknown_size(client, &media, temp_path, &progress, shutdown).await;
             if let Err(e) = outcome {
                 last_err = Some(e);
                 pb.finish_and_clear();
@@ -184,7 +180,7 @@ pub(crate) async fn download_media_inner(
                 if shutdown.is_cancelled() {
                     break;
                 }
-                discard_partial(&temp_path, &web_state.database).await;
+                discard_partial(&paths, &web_state.database).await;
                 continue;
             }
             pb.set_position(total);
@@ -197,7 +193,7 @@ pub(crate) async fn download_media_inner(
             if let Err(e) = download_concurrent(
                 client,
                 &media,
-                &temp_path,
+                temp_path,
                 downloaded..total,
                 cfg.download_connections.max(1) as u64,
                 &progress,
@@ -222,35 +218,26 @@ pub(crate) async fn download_media_inner(
         pb.finish_and_clear();
         drop(pb);
 
-        let actual = tokio::fs::metadata(&temp_path)
+        let actual = tokio::fs::metadata(temp_path)
             .await
             .map(|m| m.len())
             .unwrap_or(0);
 
         if total > 0 && actual != total {
             warn!("msg={msg_id}: size mismatch ({actual} vs {total}) - retrying");
-            discard_partial(&temp_path, &web_state.database).await;
+            discard_partial(&paths, &web_state.database).await;
             last_err = Some(anyhow::anyhow!("size mismatch"));
             continue;
         }
 
-        finalize_download(
-            msg_id,
-            &fid,
-            file_ids,
-            &temp_path,
-            &final_path,
-            actual,
-            web_state,
-        )
-        .await?;
+        finalize_download(msg_id, &fid, file_ids, &paths, actual, web_state).await?;
         return Ok(true);
     }
 
     // On shutdown, keep the `.part` file so the download resumes next run. On a
     // real failure (retries exhausted), delete it so we start fresh.
     if !shutdown.is_cancelled() {
-        discard_partial(&temp_path, &web_state.database).await;
+        discard_partial(&paths, &web_state.database).await;
     }
     web_state.download_finished(msg_id, 0, false).await;
     if shutdown.is_cancelled() {

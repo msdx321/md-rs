@@ -224,10 +224,143 @@ pub(super) async fn put(
         }
     }
     settings.apply(&mut cfg);
-    FILE.save(&cfg).map_err(internal)?;
-    crate::telegram::storage::cursors::queue(&state.database, &updates)
-        .await
-        .map_err(internal)?;
-    state.settings_changed.send_replace(());
+    persist_settings(&FILE, &cfg, &state, &updates).await?;
     Ok(Json(snapshot(cfg, &state).await?))
+}
+
+async fn persist_settings(
+    file: &crate::configuration::ConfigFile<Config>,
+    cfg: &Config,
+    state: &ApiState,
+    updates: &[(String, i32)],
+) -> Result<(), Error> {
+    file.save(cfg).map_err(internal)?;
+    let queued = crate::telegram::storage::cursors::queue(&state.database, updates).await;
+    // YAML already committed. Publish it even if the separate cursor store fails,
+    // but only after queue finishes so successful saves retain their ordering.
+    state.settings_changed.send_replace(());
+    queued.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Settings saved, but cursor updates failed: {error}"),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{configuration::ConfigFile, storage::Database};
+
+    fn file(path: &std::path::Path) -> ConfigFile<Config> {
+        // ConfigFile uses static application paths; only this temporary test path
+        // is leaked, never a production FILE or a process-wide cwd change.
+        ConfigFile::new(Box::leak(
+            path.to_string_lossy().into_owned().into_boxed_str(),
+        ))
+    }
+
+    async fn state() -> ApiState {
+        let common = tokio::sync::watch::channel(crate::configuration::app::Config::default()).1;
+        ApiState::new(
+            tokio::sync::mpsc::channel(1).0,
+            Database::open(":memory:").await.unwrap(),
+            common.clone(),
+            Arc::new(crate::runtime::download_limiter::DownloadLimiter::new(
+                common,
+            )),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn saved_settings_notify_after_actual_cursor_failure_and_report_partial_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file(&dir.path().join("telegram.yaml"));
+        let state = state().await;
+        let changed = state.settings_changed.subscribe();
+        let connection = state.database.connection().await;
+        connection
+            .execute("DROP TABLE telegram_cursor_overrides", ())
+            .await
+            .unwrap();
+        let cfg = Config {
+            max_download_task: 7,
+            ..Default::default()
+        };
+        let updates = vec![("fixture_chat".into(), 42)];
+        let save = persist_settings(&file, &cfg, &state, &updates);
+        tokio::pin!(save);
+        // The real config save has completed, but queue is held at the real DB lock.
+        assert!(futures_util::poll!(&mut save).is_pending());
+        assert_eq!(file.load_optional().unwrap().unwrap().max_download_task, 7);
+        assert!(
+            !changed.has_changed().unwrap(),
+            "do not publish before awaiting cursor queue"
+        );
+        drop(connection);
+        let (status, message) = save.await.unwrap_err();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(message.contains("Settings saved, but cursor updates failed"));
+        assert!(changed.has_changed().unwrap());
+        assert_eq!(file.load_optional().unwrap().unwrap().max_download_task, 7);
+    }
+
+    #[tokio::test]
+    async fn saved_settings_notify_only_after_successful_cursor_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file(&dir.path().join("telegram.yaml"));
+        let state = state().await;
+        let changed = state.settings_changed.subscribe();
+        let connection = state.database.connection().await;
+        let cfg = Config {
+            max_download_task: 8,
+            ..Default::default()
+        };
+        let updates = vec![("fixture_chat".into(), 123)];
+        let save = persist_settings(&file, &cfg, &state, &updates);
+        tokio::pin!(save);
+        assert!(futures_util::poll!(&mut save).is_pending());
+        assert_eq!(file.load_optional().unwrap().unwrap().max_download_task, 8);
+        assert!(!changed.has_changed().unwrap());
+        drop(connection);
+        save.await.unwrap();
+        assert!(changed.has_changed().unwrap());
+        let cursors = crate::telegram::storage::cursors::load(&state.database)
+            .await
+            .unwrap();
+        assert_eq!(cursors.get("fixture_chat"), Some(&123));
+    }
+
+    #[tokio::test]
+    async fn failed_config_save_neither_queues_cursors_nor_notifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"sentinel").unwrap();
+        let file = file(&blocker.join("telegram.yaml"));
+        let state = state().await;
+        let changed = state.settings_changed.subscribe();
+        let connection = state.database.connection().await;
+        let cfg = Config::default();
+        let updates = vec![("fixture_chat".into(), 42)];
+        let save = persist_settings(&file, &cfg, &state, &updates);
+        tokio::pin!(save);
+        // A mistakenly attempted queue would block on connection, not return.
+        let std::task::Poll::Ready(result) = futures_util::poll!(&mut save) else {
+            panic!("failed config save attempted the cursor queue");
+        };
+        let (status, message) = result.unwrap_err();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!message.contains("Settings saved"));
+        assert!(!changed.has_changed().unwrap());
+        drop(connection);
+        assert!(
+            crate::telegram::storage::cursors::load(&state.database)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(std::fs::read(blocker).unwrap(), b"sentinel");
+    }
 }

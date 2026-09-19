@@ -8,9 +8,10 @@ use grammers_session::types::PeerRef;
 use indicatif::MultiProgress;
 use log::{debug, error, info, warn};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
+use crate::runtime::download_slots::DownloadSlots;
 use crate::telegram::api::{ApiState, ChatScanReport, ScanReport};
 use crate::telegram::config::{ChatConfig, Config};
 use crate::telegram::downloader::{
@@ -18,7 +19,6 @@ use crate::telegram::downloader::{
     media_file_size_value, media_matches_config, media_resolution_value, media_type_value,
 };
 use crate::telegram::filter::{Parser, Value, VarLookup};
-use crate::telegram::format::replace_date_time;
 use crate::telegram::storage::ChatData;
 
 use super::shutdown::{Shutdown, flood_wait_secs, sleep_cancellable, wait_paused};
@@ -38,7 +38,7 @@ struct ChatOutcome {
 
 pub(super) struct DownloadRuntime {
     pub(super) file_ids: Arc<Mutex<HashMap<String, u64>>>,
-    pub(super) dl_sem: Arc<Semaphore>,
+    pub(super) downloads: Arc<DownloadSlots>,
     pub(super) mp: Arc<MultiProgress>,
     pub(super) web_state: Arc<ApiState>,
 }
@@ -174,7 +174,7 @@ async fn process_chat(
 
     let mut messages = client.iter_messages(peer);
 
-    let filter_fn = build_filter_fn(chat_cfg, cfg);
+    let filter_fn = build_filter_fn(chat_cfg);
     let task_cfg = Arc::new(cfg.clone());
     let mut tasks = JoinSet::new();
 
@@ -239,9 +239,12 @@ async fn process_chat(
         let live_retry = live_retry.clone();
         let stats = stats.clone();
         let shutdown = shutdown.clone();
-        let permit = tokio::select! {
-            p = runtime.dl_sem.clone().acquire_owned() => p?,
-            _ = shutdown.cancelled() => break,
+        let Some(permit) = runtime
+            .downloads
+            .acquire(None, || Some(cfg.max_download_task), shutdown.cancelled())
+            .await
+        else {
+            break;
         };
 
         let mp = runtime.mp.clone();
@@ -353,10 +356,11 @@ pub(super) async fn run_message_download(
         anyhow::bail!("message {message_id} media type is disabled by config");
     }
 
-    let _permit = tokio::select! {
-        permit = runtime.dl_sem.clone().acquire_owned() => permit?,
-        _ = shutdown.cancelled() => anyhow::bail!("download interrupted"),
-    };
+    let _permit = runtime
+        .downloads
+        .acquire(None, || Some(cfg.max_download_task), shutdown.cancelled())
+        .await
+        .context("download interrupted")?;
     let result = download_media_inner(
         client,
         &message,
@@ -402,15 +406,17 @@ fn drain_finished_tasks(tasks: &mut JoinSet<()>) {
     }
 }
 
+/// Filter literals are independent of the directory naming format.
+fn prepare_filter(chat_cfg: &ChatConfig) -> Option<Parser> {
+    chat_cfg.download_filter.as_deref().map(Parser::new)
+}
+
 fn build_filter_fn(
     chat_cfg: &ChatConfig,
-    cfg: &Config,
 ) -> Box<dyn Fn(&grammers_client::message::Message) -> bool + Send + Sync> {
-    let filter_str = match &chat_cfg.download_filter {
-        Some(fs) => replace_date_time(fs, &cfg.date_format),
-        None => return Box::new(|_| true),
+    let Some(parser) = prepare_filter(chat_cfg) else {
+        return Box::new(|_| true);
     };
-    let parser = Parser::new(&filter_str);
 
     Box::new(move |msg| {
         let vars = MessageVars(msg);
@@ -451,5 +457,60 @@ impl VarLookup for MessageVars<'_> {
             "media_height" => Value::Int(media_resolution_value(msg).1),
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_preparation_preserves_timestamps_independent_of_directory_format() {
+        let boundary = chrono::NaiveDate::from_ymd_opt(2024, 2, 29)
+            .unwrap()
+            .and_hms_opt(12, 34, 56)
+            .unwrap();
+        for cfg in [
+            Config::default(),
+            Config {
+                date_format: "%Y/%m".into(),
+                ..Config::default()
+            },
+            Config {
+                date_format: "%Y-%m-%d".into(),
+                ..Config::default()
+            },
+        ] {
+            let cfg = Config {
+                chat: vec![ChatConfig {
+                    chat_id: "fixture".into(),
+                    download_filter: Some("message_date >= 2024-02-29 12:34:56".into()),
+                }],
+                ..cfg
+            };
+            let parser = prepare_filter(&cfg.chat[0]).unwrap();
+            for (seconds, expected) in [(-1, false), (0, true), (1, true)] {
+                let vars = std::collections::HashMap::from([(
+                    "message_date".into(),
+                    Value::DateTime(boundary + chrono::Duration::seconds(seconds)),
+                )]);
+                assert!(
+                    matches!(parser.parse(&vars), Ok(Value::Bool(value)) if value == expected),
+                    "{}: {seconds}",
+                    cfg.date_format
+                );
+            }
+        }
+        let chat = ChatConfig {
+            chat_id: "fixture".into(),
+            download_filter: None,
+        };
+        assert!(prepare_filter(&chat).is_none());
+        let invalid = ChatConfig {
+            download_filter: Some("message_date >= 2024-02-30 12:34:56".into()),
+            ..chat
+        };
+        let vars = std::collections::HashMap::<String, Value>::new();
+        assert!(prepare_filter(&invalid).unwrap().parse(&vars).is_err());
     }
 }

@@ -2,7 +2,7 @@ mod chunks;
 mod finalize;
 mod media;
 mod metadata;
-mod paths;
+pub(crate) mod paths;
 mod progress;
 
 pub(crate) use media::download_media_inner;

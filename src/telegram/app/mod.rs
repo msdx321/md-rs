@@ -17,8 +17,9 @@ use grammers_session::types::PeerRef;
 use indicatif::MultiProgress;
 use log::{debug, info};
 use rustc_hash::FxHashMap as HashMap;
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, mpsc};
 
+use crate::runtime::download_slots::DownloadSlots;
 use crate::telegram::api::{ApiState, ChatRequest, ChatTarget, ScanReport};
 use crate::telegram::config::{ChatConfig, Config, FILE};
 use crate::telegram::storage::ChatData;
@@ -76,11 +77,11 @@ pub(crate) async fn run_downloader(
         .collect();
 
     let concurrency = cfg.max_download_task;
-    let dl_semaphore = Arc::new(Semaphore::new(concurrency));
+    let downloads = Arc::new(DownloadSlots::new());
     let mp = Arc::new(MultiProgress::new());
     let mut runtime = DownloadRuntime {
         file_ids: file_ids.clone(),
-        dl_sem: dl_semaphore,
+        downloads,
         mp,
         web_state: web_state.clone(),
     };
@@ -99,7 +100,12 @@ pub(crate) async fn run_downloader(
         if web_state.cancelling.load(Ordering::Relaxed) {
             let _cancellation = web_state.download_cancel.lock().await;
             while download_rx.try_recv().is_ok() {}
-            cancellation::discard_pending(&web_state.database, &mut data_chats).await?;
+            let retained = cancellation::discard_pending(
+                &web_state.database,
+                &mut data_chats,
+                &[&cfg.temp_path, &cfg.save_path],
+            )
+            .await?;
             temp::clean_empty_dirs(&cfg.temp_path).await;
             persist_state(
                 &web_state.database,
@@ -110,7 +116,11 @@ pub(crate) async fn run_downloader(
             .await?;
             web_state.cancelling.store(false, Ordering::Relaxed);
             web_state
-                .set_status("Cancelled. Partial files and retry data deleted.")
+                .set_status(if retained == 0 {
+                    "Cancelled. Partial files and retry data deleted."
+                } else {
+                    "Cancelled. Unsafe legacy partial files/checkpoints retained; see logs."
+                })
                 .await;
         }
         let work_shutdown = shutdown.with_work(web_state.download_cancel.lock().await.clone());
@@ -129,8 +139,8 @@ pub(crate) async fn run_downloader(
             continue;
         }
         settings_rx.borrow_and_update();
-        // Each scan drains its transfers before returning. A fresh semaphore
-        // applies concurrency changes without disturbing an active download.
+        // Each scan drains its transfers before returning. A fresh slot pool
+        // applies the cycle's capacity without disturbing an active download.
         {
             let _edit = web_state.config_update.lock().await;
             cfg = FILE.load_optional()?.unwrap_or(cfg);
@@ -148,7 +158,7 @@ pub(crate) async fn run_downloader(
                 chat.last_read_message_id = cursor;
             }
         }
-        runtime.dl_sem = Arc::new(Semaphore::new(cfg.max_download_task));
+        runtime.downloads = Arc::new(DownloadSlots::new());
         std::fs::create_dir_all(&cfg.save_path)?;
         if let Some(trigger) = scan_due.take() {
             cycle_no += 1;
@@ -221,7 +231,7 @@ pub(crate) async fn run_downloader(
                 cfg = FILE.load_optional()?.unwrap_or(cfg);
             cfg.save_path = schedule.borrow().telegram_download_path.clone();
             cfg.temp_path = schedule.borrow().temp_path.join("telegram");
-                runtime.dl_sem = Arc::new(Semaphore::new(cfg.max_download_task));
+                runtime.downloads = Arc::new(DownloadSlots::new());
                 std::fs::create_dir_all(&cfg.save_path)?;
                 match request {
                     Some(ChatRequest::Scan) => { scan_due = Some("manual"); }

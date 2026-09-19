@@ -697,3 +697,73 @@ async fn events(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
 
     crate::runtime::web::events(initial.chain(updates))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::download_slots::DownloadSlots;
+    use crate::telegram::app::{Shutdown, wait_paused};
+
+    #[tokio::test]
+    async fn in_place_pause_retains_slot_until_owner_finishes() {
+        let common = watch::channel(crate::configuration::app::Config::default()).1;
+        let state = ApiState::new(
+            mpsc::channel(1).0,
+            crate::storage::Database::open(":memory:").await.unwrap(),
+            common.clone(),
+            Arc::new(crate::runtime::download_limiter::DownloadLimiter::new(
+                common,
+            )),
+        )
+        .await
+        .unwrap();
+        let slots = Arc::new(DownloadSlots::new());
+        let shutdown = Shutdown::new();
+        let owner = slots
+            .acquire(None, || Some(1), shutdown.cancelled())
+            .await
+            .unwrap();
+        state.set_paused(true).await;
+        let paused = wait_paused(&state, &shutdown);
+        tokio::pin!(paused);
+        assert!(futures_util::poll!(&mut paused).is_pending());
+        let next = slots.acquire(None, || Some(1), shutdown.cancelled());
+        tokio::pin!(next);
+        assert!(futures_util::poll!(&mut next).is_pending());
+        state.set_paused(false).await;
+        assert!(paused.await);
+        assert!(futures_util::poll!(&mut next).is_pending());
+        drop(owner);
+        assert!(next.await.is_some());
+    }
+
+    #[tokio::test]
+    async fn slot_wait_observes_both_work_and_process_shutdown() {
+        for cancel_work in [true, false] {
+            let process = Shutdown::new();
+            let work_token = CancellationToken::new();
+            let work = process.with_work(work_token.clone());
+            let slots = Arc::new(DownloadSlots::new());
+            let owner = slots
+                .acquire(None, || Some(1), work.cancelled())
+                .await
+                .unwrap();
+            let waiting = slots.acquire(None, || Some(1), work.cancelled());
+            tokio::pin!(waiting);
+            assert!(futures_util::poll!(&mut waiting).is_pending());
+            if cancel_work {
+                work_token.cancel();
+            } else {
+                process.cancel();
+            }
+            assert!(waiting.await.is_none());
+            // Cancellation withdraws waiters, not owners: cleanup keeps its slot.
+            let next = slots.acquire(None, || Some(1), std::future::pending());
+            tokio::pin!(next);
+            assert!(futures_util::poll!(&mut next).is_pending());
+            drop(owner);
+            assert!(next.await.is_some());
+            assert_eq!(work.work_cancelled(), cancel_work);
+        }
+    }
+}
