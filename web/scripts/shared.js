@@ -4,6 +4,25 @@ initTableColumns();
 
 export const $ = (id) => document.getElementById(id);
 
+export const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+export function toast(message, kind = '') {
+  const el = document.createElement('div');
+  el.className = kind;
+  el.textContent = message;
+  $('toast').appendChild(el);
+  setTimeout(() => el.remove(), 6000);
+}
+
+// For static controls only; reconciled rows own pending state in their controller.
+export async function runAction(button, action) {
+  if (button.disabled) return;
+  button.disabled = true;
+  try { await action(); }
+  catch (e) { toast(e.message, 'err'); }
+  finally { button.disabled = false; }
+}
+
 // Coalesce event bursts, rendering the latest state once per animation frame.
 export function scheduleRender(render) {
   let frame;

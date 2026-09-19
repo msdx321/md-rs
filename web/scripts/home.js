@@ -1,4 +1,5 @@
 import { $, api, connectEvents, pollWhenVisible, scheduleRender, reconcileRows, bytes, historyPeriod, dateTime, label, sizeLabel } from './shared.js';
+import { createSnapshotRefresh, createTaskRefresh } from './snapshot-refresh.js';
 
 let telegram = null;
 let jav = null;
@@ -243,26 +244,37 @@ function renderActivity() {
 function renderHistory() {
   renderRows($('overview-history'), recentDownloads(), telegram && history && p91History ? 'No downloads recorded yet' : 'Waiting for all modules…');
 }
-async function refreshTasks() {
-  const results = await Promise.allSettled([api('/jav/api/tasks'), api('/p91/api/tasks')]);
-  if (results[0].status === 'fulfilled') tasks = results[0].value;
-  if (results[1].status === 'fulfilled') p91Tasks = results[1].value;
-  const failed = results.some((result) => result.status === 'rejected');
-  $('activity-error').hidden = !failed;
-  if (failed) $('activity-error').textContent = 'Download task status is unavailable. Retrying automatically.';
-  queueActivity();
+const providers = ['jav', 'p91'];
+const taskErrors = new Set();
+const historyErrors = new Set();
+function refreshError(errors, provider, failed, target, message) {
+  if (failed) errors.add(provider); else errors.delete(provider);
+  $(target).hidden = !errors.size;
+  if (errors.size) $(target).textContent = message;
 }
-async function refreshHistory() {
-  const results = await Promise.allSettled([
-    api('/jav/api/history').then((data) => data.records),
-    api('/p91/api/history').then((data) => data.records),
-  ]);
-  if (results[0].status === 'fulfilled') history = results[0].value;
-  if (results[1].status === 'fulfilled') p91History = results[1].value;
-  const failed = results.some((result) => result.status === 'rejected');
-  $('history-error').hidden = !failed;
-  if (failed) $('history-error').textContent = 'Download history is unavailable. Retrying automatically.';
-  queueHistory();
+const taskResources = Object.fromEntries(providers.map((provider) => {
+  const showError = (failed) => refreshError(taskErrors, provider, failed, 'activity-error',
+    'Download task status is unavailable. Retrying automatically.');
+  return [provider, createTaskRefresh((signal) => api(`/${provider}/api/tasks`, { signal }), (data) => {
+    if (provider === 'jav') tasks = data; else p91Tasks = data;
+    showError(false);
+    queueActivity();
+  }, () => { showError(true); queueActivity(); })];
+}));
+const historyResources = Object.fromEntries(providers.map((provider) => {
+  const showError = (failed) => refreshError(historyErrors, provider, failed, 'history-error',
+    'Download history is unavailable. Retrying automatically.');
+  return [provider, createSnapshotRefresh((signal) => api(`/${provider}/api/history`, { signal }), (data) => {
+    if (provider === 'jav') history = data.records; else p91History = data.records;
+    showError(false);
+    queueHistory();
+  }, () => { showError(true); queueHistory(); })];
+}));
+function refreshTasks(provider, fresh = false) {
+  return Promise.all((provider ? [provider] : providers).map((name) => taskResources[name].refresh({ fresh })));
+}
+function refreshHistory(provider, fresh = false) {
+  return Promise.all((provider ? [provider] : providers).map((name) => historyResources[name].refresh({ fresh })));
 }
 connectEvents('/telegram/events', {
   message(event) {
@@ -274,27 +286,29 @@ connectEvents('/jav/api/events', {
   status(event) { jav = JSON.parse(event.data); queueSummary(); },
   task(event) {
     const task = JSON.parse(event.data);
+    taskResources.jav.receive(task);
     if (tasks) {
       tasks = tasks.filter((item) => item.id !== task.id);
       tasks.push(task);
       queueActivity();
     }
-    if (terminal.has(task.state)) refreshHistory();
+    if (terminal.has(task.state)) refreshHistory('jav', true);
   },
-  open() { refreshTasks(); refreshHistory(); },
+  open() { refreshTasks('jav', true); refreshHistory('jav', true); },
 }, $('jav-connection'));
 connectEvents('/p91/api/events', {
   status(event) { p91 = JSON.parse(event.data); queueSummary(); },
   task(event) {
     const task = JSON.parse(event.data);
+    taskResources.p91.receive(task);
     if (p91Tasks) {
       p91Tasks = p91Tasks.filter((item) => item.id !== task.id);
       p91Tasks.push(task);
       queueActivity();
     }
-    if (terminal.has(task.state)) refreshHistory();
+    if (terminal.has(task.state)) refreshHistory('p91', true);
   },
-  open() { refreshTasks(); refreshHistory(); },
+  open() { refreshTasks('p91', true); refreshHistory('p91', true); },
 }, $('p91-connection'));
 // Refresh removals and history changes made in another tab, which have no task event.
 pollWhenVisible(() => Promise.all([refreshTasks(), refreshHistory()]), 30000);

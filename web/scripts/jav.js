@@ -1,13 +1,5 @@
-import { $, api, bindTabs, bindHistoryPagination, connectEvents, pollWhenVisible, scheduleRender, bytes, reconcileRows, historyPeriod, dateTime, label } from "./shared.js";
-
-const toast = (msg, kind = '') => {
-  const el = document.createElement('div');
-  el.className = kind;
-  el.textContent = msg;
-  $('toast').appendChild(el);
-  setTimeout(() => el.remove(), 6000);
-};
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+import { $, api, bindTabs, connectEvents, pollWhenVisible, scheduleRender, bytes, historyPeriod, dateTime, esc, toast, runAction } from "./shared.js";
+import { createVideoLibrary } from './video-library.js';
 
 // ── tabs ──────────────────────────────────────────────────────────────────
 bindTabs(document.querySelectorAll('[role="tab"]'), (tab) => {
@@ -132,7 +124,7 @@ $('popular-grid').addEventListener('click', (event) => {
 
 async function download(ds) {
   try {
-    const r = await api('/jav/api/download', {
+    const r = await mutateTasks(() => api('/jav/api/download', {
       method: 'POST',
       body: JSON.stringify({
         id: ds.id,
@@ -140,110 +132,22 @@ async function download(ds) {
         title: ds.title,
         rank: ds.rank ? Number(ds.rank) : null,
       }),
-    });
+    }));
     toast(r.status === 'started' ? 'Download queued' : 'Already ' + r.status.replace('_', ' '), 'ok');
     document.querySelector('nav button[data-tab="tasks"]').click();
   } catch (e) { toast(e.message, 'err'); }
 }
 
-// ── tasks ─────────────────────────────────────────────────────────────────
-let tasks = [];
-const queueTasks = scheduleRender(renderTasks);
-function renderTasks() {
-  tasks = tasks.filter((t) => !['completed', 'cancelled'].includes(t.state));
-  $('btn-clear-failed').disabled = !tasks.some((t) => t.state === 'failed');
-  const active = tasks.filter((t) => !['completed', 'failed', 'cancelled'].includes(t.state)).length;
-  $('task-count').textContent = active ? `(${active})` : '';
-  $('stat-active').textContent = tasks.filter((t) => t.state === 'running').length;
-  $('tasks-empty').style.display = tasks.length ? 'none' : 'block';
-  const nextRows = document.createElement('tbody');
-  nextRows.innerHTML = tasks.map((t) => {
-    const terminal = ['completed', 'failed', 'cancelled'].includes(t.state);
-    const pct = t.state === 'completed' ? 100 : t.total_segments > 0 ? Math.min(100, (t.done_segments / t.total_segments) * 100)
-              : t.total_bytes > 0 ? Math.min(100, (t.downloaded_bytes / t.total_bytes) * 100) : 0;
-    const barClass = t.state === 'completed' ? 'done' : t.state === 'failed' ? 'fail' : '';
-    const speed = t.speed_kbps > 0 && t.state === 'running' ? bytes(t.speed_kbps * 1024) + '/s' : '—';
-    const detail = t.state === 'running' || t.state === 'paused'
-      ? (t.total_segments ? `${t.done_segments}/${t.total_segments} seg · ` : '') + bytes(t.downloaded_bytes)
-      : (t.message || '');
-    return `<tr data-row-id="${esc(t.id)}">
-      <td><span class="truncate" title="${esc(t.title || t.url)}">${esc(t.title || t.url)}</span></td>
-      <td class="muted"><span class="truncate" title="${esc(t.source_url || 'Manual')}">${esc(t.source_url || 'Manual')}</span></td>
-      <td><span class="tag ${t.state}">${label(t.state)}</span></td>
-      <td><div class="bar ${barClass}" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct.toFixed(1)}%"></i></div><span class="muted">${pct.toFixed(0)}%</span></td>
-      <td class="muted">${speed}</td>
-      <td class="muted"><span class="truncate" title="${esc(detail)}">${esc(detail)}</span></td>
-      <td style="white-space:nowrap">
-        ${t.state === 'running' || t.state === 'queued' ? `<button class="tiny" data-act="pause" data-id="${esc(t.id)}">Pause</button>` : ''}
-        ${t.state === 'paused' || t.state === 'failed' ? `<button class="tiny" data-act="resume" data-id="${esc(t.id)}">Resume</button>` : ''}
-        ${!terminal ? `<button class="tiny danger" data-act="cancel" data-id="${esc(t.id)}">Cancel</button>` : ''}
-        ${terminal ? `<button class="tiny" data-act="dismiss" data-id="${esc(t.id)}" aria-label="Dismiss task">✕</button>` : ''}
-      </td>
-    </tr>`;
-  }).join('');
-  reconcileRows($('tasks-body'), [...nextRows.children]);
-}
-$('tasks-body').addEventListener('click', (event) => {
-  const button = event.target.closest('button[data-act]');
-  if (button) runAction(button, () => taskAction(button.dataset.act, button.dataset.id));
-});
-async function taskAction(act, id) {
-  id = encodeURIComponent(id);
-  const method = act === 'dismiss' ? 'DELETE' : 'POST';
-  const path = act === 'dismiss' ? `/jav/api/tasks/${id}` : `/jav/api/tasks/${id}/${act}`;
-  try {
-    await api(path, { method });
-    if (act === 'dismiss') {
-      tasks = tasks.filter((t) => encodeURIComponent(t.id) !== id);
-      renderTasks();
-    } else await loadTasks();
-  } catch (e) { toast(e.message, 'err'); }
-}
-async function loadTasks() {
-  try {
-    tasks = await api('/jav/api/tasks');
-    $('tasks-banner').textContent = '';
-    queueTasks();
-  } catch (e) {
-    $('tasks-banner').textContent = 'Could not load tasks: ' + e.message;
-  }
-}
-
-// ── history ───────────────────────────────────────────────────────────────
-const historyPager = bindHistoryPagination(renderHistoryPage);
-const historyBody = $('history-body');
-async function loadHistory() {
-  try {
-    const data = await api('/jav/api/history');
-    $('history-empty').style.display = data.records.length ? 'none' : 'block';
-    historyPager.update(data.records);
-  } catch (e) { toast(e.message, 'err'); }
-}
-
-function renderHistoryPage(records) {
-  const rows = records.map((r) => {
-    const row = document.createElement('tr');
-    row.dataset.rowId = r.id;
-    row.innerHTML = `
-      <td><span class="truncate" title="${esc(r.path || r.title)}">${esc(r.title || r.url)}</span></td>
-      <td class="muted">${r.rank != null ? '#' + r.rank : '—'}</td>
-      <td class="muted">${bytes(r.size)}</td>
-      <td class="muted">${dateTime(r.finished_at)}</td>
-      <td><span class="tag ${r.status === 'completed' ? 'completed' : 'failed'}">${esc(label(r.status))}</span></td>
-      <td><button class="tiny" data-forget="${esc(r.id)}">Forget</button></td>`;
-    return row;
-  });
-  reconcileRows(historyBody, rows);
-}
-
-historyBody.addEventListener('click', (event) => {
-  const button = event.target.closest('button[data-forget]');
-  if (!button) return;
-  runAction(button, async () => {
-    await api('/jav/api/history/' + encodeURIComponent(button.dataset.forget), { method: 'DELETE' });
-    toast('Removed from history — it can be downloaded again', 'ok');
-    await Promise.all([loadHistory(), loadStatus()]);
-  });
+// ── tasks and history ─────────────────────────────────────────────────────
+const { loadTasks, loadHistory, receiveTask, mutateTasks } = createVideoLibrary({
+  apiBase: '/jav/api',
+  loadStatus,
+  progress: (t) => t.state === 'completed' ? 100
+    : t.total_segments > 0 ? Math.min(100, (t.done_segments / t.total_segments) * 100)
+    : t.total_bytes > 0 ? Math.min(100, (t.downloaded_bytes / t.total_bytes) * 100) : 0,
+  detail: (t) => t.state === 'running' || t.state === 'paused'
+    ? (t.total_segments ? `${t.done_segments}/${t.total_segments} seg · ` : '') + bytes(t.downloaded_bytes)
+    : (t.message || ''),
 });
 
 // ── settings ──────────────────────────────────────────────────────────────
@@ -469,25 +373,14 @@ $('btn-run').onclick = async () => {
   catch (e) { toast(e.message, 'err'); }
 };
 $('btn-pause').onclick = async () => { await api('/jav/api/daily/pause', { method: 'POST' }); toast('Pausing all downloads'); };
-$('btn-cancel').onclick = async () => { await api('/jav/api/daily/cancel', { method: 'POST' }); toast('Cancelling all downloads'); await loadTasks(); };
+$('btn-cancel').onclick = async () => { await api('/jav/api/daily/cancel', { method: 'POST' }); toast('Cancelling all downloads'); };
 $('btn-resume').onclick = async () => {
   const r = await api('/jav/api/tasks/resume-all', { method: 'POST' });
   toast(`Resumed ${r.count} task(s)`, 'ok');
 };
-$('btn-clear-failed').onclick = () => runAction($('btn-clear-failed'), async () => {
-  const result = await api('/jav/api/tasks/failed', { method: 'DELETE' });
-  toast(`Cleared ${result.count} failed task(s).`, 'ok');
-  await loadTasks();
-}).finally(renderTasks);
 $('btn-refresh').onclick = () => loadPopular();
 $('btn-prev').onclick = () => { if (page > 1) loadPopular(page - 1); };
 $('btn-next').onclick = () => { loadPopular(page + 1); };
-$('btn-reload-history').onclick = loadHistory;
-$('btn-clear-history').onclick = async () => {
-  if (!confirm('Clear retained history? Downloaded files are kept, but videos in this history become downloadable again.')) return;
-  await api('/jav/api/history', { method: 'DELETE' });
-  loadHistory(); loadStatus();
-};
 $('settings-form').onsubmit = (event) => { event.preventDefault(); if (!settingsSaving && settingsChanged()) saveSettings(); };
 $('btn-refresh-cookie').onclick = async () => {
   if ($('btn-refresh-cookie').disabled) return;
@@ -506,35 +399,19 @@ $('btn-refresh-cookie').onclick = async () => {
   }
 };
 
-async function runAction(button, action) {
-  if (button.disabled) return;
-  button.disabled = true;
-  try { await action(); }
-  catch (e) { toast(e.message, 'err'); }
-  finally { button.disabled = false; }
-}
-for (const id of ['btn-run', 'btn-pause', 'btn-cancel', 'btn-resume', 'btn-clear-history']) {
+for (const id of ['btn-run', 'btn-pause', 'btn-cancel', 'btn-resume']) {
   const button = $(id);
   const action = button.onclick;
-  button.onclick = () => runAction(button, action);
+  button.onclick = () => runAction(button, () => mutateTasks(action));
 }
 
 // Live snapshots cover startup and reconnects; poll only if the stream is down.
 const es = connectEvents('/jav/api/events');
 es.addEventListener('status', (ev) => renderStatus(JSON.parse(ev.data)));
-es.addEventListener('task', (ev) => {
-  const task = JSON.parse(ev.data);
-  const idx = tasks.findIndex((t) => t.id === task.id);
-  if (idx >= 0) tasks[idx] = task; else tasks.unshift(task);
-  queueTasks();
-  if (task.state === 'completed') {
-    loadStatus();
-    if ($('history-tab').getAttribute('aria-selected') === 'true') loadHistory();
-  }
-});
+es.addEventListener('task', (ev) => receiveTask(JSON.parse(ev.data)));
 es.addEventListener('open', () => {
-  loadTasks();
-  if ($('history-tab').getAttribute('aria-selected') === 'true') loadHistory();
+  loadTasks({ fresh: true });
+  if ($('history-tab').getAttribute('aria-selected') === 'true') loadHistory({ fresh: true });
 });
 
 loadSettings().catch((e) => {

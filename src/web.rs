@@ -68,6 +68,16 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
             include_str!("../web/scripts/shared.js"),
         ),
         (
+            "snapshot-refresh.js",
+            "text/javascript",
+            include_str!("../web/scripts/snapshot-refresh.js"),
+        ),
+        (
+            "video-library.js",
+            "text/javascript",
+            include_str!("../web/scripts/video-library.js"),
+        ),
+        (
             "telegram-settings.js",
             "text/javascript",
             include_str!("../web/scripts/telegram-settings.js"),
