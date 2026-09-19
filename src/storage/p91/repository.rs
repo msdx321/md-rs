@@ -11,12 +11,17 @@ pub struct Repository {
 
 impl Repository {
     pub async fn load(database: Database) -> anyhow::Result<Self> {
-        let state = State::load(&database).await?;
+        let state = Self::load_state(&database).await?;
         Ok(Self {
             state: Mutex::new(state),
             database,
             state_write: tokio::sync::Mutex::new(()),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_in_progress(&self) -> bool {
+        self.state_write.try_lock().is_err()
     }
 
     pub fn history(&self, days: u32) -> Vec<Record> {
@@ -113,10 +118,10 @@ impl Repository {
     }
 }
 
-impl State {
-    pub async fn load(db: &Database) -> anyhow::Result<Self> {
+impl Repository {
+    async fn load_state(db: &Database) -> anyhow::Result<State> {
         let conn = db.connection().await;
-        let mut state = Self::default();
+        let mut state = State::default();
         let mut rows = conn.query("SELECT id,url,title,rank,status,path,size,finished_at,error FROM p91_records ORDER BY rowid", ()).await?;
         while let Some(row) = rows.next().await? {
             state.records.push(Record {
@@ -206,7 +211,7 @@ mod tests {
         drop(db);
 
         let db = Database::open(path).await.unwrap();
-        let loaded = State::load(&db).await.unwrap();
+        let loaded = Repository::load_state(&db).await.unwrap();
         assert_eq!(loaded.records.len(), 1);
         assert_eq!(loaded.last_daily_run.as_deref(), Some("2026-01-01"));
         let _ = std::fs::remove_dir_all(&dir);

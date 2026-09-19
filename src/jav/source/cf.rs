@@ -119,6 +119,7 @@ impl Default for MintGate {
 #[derive(Clone)]
 pub struct CookieStore {
     inner: Arc<RwLock<CookieState>>,
+    jobs: Arc<crate::runtime::http_lifecycle::HttpLifecycle>,
     changes: tokio::sync::watch::Sender<()>,
     /// A *tokio* mutex so its guard stays `Send` across the mint await.
     pub(crate) gate: Arc<tokio::sync::Mutex<MintGate>>,
@@ -159,6 +160,7 @@ impl CookieStore {
         state.user_agent = user_agent.into().trim().to_string();
         Self {
             inner: Arc::new(RwLock::new(state)),
+            jobs: Arc::new(Default::default()),
             changes: tokio::sync::watch::channel(()).0,
             gate: Arc::new(tokio::sync::Mutex::new(MintGate::default())),
             generation: Arc::new(AtomicU64::new(0)),
@@ -290,13 +292,20 @@ impl CookieStore {
         let reason = reason.to_string();
         // A disconnected HTTP request must not cancel work shared by other
         // callers. The owned task still has the mint timeout and shutdown flag.
-        tokio::spawn(async move {
-            store
-                .refresh_locked(&reason, force, rejected, observed)
-                .await
-        })
-        .await
-        .map_err(|e| format!("cookie refresh task failed: {e}"))?
+        self.jobs
+            .spawn(async move {
+                store
+                    .refresh_locked(&reason, force, rejected, observed)
+                    .await
+            })
+            .ok_or_else(|| "service shutting down; cookie refresh rejected".to_string())?
+            .await
+            .map_err(|e| format!("cookie refresh task failed: {e}"))?
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.jobs.close();
+        self.jobs.drain().await;
     }
 
     async fn refresh_locked(
@@ -529,12 +538,14 @@ mod tests {
     fn concurrent_refreshes_mint_only_once() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mint_release = Arc::clone(&release);
         let mint: MintFn = Arc::new(move |_ua| {
             let counter = Arc::clone(&counter);
+            let release = Arc::clone(&mint_release);
             Box::pin(async move {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                // Yield so the other callers pile up behind the gate.
-                tokio::task::yield_now().await;
+                release.notified().await;
                 Ok(MintedCookie {
                     cookie: "fresh".into(),
                     user_agent: "Chrome/149".into(),
@@ -552,11 +563,20 @@ mod tests {
             let a = Arc::clone(&store);
             let b = Arc::clone(&store);
             let c = Arc::clone(&store);
-            let (ra, rb, rc) = tokio::join!(
-                async move { a.refresh("a", false).await },
-                async move { b.refresh("b", false).await },
-                async move { c.refresh("c", false).await },
-            );
+            let waiters = async {
+                tokio::join!(
+                    async move { a.refresh("a", false).await },
+                    async move { b.refresh("b", false).await },
+                    async move { c.refresh("c", false).await },
+                )
+            };
+            tokio::pin!(waiters);
+            // All callers must observe the old generation before minting finishes.
+            assert!(futures_util::poll!(&mut waiters).is_pending());
+            release.notify_one();
+            let (ra, rb, rc) = tokio::time::timeout(Duration::from_secs(5), waiters)
+                .await
+                .unwrap();
             // Exactly one caller mints; every waiter adopts its result.
             assert!(
                 ra.is_ok() && rb.is_ok() && rc.is_ok(),
@@ -591,5 +611,46 @@ mod tests {
             "challenge failed"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+    #[tokio::test]
+    async fn shutdown_drains_shared_refresh_after_its_request_waiter_disappears() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let entered_mint = entered.clone();
+        let release_mint = release.clone();
+        let mint: MintFn = Arc::new(move |_| {
+            let entered = entered_mint.clone();
+            let release = release_mint.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(MintedCookie {
+                    cookie: "fixture".into(),
+                    user_agent: "fixture".into(),
+                })
+            })
+        });
+        let store = CookieStore::new("", "fixture", Some(mint));
+        let waiter_store = store.clone();
+        let waiter = tokio::spawn(async move { waiter_store.refresh("fixture", true).await });
+        entered.notified().await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        let shutdown = store.shutdown();
+        tokio::pin!(shutdown);
+        assert!(futures_util::poll!(&mut shutdown).is_pending());
+        assert!(
+            store
+                .refresh("late", true)
+                .await
+                .unwrap_err()
+                .contains("shutting down")
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), &mut shutdown)
+            .await
+            .unwrap();
+        assert_eq!(store.cookie(), "fixture");
+        assert!(!store.snapshot().refreshing);
     }
 }

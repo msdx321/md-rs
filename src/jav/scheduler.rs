@@ -12,7 +12,7 @@ use chrono::{Duration as ChronoDuration, TimeZone};
 use serde::Serialize;
 use tokio::task::JoinSet;
 
-use crate::jav::app::{AppCtx, TaskInfo, TaskState, now_rfc3339};
+use crate::jav::app::{AppCtx, DownloadRequest, TaskInfo, TaskState, now_rfc3339};
 use crate::jav::config::Config;
 use crate::jav::downloader::download_video;
 use crate::jav::source::scraper;
@@ -30,7 +30,7 @@ struct LinkQueue {
     cfg: Config,
     report: DailyReport,
     candidates: VecDeque<scraper::VideoCard>,
-    queued: VecDeque<scraper::VideoCard>,
+    queued: VecDeque<(scraper::VideoCard, DownloadRequest)>,
     seen: HashSet<String>,
     next_page: usize,
     in_flight: usize,
@@ -58,7 +58,7 @@ impl LinkQueue {
         while !*stopped
             && self.report.completed + self.in_flight + self.queued.len() < self.cfg.top_n.max(1)
         {
-            *stopped |= ctx.take_daily_cancel();
+            *stopped |= ctx.jobs.is_closed() || ctx.take_daily_cancel();
             if *stopped {
                 break;
             }
@@ -66,7 +66,12 @@ impl LinkQueue {
                 if self.next_page > self.cfg.max_pages.max(1) || self.error.is_some() {
                     break;
                 }
-                match scraper::fetch_popular(&fetch, &self.cfg, self.next_page).await {
+                let listing = tokio::select! {
+                    biased;
+                    _ = ctx.jobs.cancelled() => { *stopped = true; break; }
+                    result = scraper::fetch_popular(&fetch, &self.cfg, self.next_page) => result,
+                };
+                match listing {
                     Ok(cards) => self.candidates.extend(cards),
                     Err(e) => {
                         self.error = Some(crate::jav::util::cloudflare_hint(&format!("{e:#}")));
@@ -89,8 +94,8 @@ impl LinkQueue {
             task.title = card.title.clone();
             task.source_url = self.cfg.popular_url(1);
             task.message = "waiting for a download slot".into();
-            if ctx.register_task(task) {
-                self.queued.push_back(card);
+            if let Some(request) = ctx.register_task(task) {
+                self.queued.push_back((card, request));
             } else {
                 self.report.skipped += 1;
             }
@@ -111,7 +116,12 @@ pub async fn run(
             s.daily_time = timer.config.daily_time.clone();
             s.next_run_at = timer.next.map(|next| next.to_rfc3339());
         });
-        if timer.tick().await {
+        let tick = tokio::select! {
+            biased;
+            _ = ctx.jobs.cancelled() => break,
+            tick = timer.tick() => tick,
+        };
+        if tick {
             if let Err(error) = run_daily(ctx.clone(), "scheduled").await {
                 log::error!("scheduled JAV run failed: {error:#}");
             }
@@ -123,6 +133,9 @@ pub async fn run(
 /// Follow the ranking until `top_n` new downloads complete or the page limit
 /// is reached. Serialised against other daily runs by `ctx.daily_lock`.
 pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyReport> {
+    let Some(_owner) = ctx.jobs.enter() else {
+        return Ok(DailyReport::default());
+    };
     // Only one daily run at a time: a second trigger (the timer firing while a
     // manual run is still going, for instance) is dropped rather than queued.
     let _guard = match ctx.daily_lock.try_lock() {
@@ -157,11 +170,11 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     let mut workers = HashMap::new();
 
     loop {
-        stopped |= ctx.take_daily_cancel();
+        stopped |= ctx.jobs.is_closed() || ctx.take_daily_cancel();
         for link in &mut links {
             link.fill(&ctx, &mut stopped).await;
         }
-        stopped |= ctx.take_daily_cancel();
+        stopped |= ctx.jobs.is_closed() || ctx.take_daily_cancel();
         while !stopped && set.len() < limit {
             let Some((index, link)) = links
                 .iter_mut()
@@ -170,11 +183,8 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
             else {
                 break;
             };
-            let card = link.queued.pop_front().expect("queue is not empty");
-            if !ctx
-                .task(&card.id)
-                .is_some_and(|t| t.state == TaskState::Queued)
-            {
+            let (card, request) = link.queued.pop_front().expect("queue is not empty");
+            if ctx.task_state(&card.id) != Some(TaskState::Queued) {
                 stopped = true;
                 break;
             }
@@ -182,10 +192,11 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
             link.report.attempted += 1;
             let id = card.id.clone();
             let ctx = Arc::clone(&ctx);
+            let worker_request = request.clone();
             let worker = set.spawn(async move {
-                download_video(ctx, card).await;
+                download_video(ctx, card, worker_request).await;
             });
-            workers.insert(worker.id(), (index, id));
+            workers.insert(worker.id(), (index, id, request));
         }
 
         let Some(joined) = set.join_next_with_id().await else {
@@ -195,15 +206,16 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
             Ok((id, ())) => *id,
             Err(error) => error.id(),
         };
-        let (index, id) = workers.remove(&worker_id).expect("registered worker");
+        let (index, id, request) = workers.remove(&worker_id).expect("registered worker");
         let link = &mut links[index];
         link.in_flight -= 1;
         match joined {
             Ok(_) if ctx.is_completed(&id) => link.report.completed += 1,
             Ok(_) => {
-                if ctx.task(&id).is_some_and(|task| {
-                    matches!(task.state, TaskState::Paused | TaskState::Cancelled)
-                }) {
+                if matches!(
+                    ctx.task_state(&id),
+                    Some(TaskState::Paused | TaskState::Cancelled)
+                ) {
                     stopped = true;
                 } else {
                     link.report.failed += 1;
@@ -211,7 +223,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
             }
             Err(e) => {
                 link.report.failed += 1;
-                ctx.update_task(&id, |task| {
+                ctx.update_request(&id, &request, |task| {
                     task.state = TaskState::Failed;
                     task.phase = "failed".into();
                     task.message = format!("download worker failed: {e}");
@@ -225,8 +237,8 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     for link in &links {
         // An individual pause/cancel also stops the daily run. Keep the rest
         // resumable rather than leaving tasks queued without a worker.
-        for card in &link.queued {
-            ctx.update_task(&card.id, |task| {
+        for (card, request) in &link.queued {
+            ctx.update_request(&card.id, request, |task| {
                 if task.state == TaskState::Queued {
                     task.state = TaskState::Paused;
                     task.phase = "paused".into();
@@ -282,31 +294,27 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
 }
 
 /// Ask every in-flight download to stop and clean up.
-pub fn cancel_active(ctx: &AppCtx) {
+pub fn cancel_active(ctx: &AppCtx) -> usize {
     ctx.request_daily_cancel();
-    for task in ctx.tasks() {
-        if !task.is_terminal() {
-            ctx.update_task(&task.id, |t| {
-                t.state = TaskState::Cancelled;
-                t.phase = "cancelled".into();
-                t.message = "cancelled by user".into();
-            });
-        }
-    }
+    ctx.tasks()
+        .into_iter()
+        .filter(|task| {
+            let accepted = ctx.stop_task(&task.id, true);
+            !accepted && matches!(task.state, TaskState::Running | TaskState::Queued)
+        })
+        .count()
 }
 
 /// Pause every in-flight download.
-pub fn pause_active(ctx: &AppCtx) {
+pub fn pause_active(ctx: &AppCtx) -> usize {
     ctx.request_daily_cancel();
-    for task in ctx.tasks() {
-        if matches!(task.state, TaskState::Running | TaskState::Queued) {
-            ctx.update_task(&task.id, |t| {
-                t.state = TaskState::Paused;
-                t.phase = "paused".into();
-                t.message = "paused by user".into();
-            });
-        }
-    }
+    ctx.tasks()
+        .into_iter()
+        .filter(|task| {
+            let accepted = ctx.stop_task(&task.id, false);
+            !accepted && matches!(task.state, TaskState::Running | TaskState::Queued)
+        })
+        .count()
 }
 
 /// Re-run every paused or failed task.
@@ -316,24 +324,17 @@ pub async fn resume_all(ctx: Arc<AppCtx>) -> usize {
         .into_iter()
         .filter(|t| matches!(t.state, TaskState::Paused | TaskState::Failed))
         .collect();
-    let count = resumable.len();
-    for task in resumable {
-        resume_task(Arc::clone(&ctx), &task.id);
-    }
-    count
+    resumable
+        .into_iter()
+        .filter(|task| resume_task(Arc::clone(&ctx), &task.id))
+        .count()
 }
 
 /// Start (or restart) the download for a known post id.
 pub fn resume_task(ctx: Arc<AppCtx>, id: &str) -> bool {
-    let Some(task) = ctx.task(id) else {
+    let Some((task, request)) = ctx.request_resume(id) else {
         return false;
     };
-    if !matches!(
-        task.state,
-        TaskState::Paused | TaskState::Failed | TaskState::Cancelled
-    ) {
-        return false;
-    }
     let card = scraper::VideoCard {
         id: task.id.clone(),
         url: task.url.clone(),
@@ -342,15 +343,13 @@ pub fn resume_task(ctx: Arc<AppCtx>, id: &str) -> bool {
         duration_secs: None,
         rank: None,
     };
-    ctx.update_task(id, |t| {
-        t.state = TaskState::Queued;
-        t.phase = "queued".into();
-        t.message = "resuming".into();
-    });
-    tokio::spawn(async move {
-        download_video(ctx, card).await;
-    });
-    true
+    let jobs_ctx = ctx.clone();
+    jobs_ctx
+        .jobs
+        .spawn(async move {
+            download_video(ctx, card, request).await;
+        })
+        .is_some()
 }
 
 #[cfg(test)]

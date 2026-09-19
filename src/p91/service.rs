@@ -35,8 +35,9 @@ pub async fn start(
     let router = api::router(ctx.clone());
     let scheduler = BackgroundTask::spawn("p91 scheduler", scheduler::run(ctx.clone(), schedule));
     Ok(RunningEngine::new("/p91/", router, async move {
+        ctx.begin_shutdown();
         cleanup.abort().await;
-        scheduler.abort().await;
-        ctx.request_daily_cancel();
+        scheduler.finish().await;
+        ctx.shutdown().await;
     }))
 }

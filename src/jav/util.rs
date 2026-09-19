@@ -1,37 +1,7 @@
-//! Small shared helpers ported from the original Tauri implementation:
-//! filename sanitising, AES key/IV derivation, the
-//! fake-header stripper some hosts prepend to segments, and a sliding-window
-//! speed estimator for the UI.
+//! JAV AES key/IV derivation, fake segment header stripping and challenge hints.
+//! Common filename and speed policies are reexported for downloader callers.
 
-use std::collections::VecDeque;
-use std::time::{Duration, Instant};
-
-/// Replace every character that is unsafe in a filename.
-pub fn sanitize_filename(title: &str) -> String {
-    let cleaned: String = title
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
-            c if (c as u32) < 0x20 => '_',
-            c => c,
-        })
-        .collect();
-    let cleaned = cleaned.trim().trim_matches('.').to_string();
-    // Keep well under the 255-byte limit most filesystems impose, counting
-    // UTF-8 bytes rather than characters.
-    truncate_bytes(&cleaned, 180)
-}
-
-fn truncate_bytes(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].trim_end().to_string()
-}
+pub use crate::runtime::{download_speed::SpeedTracker, video_filename::sanitize_filename};
 
 /// Parse a `0x…` hex blob into bytes.
 pub fn parse_hex(s: &str) -> Option<Vec<u8>> {
@@ -39,7 +9,7 @@ pub fn parse_hex(s: &str) -> Option<Vec<u8>> {
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
-    if !s.len().is_multiple_of(2) || s.is_empty() {
+    if !s.is_ascii() || !s.len().is_multiple_of(2) || s.is_empty() {
         return None;
     }
     (0..s.len())
@@ -109,58 +79,10 @@ pub fn cloudflare_hint(err: &str) -> String {
     }
 }
 
-/// Sliding-window download speed estimator.
-///
-/// Speed is the byte delta across the whole window divided by the window's
-/// elapsed time, which smooths the bursty arrival of network chunks instead of
-/// flipping between 0 and a spike whenever a chunk lands.
-pub struct SpeedTracker {
-    samples: VecDeque<(Instant, u64)>,
-    window: Duration,
-}
-
-impl SpeedTracker {
-    pub fn new(window: Duration) -> Self {
-        Self {
-            samples: VecDeque::new(),
-            window,
-        }
-    }
-
-    pub fn add_sample(&mut self, now: Instant, bytes: u64) {
-        self.samples.push_back((now, bytes));
-        while let Some((t, _)) = self.samples.front() {
-            if now.duration_since(*t) > self.window {
-                self.samples.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Average speed in KB/s over the window; 0.0 until there is enough data.
-    pub fn speed(&self) -> f64 {
-        if self.samples.len() < 2 {
-            return 0.0;
-        }
-        let (start_t, start_b) = self.samples.front().unwrap();
-        let (end_t, end_b) = self.samples.back().unwrap();
-        let dt = end_t.duration_since(*start_t).as_secs_f64();
-        if dt <= 0.0 {
-            return 0.0;
-        }
-        end_b.saturating_sub(*start_b) as f64 / 1024.0 / dt
-    }
-
-    pub fn sample(&mut self, now: Instant, bytes: u64) -> f64 {
-        self.add_sample(now, bytes);
-        self.speed()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn sanitize_replaces_reserved_characters() {
@@ -183,6 +105,10 @@ mod tests {
     fn hex_parsing() {
         assert_eq!(parse_hex("0x00ff"), Some(vec![0, 255]));
         assert_eq!(parse_hex("abc"), None);
+        assert_eq!(parse_hex("0XAbCd"), Some(vec![0xab, 0xcd]));
+        for invalid in ["", "0x", "zz", "a€", "é", "🙂", "0xa€"] {
+            assert_eq!(parse_hex(invalid), None, "{invalid:?}");
+        }
     }
 
     #[test]

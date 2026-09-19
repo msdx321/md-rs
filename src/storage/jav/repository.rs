@@ -11,12 +11,17 @@ pub struct Repository {
 
 impl Repository {
     pub async fn load(database: Database) -> anyhow::Result<Self> {
-        let state = State::load(&database).await?;
+        let state = Self::load_state(&database).await?;
         Ok(Self {
             state: Mutex::new(state),
             database,
             state_write: tokio::sync::Mutex::new(()),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_in_progress(&self) -> bool {
+        self.state_write.try_lock().is_err()
     }
 
     pub fn history(&self, days: u32) -> Vec<Record> {
@@ -113,10 +118,10 @@ impl Repository {
     }
 }
 
-impl State {
-    pub async fn load(db: &Database) -> anyhow::Result<Self> {
+impl Repository {
+    async fn load_state(db: &Database) -> anyhow::Result<State> {
         let conn = db.connection().await;
-        let mut state = Self::default();
+        let mut state = State::default();
         let mut rows = conn.query("SELECT id,url,title,rank,status,path,size,finished_at,error FROM jav_records ORDER BY rowid", ()).await?;
         while let Some(row) = rows.next().await? {
             state.records.push(Record {
@@ -143,24 +148,6 @@ impl State {
             state.last_daily_run = row.get(0)?;
         }
         Ok(state)
-    }
-
-    #[cfg(test)]
-    async fn write(&self, conn: &Connection) -> anyhow::Result<()> {
-        for record in &self.records {
-            store_record(conn, record).await?;
-        }
-        conn.execute("INSERT INTO jav_scheduler(id,last_daily_run) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET last_daily_run=excluded.last_daily_run", [self.last_daily_run.clone()]).await?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub async fn save(&self, db: &Database) -> anyhow::Result<()> {
-        let tx = db.transaction().await?;
-        tx.execute("DELETE FROM jav_records", ()).await?;
-        self.write(&tx).await?;
-        tx.commit().await?;
-        Ok(())
     }
 }
 
@@ -221,15 +208,18 @@ mod tests {
         let path = dir.join("state.db");
         let path = path.to_str().unwrap();
 
-        let mut state = State::default();
-        state.upsert(record("1", "completed"));
-        state.last_daily_run = Some("2026-01-01".into());
         let db = Database::open(path).await.unwrap();
-        state.save(&db).await.unwrap();
+        let repository = Repository::load(db.clone()).await.unwrap();
+        repository
+            .upsert_record(record("1", "completed"))
+            .await
+            .unwrap();
+        repository.mark_daily_run("2026-01-01").await.unwrap();
+        drop(repository);
         drop(db);
         let db = Database::open(path).await.unwrap();
 
-        let loaded = State::load(&db).await.unwrap();
+        let loaded = Repository::load_state(&db).await.unwrap();
         assert_eq!(loaded.records.len(), 1);
         assert_eq!(loaded.last_daily_run.as_deref(), Some("2026-01-01"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -238,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn empty_database_loads_empty() {
         let db = Database::open(":memory:").await.unwrap();
-        let state = State::load(&db).await.unwrap();
+        let state = Repository::load_state(&db).await.unwrap();
         assert!(state.records.is_empty());
     }
 }

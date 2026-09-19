@@ -57,17 +57,36 @@ fn parse_extinf_duration(line: &str) -> Option<f64> {
         .filter(|&d| d > 0.0)
 }
 
-/// Parse a `BYTERANGE` attribute (`"82112@752"`, or `"82112"` when the range
-/// continues from the previous one).
-fn parse_byterange_attr(value: &str, last_end: Option<u64>) -> Option<(u64, u64)> {
-    let value = value.trim().trim_matches('"');
+/// Parse an unquoted `BYTERANGE` value (`82112@752`, or `82112` when the
+/// range continues from the previous one).
+fn parse_byterange_attr(value: &str, last_end: Option<u64>) -> Result<(u64, u64), &'static str> {
+    let value = value.trim();
     let mut parts = value.split('@');
-    let len = parts.next()?.trim().parse::<u64>().ok()?;
-    let start = match parts.next() {
-        Some(s) if !s.trim().is_empty() => s.trim().parse::<u64>().ok()?,
-        _ => last_end.unwrap_or(0),
+    let decimal = |value: &str| {
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("invalid HLS byte range");
+        }
+        value.parse::<u64>().map_err(|_| "invalid HLS byte range")
     };
-    Some((start, len))
+    let len = decimal(parts.next().ok_or("invalid HLS byte range")?)?;
+    let start = match parts.next() {
+        Some(value) => decimal(value)?,
+        None => last_end.unwrap_or(0),
+    };
+    if parts.next().is_some() {
+        return Err("invalid HLS byte range");
+    }
+    byte_range_end(start, len)?;
+    Ok((start, len))
+}
+
+/// Exclusive end, shared by playlist continuation and HTTP range validation.
+pub(crate) fn byte_range_end(start: u64, length: u64) -> Result<u64, &'static str> {
+    start
+        .checked_add(length)
+        .filter(|_| length > 0)
+        .ok_or("invalid HLS byte range")
 }
 
 /// Extract a quoted attribute such as `URI="init.mp4"`.
@@ -140,10 +159,29 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
                 let attrs = line.strip_prefix("#EXT-X-MAP:").unwrap_or_default().trim();
                 if let Some(uri) = extract_attr(attrs, "URI") {
                     let resolved = base_url.join(&uri)?;
-                    let range = extract_attr(attrs, "BYTERANGE")
-                        .and_then(|v| parse_byterange_attr(&v, last_byterange_end));
+                    let mut range = None;
+                    let mut quoted = false;
+                    for attr in attrs.split(|c| {
+                        if c == '"' {
+                            quoted = !quoted;
+                        }
+                        c == ',' && !quoted
+                    }) {
+                        let (name, value) = attr.split_once('=').unwrap_or((attr, ""));
+                        if name.trim() == "BYTERANGE" {
+                            if range.is_some() {
+                                return Err("duplicate HLS byte range".into());
+                            }
+                            let value = value
+                                .trim()
+                                .strip_prefix('"')
+                                .and_then(|v| v.strip_suffix('"'))
+                                .ok_or("invalid HLS byte range")?;
+                            range = Some(parse_byterange_attr(value, last_byterange_end)?);
+                        }
+                    }
                     if let Some((start, len)) = range {
-                        last_byterange_end = Some(start + len);
+                        last_byterange_end = Some(byte_range_end(start, len)?);
                     }
                     if key_url.is_some() && iv.is_none() {
                         return Err("encrypted HLS init segment requires an explicit IV".into());
@@ -166,10 +204,9 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
                 }
             } else if line.starts_with("#EXT-X-BYTERANGE") {
                 let value = line.strip_prefix("#EXT-X-BYTERANGE:").unwrap_or_default();
-                if let Some(range) = parse_byterange_attr(value, last_byterange_end) {
-                    last_byterange_end = Some(range.0 + range.1);
-                    pending_byterange = Some(range);
-                }
+                let range = parse_byterange_attr(value, last_byterange_end)?;
+                last_byterange_end = Some(byte_range_end(range.0, range.1)?);
+                pending_byterange = Some(range);
             }
         } else {
             segments.push(Segment {
@@ -335,6 +372,79 @@ mod tests {
 
     fn base() -> Url {
         Url::parse("https://cdn.example.com/video/index.m3u8").unwrap()
+    }
+
+    #[test]
+    fn rejects_zero_overflow_and_malformed_byte_ranges() {
+        for value in [
+            "0",
+            "0@1",
+            "1@18446744073709551615",
+            "2@18446744073709551614",
+            "18446744073709551616@0",
+            "1@18446744073709551616",
+            "1@",
+            "1@2@3",
+            "-1@0",
+            "+1@0",
+            "1@-1",
+            "abc",
+            "",
+            "\"1@0\"",
+        ] {
+            let text = format!("#EXTM3U\n#EXT-X-BYTERANGE:{value}\na.ts\n");
+            assert!(
+                parse_media_m3u8(&text, &base()).is_err(),
+                "accepted segment {value:?}"
+            );
+            let text = format!("#EXTM3U\n#EXT-X-MAP:URI=\"a.mp4\",BYTERANGE=\"{value}\"\na.ts\n");
+            assert!(
+                parse_media_m3u8(&text, &base()).is_err(),
+                "accepted map {value:?}"
+            );
+        }
+        for attr in [
+            "BYTERANGE",
+            "BYTERANGE=",
+            "BYTERANGE=1@0",
+            "BYTERANGE=\"1@0",
+            "BYTERANGE=\"1@0\"junk",
+            "BYTERANGE=\"1@0\",BYTERANGE=\"2@0\"",
+        ] {
+            let text = format!("#EXTM3U\n#EXT-X-MAP:URI=\"a.mp4\",{attr}\na.ts\n");
+            assert!(parse_media_m3u8(&text, &base()).is_err(), "accepted {attr}");
+        }
+        let text =
+            "#EXTM3U\n#EXT-X-BYTERANGE:18446744073709551615@0\na.ts\n#EXT-X-BYTERANGE:1\na.ts\n";
+        assert!(
+            parse_media_m3u8(text, &base()).is_err(),
+            "implicit continuation overflow"
+        );
+    }
+
+    #[test]
+    fn valid_byte_range_boundaries_keep_cache_encoding_and_continuation() {
+        let text = "#EXTM3U\n#EXT-X-MAP:URI=\"a.mp4\",BYTERANGE=\"4@2\"\n#EXT-X-BYTERANGE:3\na.mp4\n#EXT-X-BYTERANGE:1@18446744073709551614\na.mp4\n";
+        let info = parse_media_m3u8(text, &base()).unwrap();
+        assert_eq!(info.init_segment.unwrap().byte_range, Some((2, 4)));
+        assert_eq!(info.segments[0].byte_range, Some((6, 3)));
+        assert_eq!(info.segments[1].byte_range, Some((u64::MAX - 1, 1)));
+        assert_eq!(
+            serde_json::to_string(&info.segments[0]).unwrap(),
+            r#"{"url":"https://cdn.example.com/video/a.mp4","byte_range":[6,3],"encryption":null}"#
+        );
+        assert_eq!(
+            parse_byterange_attr("18446744073709551615@0", None),
+            Ok((0, u64::MAX))
+        );
+        assert_eq!(parse_byterange_attr("3", None), Ok((0, 3)));
+        // A comma inside a quoted URI is not a new attribute.
+        let info = parse_media_m3u8(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"a,BYTERANGE=invalid.mp4\",BYTERANGE=\"3@0\"\na.mp4\n",
+            &base(),
+        )
+        .unwrap();
+        assert_eq!(info.init_segment.unwrap().byte_range, Some((0, 3)));
     }
 
     #[test]

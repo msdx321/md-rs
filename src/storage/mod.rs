@@ -2,6 +2,139 @@
 pub mod jav;
 pub mod p91;
 pub mod telegram;
+#[cfg(test)]
+mod tests {
+    //! Cross-provider persistence regressions using only a fresh synthetic database.
+    use super::{Database, jav, p91, video::Record};
+
+    fn record(id: &str, status: &str, finished_at: String) -> Record {
+        Record {
+            id: id.into(),
+            url: format!("https://example.test/{id}"),
+            title: id.into(),
+            rank: Some(1),
+            status: status.into(),
+            path: format!("/synthetic/{id}.mp4"),
+            size: 10,
+            finished_at,
+            error: None,
+        }
+    }
+
+    async fn record_ids(db: &Database, query: &str) -> Vec<String> {
+        let connection = db.connection().await;
+        let mut rows = connection.query(query, ()).await.unwrap();
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            ids.push(row.get(0).unwrap());
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn clear_history_resets_each_delete_and_reload_keeps_provider_tables_isolated() {
+        let dir = std::env::temp_dir().join(format!(
+            "md-rs-history-clear-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("synthetic.db");
+        let db = Database::open(&path).await.unwrap();
+        let jav = jav::Repository::load(db.clone()).await.unwrap();
+        let p91 = p91::Repository::load(db.clone()).await.unwrap();
+        let now = chrono::Utc::now();
+        let recent = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let fixtures = [
+            record("recent-1", "completed", recent.clone()),
+            record("recent-2", "failed", recent.clone()),
+            record("recent-3", "other-status", recent.clone()),
+            record(
+                "old",
+                "completed",
+                (now - chrono::Duration::days(30)).to_rfc3339(),
+            ),
+            record(
+                "future",
+                "completed",
+                (now + chrono::Duration::days(30)).to_rfc3339(),
+            ),
+            record("invalid", "completed", "not-a-date".into()),
+        ];
+        for fixture in fixtures {
+            jav.upsert_record(fixture.clone()).await.unwrap();
+            p91.upsert_record(fixture).await.unwrap();
+        }
+        jav.mark_daily_run("2026-01-01").await.unwrap();
+        p91.mark_daily_run("2026-01-02").await.unwrap();
+        let p91_history = serde_json::to_value(p91.history(7)).unwrap();
+        assert_eq!(p91.history_summary(7).completed, 1);
+        assert_eq!(p91.history_summary(7).failed, 2);
+
+        assert_eq!(jav.clear_history(7).await.unwrap(), 3);
+        assert!(jav.history(7).is_empty());
+        assert!(!jav.is_completed("recent-1"));
+        assert_eq!(serde_json::to_value(p91.history(7)).unwrap(), p91_history);
+        drop(jav);
+        drop(p91);
+        drop(db);
+
+        // New connection and caches expose missed deletes from prepared-statement reuse.
+        let db = Database::open(&path).await.unwrap();
+        let jav = jav::Repository::load(db.clone()).await.unwrap();
+        let p91 = p91::Repository::load(db.clone()).await.unwrap();
+        assert!(jav.history(7).is_empty());
+        assert_eq!(serde_json::to_value(p91.history(7)).unwrap(), p91_history);
+        assert_eq!(
+            record_ids(&db, "SELECT id FROM jav_records ORDER BY id").await,
+            ["future", "invalid", "old"]
+        );
+        for id in ["old", "future", "invalid"] {
+            assert!(jav.is_completed(id));
+            assert!(p91.is_completed(id));
+        }
+        // Same key in the opposite table must survive the second provider's clear.
+        jav.upsert_record(record("recent-1", "completed", recent))
+            .await
+            .unwrap();
+        let jav_history = serde_json::to_value(jav.history(7)).unwrap();
+        assert_eq!(p91.clear_history(7).await.unwrap(), 3);
+        assert_eq!(p91.clear_history(7).await.unwrap(), 0);
+        assert!(p91.history(7).is_empty());
+        assert_eq!(serde_json::to_value(jav.history(7)).unwrap(), jav_history);
+        drop(jav);
+        drop(p91);
+        drop(db);
+
+        let db = Database::open(&path).await.unwrap();
+        let jav = jav::Repository::load(db.clone()).await.unwrap();
+        let p91 = p91::Repository::load(db.clone()).await.unwrap();
+        assert_eq!(serde_json::to_value(jav.history(7)).unwrap(), jav_history);
+        assert!(p91.history(7).is_empty());
+        assert!(!p91.is_completed("recent-1"));
+        assert_eq!(
+            record_ids(&db, "SELECT id FROM p91_records ORDER BY id").await,
+            ["future", "invalid", "old"]
+        );
+        assert_eq!(
+            jav.history_summary(7).last_daily_run.as_deref(),
+            Some("2026-01-01")
+        );
+        assert_eq!(
+            p91.history_summary(7).last_daily_run.as_deref(),
+            Some("2026-01-02")
+        );
+        drop(jav);
+        drop(p91);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+mod video;
 use std::{path::Path, sync::Arc};
 
 use anyhow::Context;

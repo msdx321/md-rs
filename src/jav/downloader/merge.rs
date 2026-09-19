@@ -112,6 +112,7 @@ pub(super) fn merge_segments(
     info: &M3u8Info,
     final_path: &Path,
     running: impl Fn() -> bool,
+    commit: impl Fn() -> bool,
 ) -> anyhow::Result<PathBuf> {
     let video = assemble_track(temp_dir, info, &running)?;
     let audio = info
@@ -222,6 +223,7 @@ pub(super) fn merge_segments(
     validate_output(staged.path(), Some(info.total_duration))?;
     anyhow::ensure!(running(), "merge interrupted");
     staged.as_file().sync_all()?;
+    anyhow::ensure!(commit(), "merge interrupted before publication");
     staged
         .persist(final_path)
         .context("cannot publish merged MP4")?;

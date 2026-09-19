@@ -90,7 +90,7 @@ pub async fn resolve(
                     card.vid
                 );
                 if attempt == 0 {
-                    session.reset();
+                    session.reset(fetch)?;
                     session
                         .ensure(&cfg.popular_url(1), &referer, fetch)
                         .await

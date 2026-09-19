@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 
+use crate::configuration::patch::merge_json;
 use crate::jav::app::{AppCtx, TaskInfo, TaskState};
 use crate::jav::config::Config;
 use crate::jav::scheduler;
@@ -87,11 +88,7 @@ async fn status(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
 fn status_snapshot(ctx: &AppCtx) -> Value {
     let cfg = ctx.config();
     let history = ctx.history_summary();
-    let tasks = ctx.tasks();
-    let active = tasks
-        .iter()
-        .filter(|t| t.state == TaskState::Running)
-        .count();
+    let active = ctx.running_task_count();
 
     let snap = ctx.cookie_snapshot();
     json!({
@@ -178,19 +175,6 @@ async fn put_config(
     ctx.update_config(cfg.clone()).await?;
     log::info!("configuration updated via the web UI");
     Ok(Json(cfg))
-}
-
-/// Recursively overlay `patch` onto `base`; objects merge, everything else
-/// replaces. `null` removes an optional value.
-fn merge_json(base: &mut Value, patch: Value) {
-    match (base, patch) {
-        (Value::Object(base), Value::Object(patch)) => {
-            for (key, value) in patch {
-                merge_json(base.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (slot, value) => *slot = value,
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,16 +330,23 @@ async fn start_download(
         rank: req.rank,
     };
 
+    if ctx.jobs.is_closed() {
+        return Err(ApiError::bad_request(
+            "service shutting down; download rejected",
+        ));
+    }
     let mut info = TaskInfo::new(&card.id, &card.url);
     info.title = card.title.clone();
-    if !ctx.register_task(info) {
+    let Some(request) = ctx.register_task(info) else {
         return Ok(Json(json!({ "status": "already_running", "id": id })));
-    }
+    };
 
     let ctx_for_task = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        crate::jav::downloader::download_video(ctx_for_task, card).await;
-    });
+    ctx.jobs
+        .spawn(async move {
+            crate::jav::downloader::download_video(ctx_for_task, card, request).await;
+        })
+        .ok_or_else(|| ApiError::bad_request("service shutting down; download rejected"))?;
 
     Ok(Json(json!({ "status": "started", "id": id })))
 }
@@ -364,22 +355,13 @@ async fn pause_task(
     State(ctx): State<Arc<AppCtx>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let task = ctx
-        .task(&id)
+    ctx.task(&id)
         .ok_or_else(|| ApiError::not_found("no such task"))?;
-    if !matches!(task.state, TaskState::Running | TaskState::Queued) {
-        return Err(ApiError::bad_request("task is not running or queued"));
+    if !ctx.stop_task(&id, false) {
+        return Err(ApiError::bad_request(
+            "task is finalizing or is not running or queued; pause rejected",
+        ));
     }
-    ctx.update_task(&id, |t| {
-        t.state = TaskState::Paused;
-        if task.state == TaskState::Queued {
-            t.phase = "paused".into();
-            t.message = "paused by user".into();
-        } else {
-            t.phase = "pausing".into();
-            t.message = "pausing…".into();
-        }
-    });
     Ok(Json(json!({ "status": "pausing", "id": id })))
 }
 
@@ -397,22 +379,13 @@ async fn cancel_task(
     State(ctx): State<Arc<AppCtx>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let task = ctx
-        .task(&id)
+    ctx.task(&id)
         .ok_or_else(|| ApiError::not_found("no such task"))?;
-    if task.is_terminal() {
-        return Err(ApiError::bad_request("task is already finished"));
+    if !ctx.stop_task(&id, true) {
+        return Err(ApiError::bad_request(
+            "task is finalizing or already finished; cancellation rejected",
+        ));
     }
-    ctx.update_task(&id, |t| {
-        t.state = TaskState::Cancelled;
-        if task.state == TaskState::Queued {
-            t.phase = "cancelled".into();
-            t.message = "cancelled by user".into();
-        } else {
-            t.phase = "cancelling".into();
-            t.message = "cancelling…".into();
-        }
-    });
     Ok(Json(json!({ "status": "cancelling", "id": id })))
 }
 
@@ -428,32 +401,44 @@ async fn dismiss_task(
         Some(task) if !task.is_terminal() => Err(ApiError::bad_request(
             "cancel the task before dismissing it",
         )),
-        Some(_) => {
-            ctx.drop_task(&id);
-            Ok(Json(json!({ "status": "dismissed", "id": id })))
-        }
+        Some(_) if ctx.drop_task(&id) => Ok(Json(json!({ "status": "dismissed", "id": id }))),
+        Some(_) => Err(ApiError::bad_request(
+            "cancel the task before dismissing it",
+        )),
         None => Err(ApiError::not_found("no such task")),
     }
 }
 
-async fn run_daily(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
+async fn run_daily(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
     let ctx_for_job = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        if let Err(e) = scheduler::run_daily(ctx_for_job, "manual").await {
-            log::error!("manual daily run failed: {e:#}");
-        }
-    });
-    Json(json!({ "status": "started" }))
+    ctx.jobs
+        .spawn(async move {
+            if let Err(e) = scheduler::run_daily(ctx_for_job, "manual").await {
+                log::error!("manual daily run failed: {e:#}");
+            }
+        })
+        .ok_or_else(|| ApiError::bad_request("service shutting down; daily run rejected"))?;
+    Ok(Json(json!({ "status": "started" })))
 }
 
-async fn pause_all(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
-    scheduler::pause_active(&ctx);
-    Json(json!({ "status": "paused_all" }))
+async fn pause_all(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
+    let rejected = scheduler::pause_active(&ctx);
+    if rejected > 0 {
+        return Err(ApiError::bad_request(format!(
+            "stop rejected for {rejected} finalizing task(s); other eligible tasks were stopped"
+        )));
+    }
+    Ok(Json(json!({ "status": "paused_all" })))
 }
 
-async fn cancel_all(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
-    scheduler::cancel_active(&ctx);
-    Json(json!({ "status": "cancelled_all" }))
+async fn cancel_all(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
+    let rejected = scheduler::cancel_active(&ctx);
+    if rejected > 0 {
+        return Err(ApiError::bad_request(format!(
+            "stop rejected for {rejected} finalizing task(s); other eligible tasks were stopped"
+        )));
+    }
+    Ok(Json(json!({ "status": "cancelled_all" })))
 }
 
 async fn resume_all(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
@@ -529,5 +514,49 @@ mod tests {
         let mut base = json!({"proxy": "http://x:1"});
         merge_json(&mut base, json!({"proxy": null}));
         assert_eq!(base, json!({"proxy": null}));
+    }
+    #[tokio::test]
+    async fn terminal_commit_stop_routes_return_honest_existing_error_envelope() {
+        let common = tokio::sync::watch::channel(crate::configuration::app::Config::default()).1;
+        let ctx = Arc::new(
+            AppCtx::new(
+                Config {
+                    browser_enabled: false,
+                    ..Default::default()
+                },
+                crate::storage::Database::open(":memory:").await.unwrap(),
+                common.clone(),
+                Arc::new(crate::runtime::download_limiter::DownloadLimiter::new(
+                    common,
+                )),
+            )
+            .await
+            .unwrap(),
+        );
+        let mut task = TaskInfo::new("fixture", "http://127.0.0.1/fixture");
+        task.state = TaskState::Running;
+        assert!(ctx.register_task(task).is_some());
+        assert!(ctx.begin_terminal_commit("fixture"));
+        let responses = [
+            pause_task(State(ctx.clone()), Path("fixture".into()))
+                .await
+                .into_response(),
+            cancel_task(State(ctx.clone()), Path("fixture".into()))
+                .await
+                .into_response(),
+            pause_all(State(ctx.clone())).await.into_response(),
+            cancel_all(State(ctx.clone())).await.into_response(),
+        ];
+        for response in responses {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            let error = body["error"].as_str().unwrap();
+            assert!(error.contains("finalizing"));
+            assert!(error.contains("rejected"));
+        }
+        assert_eq!(ctx.task_state("fixture"), Some(TaskState::Running));
     }
 }

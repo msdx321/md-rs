@@ -8,8 +8,8 @@
 //! share a cookie jar and the listing must be visited once per session before
 //! any video page is resolved.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wreq_util::Profile;
@@ -25,11 +25,10 @@ pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_
 const ACCEPT_HTML: &str =
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
 
-/// Build the shared client over the session's cookie jar.
-pub fn build_client(jar: Arc<wreq::cookie::Jar>) -> anyhow::Result<wreq::Client> {
+/// Build the shared transport. Each request supplies its session generation's jar.
+pub fn build_client() -> anyhow::Result<wreq::Client> {
     wreq::Client::builder()
         .emulation(EMULATION)
-        .cookie_provider(jar)
         .redirect(wreq::redirect::Policy::limited(10))
         .connect_timeout(Duration::from_secs(60))
         .build()
@@ -45,25 +44,47 @@ pub fn origin_of(url: &str) -> Option<String> {
 
 /// A request factory bundling the client with the site credentials.
 ///
-/// Cheap to clone: the client and jar are shared behind the scenes, so a
-/// request made by a long-running download sees cookies set in the meantime.
+/// A fetcher binds one operation to a cookie generation. Responses from retired
+/// operations can only mutate their retired jar, never replacement credentials.
 #[derive(Clone)]
 pub struct Fetcher {
     client: wreq::Client,
     user_agent: String,
+    session: Session,
+    generation: Arc<SessionGeneration>,
 }
 
 impl Fetcher {
-    pub fn new(client: wreq::Client, user_agent: String) -> Self {
-        Self { client, user_agent }
+    pub fn new(client: wreq::Client, user_agent: String, session: &Session) -> Self {
+        Self {
+            client,
+            user_agent,
+            session: session.clone(),
+            generation: session
+                .current
+                .lock()
+                .expect("session lock poisoned")
+                .clone(),
+        }
     }
 
-    fn apply(&self, mut req: wreq::RequestBuilder) -> wreq::RequestBuilder {
+    pub(crate) fn check_current(&self) -> anyhow::Result<()> {
+        let current = self.session.current.lock().expect("session lock poisoned");
+        anyhow::ensure!(
+            Arc::ptr_eq(&current, &self.generation),
+            "91Porn session changed; retry the operation"
+        );
+        Ok(())
+    }
+
+    fn apply(&self, mut req: wreq::RequestBuilder) -> anyhow::Result<wreq::RequestBuilder> {
+        self.check_current()?;
+        req = req.cookie_provider(self.generation.jar.clone());
         let ua = self.user_agent.trim();
         if !ua.is_empty() {
             req = req.header("user-agent", ua);
         }
-        req
+        Ok(req)
     }
 
     /// GET a URL and decode the body as text.
@@ -76,9 +97,10 @@ impl Fetcher {
         if let Some(referer) = referer {
             req = req.header("referer", referer);
         }
-        let resp = self.apply(req).send().await?;
+        let resp = self.apply(req)?.send().await?;
         let status = resp.status();
         let body = resp.text().await?;
+        self.check_current()?;
         if !status.is_success() {
             anyhow::bail!("HTTP {status} for {url}");
         }
@@ -103,7 +125,7 @@ impl Fetcher {
         if let Some(referer) = origin_of(origin) {
             req = req.header("referer", referer);
         }
-        req = self.apply(req);
+        req = self.apply(req)?;
         if let Some((start, end)) = range {
             let header = match end {
                 Some(end) => format!("bytes={start}-{end}"),
@@ -112,6 +134,7 @@ impl Fetcher {
             req = req.header("range", header);
         }
         let resp = tokio::time::timeout(Duration::from_secs(60), req.send()).await??;
+        self.check_current()?;
         let status = resp.status();
         if !status.is_success() && status != wreq::StatusCode::RANGE_NOT_SATISFIABLE {
             anyhow::bail!("media request for {url}: HTTP {status}");
@@ -133,91 +156,107 @@ impl Fetcher {
 ///
 /// The site's session cookie is what makes `?viewkey=` mean anything, so a
 /// cold session has to be warmed by one listing request before videos resolve.
+#[derive(Clone)]
 pub struct Session {
+    current: Arc<Mutex<Arc<SessionGeneration>>>,
+}
+
+struct SessionGeneration {
     jar: Arc<wreq::cookie::Jar>,
     warmed: AtomicBool,
     warm: tokio::sync::Mutex<()>,
 }
 
-impl Session {
-    pub fn new() -> Self {
+impl Default for SessionGeneration {
+    fn default() -> Self {
         Self {
             jar: Arc::new(wreq::cookie::Jar::default()),
             warmed: AtomicBool::new(false),
             warm: tokio::sync::Mutex::new(()),
         }
     }
+}
 
-    pub fn jar(&self) -> Arc<wreq::cookie::Jar> {
-        self.jar.clone()
+impl Session {
+    pub fn new() -> Self {
+        Self {
+            current: Arc::new(Mutex::new(Arc::new(SessionGeneration::default()))),
+        }
     }
 
-    /// Seed the configured account cookie (`name=value; …`) for the site.
-    ///
-    /// These live in the jar rather than a request header so the session
-    /// cookie the site sets later is sent alongside them instead of replacing
-    /// them.
+    /// Replace credentials atomically. Never clear/reuse a jar still owned by
+    /// an in-flight request: its late Set-Cookie would resurrect the old session.
     pub fn set_configured_cookies(&self, cookie: Option<&str>, site_base: &str) {
-        self.jar.clear();
-        self.reset();
-        let Some(cookie) = cookie else {
-            return;
-        };
-        let cookie = cookie
-            .trim()
-            .strip_prefix("Cookie:")
-            .or_else(|| cookie.trim().strip_prefix("cookie:"))
-            .unwrap_or_else(|| cookie.trim())
-            .trim();
-        let site = site_base.trim();
-        if cookie.is_empty() || site.is_empty() {
-            return;
-        }
-        for pair in cookie.split([';', '\n', '\r']) {
-            let pair = pair.trim();
-            if pair.is_empty() || !pair.contains('=') {
-                continue;
+        let generation = SessionGeneration::default();
+        if let Some(cookie) = cookie {
+            let cookie = cookie
+                .trim()
+                .strip_prefix("Cookie:")
+                .or_else(|| cookie.trim().strip_prefix("cookie:"))
+                .unwrap_or_else(|| cookie.trim())
+                .trim();
+            let site = site_base.trim();
+            if !site.is_empty() {
+                for pair in cookie.split([';', '\n', '\r']) {
+                    let pair = pair.trim();
+                    if !pair.is_empty() && pair.contains('=') {
+                        generation.jar.add(format!("{pair}; Path=/"), site);
+                    }
+                }
             }
-            self.jar.add(format!("{pair}; Path=/"), site);
         }
+        *self.current.lock().expect("session lock poisoned") = Arc::new(generation);
     }
 
-    /// True once a listing request has established the site session.
+    /// True once the current cookie generation has established a site session.
     pub fn is_warm(&self) -> bool {
-        self.warmed.load(Ordering::Acquire)
+        self.current
+            .lock()
+            .expect("session lock poisoned")
+            .warmed
+            .load(Ordering::Acquire)
     }
 
-    /// Record that a listing request has already run this session.
-    pub fn mark_warm(&self) {
-        self.warmed.store(true, Ordering::Release);
+    /// Only the generation that actually performed the listing can become warm.
+    pub fn mark_warm(&self, fetch: &Fetcher) -> anyhow::Result<()> {
+        let current = self.current.lock().expect("session lock poisoned");
+        anyhow::ensure!(
+            Arc::ptr_eq(&current, &fetch.generation),
+            "91Porn session changed; retry the operation"
+        );
+        current.warmed.store(true, Ordering::Release);
+        Ok(())
     }
 
-    /// Forget the warm-up so the next resolve visits the listing again.
-    pub fn reset(&self) {
-        self.warmed.store(false, Ordering::Release);
+    /// A stale resolver must not invalidate a replacement session.
+    pub fn reset(&self, fetch: &Fetcher) -> anyhow::Result<()> {
+        let current = self.current.lock().expect("session lock poisoned");
+        anyhow::ensure!(
+            Arc::ptr_eq(&current, &fetch.generation),
+            "91Porn session changed; retry the operation"
+        );
+        current.warmed.store(false, Ordering::Release);
+        Ok(())
     }
 
-    /// Visit the listing once so the site starts honouring `?viewkey=`.
-    ///
-    /// Concurrent callers share a single request; later ones see the flag and
-    /// return immediately.
+    /// Concurrent callers within one generation share a single warm-up request.
+    /// New credentials do not wait for retired network requests to finish.
     pub async fn ensure(
         &self,
         listing_url: &str,
         referer: &str,
         fetch: &Fetcher,
     ) -> anyhow::Result<()> {
-        if self.warmed.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let _guard = self.warm.lock().await;
-        if self.warmed.load(Ordering::Acquire) {
+        fetch.check_current()?;
+        let generation = &fetch.generation;
+        let _guard = generation.warm.lock().await;
+        fetch.check_current()?;
+        if generation.warmed.load(Ordering::Acquire) {
             return Ok(());
         }
         log::debug!("warming the 91Porn session via {listing_url}");
         fetch.text(listing_url, Some(referer)).await?;
-        self.warmed.store(true, Ordering::Release);
-        Ok(())
+        self.mark_warm(fetch)
     }
 }
 
@@ -245,6 +284,187 @@ fn same_site(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
 
+    impl Session {
+        fn jar(&self) -> Arc<wreq::cookie::Jar> {
+            self.current.lock().unwrap().jar.clone()
+        }
+    }
+
+    fn fetcher(session: &Session) -> Fetcher {
+        Fetcher::new(
+            wreq::Client::builder()
+                .no_proxy()
+                .redirect(wreq::redirect::Policy::limited(10))
+                .build()
+                .unwrap(),
+            String::new(),
+            session,
+        )
+    }
+
+    #[tokio::test]
+    async fn obsolete_warmup_cannot_populate_or_warm_reconfigured_cookie_session() {
+        use crate::test_support::http::{Server, response};
+        // Exercise both replacing an account and removing its credentials.
+        for replacement in [Some("account=new"), None] {
+            let mut server = Server::new().await;
+            let session = Session::new();
+            session.set_configured_cookies(Some("account=old"), &server.url);
+            let old = fetcher(&session);
+            let old_jar = session.jar();
+            let owner = session.clone();
+            let fetch = old.clone();
+            let url = server.url.clone();
+            let warming = tokio::spawn(async move { owner.ensure(&url, &url, &fetch).await });
+            let held = server.next().await;
+            assert!(held.head.contains("account=old"));
+
+            session.set_configured_cookies(replacement, &server.url);
+            assert!(!session.is_warm());
+            let new = fetcher(&session);
+            let new_jar = session.jar();
+            assert!(!Arc::ptr_eq(&old_jar, &new_jar));
+            assert!(session.mark_warm(&old).is_err());
+            assert!(session.reset(&old).is_err());
+            let owner = session.clone();
+            let fetch = new.clone();
+            let url = server.url.clone();
+            let current = tokio::spawn(async move { owner.ensure(&url, &url, &fetch).await });
+            let request = server.next().await;
+            assert!(!request.head.contains("account=old"));
+            assert_eq!(request.head.contains("account=new"), replacement.is_some());
+            drop(request.respond(response(
+                "200 OK",
+                "Set-Cookie: CLIPSHARE=new; Path=/\r\n",
+                b"new listing",
+            )));
+            current.await.unwrap().unwrap();
+            assert!(
+                session.is_warm(),
+                "new session warms without waiting for old request"
+            );
+
+            // A late redirect also keeps its Set-Cookie and follow-up cookies in
+            // the retired jar; the replacement session is never its provider.
+            drop(held.respond(response(
+                "302 Found",
+                "Location: /obsolete\r\nSet-Cookie: CLIPSHARE=old; Path=/\r\n",
+                b"",
+            )));
+            let redirected = server.next().await;
+            assert!(redirected.head.contains("CLIPSHARE=old"));
+            assert!(redirected.head.contains("account=old"));
+            assert!(!redirected.head.contains("account=new"));
+            drop(redirected.respond(response(
+                "200 OK",
+                "Set-Cookie: account=resurrected; Path=/\r\n",
+                b"old listing",
+            )));
+            assert!(
+                warming
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("session changed")
+            );
+            assert_eq!(
+                old_jar.get("account", &server.url).unwrap().value(),
+                "resurrected"
+            );
+            assert_eq!(
+                new_jar.get("CLIPSHARE", &server.url).unwrap().value(),
+                "new"
+            );
+            assert_eq!(
+                new_jar
+                    .get("account", &server.url)
+                    .map(|c| c.value().to_string()),
+                replacement.map(|_| "new".into())
+            );
+            assert!(session.is_warm());
+            assert!(session.reset(&old).is_err());
+            assert!(session.is_warm());
+            assert!(old.text(&server.url, None).await.is_err());
+            assert!(
+                session
+                    .ensure(&server.url, &server.url, &old)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_listing_cannot_mark_a_replacement_generation_warm() {
+        use crate::test_support::http::{Server, response};
+        let mut server = Server::new().await;
+        let session = Session::new();
+        let old = fetcher(&session);
+        let fetch = old.clone();
+        let url = server.url.clone();
+        let listing = tokio::spawn(async move { fetch.text(&url, None).await });
+        drop(
+            server
+                .next()
+                .await
+                .respond(response("200 OK", "", b"listing")),
+        );
+        listing.await.unwrap().unwrap();
+        session.set_configured_cookies(Some("account=new"), &server.url);
+        assert!(session.mark_warm(&old).is_err());
+        assert!(!session.is_warm());
+        let new = fetcher(&session);
+        session.mark_warm(&new).unwrap();
+        session.reset(&new).unwrap();
+        assert!(!session.is_warm());
+    }
+
+    #[tokio::test]
+    async fn concurrent_warmers_share_one_request_and_failures_remain_cold() {
+        use crate::test_support::http::{Server, response};
+        let mut server = Server::new().await;
+        let session = Session::new();
+        let fetch = fetcher(&session);
+        let owner = session.clone();
+        let failed = fetch.clone();
+        let url = server.url.clone();
+        let run = tokio::spawn(async move { owner.ensure(&url, &url, &failed).await });
+        drop(
+            server
+                .next()
+                .await
+                .respond(response("500 Internal Server Error", "", b"error")),
+        );
+        assert!(run.await.unwrap().is_err());
+        assert!(!session.is_warm());
+
+        let mut jobs = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let owner = session.clone();
+            let fetch = fetch.clone();
+            let url = server.url.clone();
+            jobs.spawn(async move { owner.ensure(&url, &url, &fetch).await });
+        }
+        drop(server.next().await.respond(response(
+            "200 OK",
+            "Set-Cookie: CLIPSHARE=current; Path=/\r\n",
+            b"listing",
+        )));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(result) = jobs.join_next().await {
+                result.unwrap().unwrap();
+            }
+        })
+        .await
+        .expect("duplicate warm-up request was sent");
+        assert!(session.is_warm());
+        assert_eq!(
+            session.jar().get("CLIPSHARE", &server.url).unwrap().value(),
+            "current"
+        );
+    }
+
     #[test]
     fn same_site_matches_subdomains_only() {
         assert!(same_site(
@@ -266,7 +486,7 @@ mod tests {
     fn configured_cookies_land_in_the_jar() {
         let session = Session::new();
         assert!(!session.is_warm());
-        session.mark_warm();
+        session.mark_warm(&fetcher(&session)).unwrap();
         assert!(session.is_warm());
         session.set_configured_cookies(Some("PHPSESSID=abc; userid=7"), "https://www.91porn.com");
         assert!(!session.is_warm(), "new credentials invalidate the session");

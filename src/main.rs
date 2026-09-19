@@ -10,6 +10,9 @@ mod storage;
 mod telegram;
 mod web;
 
+#[cfg(test)]
+mod test_support;
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     logging::init();

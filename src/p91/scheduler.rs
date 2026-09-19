@@ -10,8 +10,8 @@ use tokio::task::JoinSet;
 
 use crate::p91::app::{AppCtx, TaskInfo, TaskState, now_rfc3339};
 use crate::p91::config::Config;
-use crate::p91::downloader::download_video;
-use crate::p91::source::scraper;
+use crate::p91::downloader::{download_video, download_video_with};
+use crate::p91::source::{http::Fetcher, scraper};
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct DailyReport {
@@ -24,6 +24,7 @@ pub struct DailyReport {
 
 struct LinkQueue {
     cfg: Config,
+    fetch: Fetcher,
     report: DailyReport,
     candidates: VecDeque<scraper::VideoCard>,
     queued: VecDeque<scraper::VideoCard>,
@@ -34,9 +35,10 @@ struct LinkQueue {
 }
 
 impl LinkQueue {
-    fn new(cfg: Config) -> Self {
+    fn new(cfg: Config, fetch: Fetcher) -> Self {
         Self {
             cfg,
+            fetch,
             report: DailyReport::default(),
             candidates: VecDeque::new(),
             queued: VecDeque::new(),
@@ -50,23 +52,34 @@ impl LinkQueue {
     /// Reserve only enough candidates to fill this link's remaining quota.
     /// Registration makes waiting videos visible before workers start them.
     async fn fill(&mut self, ctx: &AppCtx, stopped: &mut bool) {
-        let fetch = ctx.fetcher();
         while !*stopped
             && self.report.completed + self.in_flight + self.queued.len() < self.cfg.top_n.max(1)
         {
-            *stopped |= ctx.take_daily_cancel();
+            *stopped |= ctx.jobs.is_closed() || ctx.take_daily_cancel();
             if *stopped {
+                break;
+            }
+            if let Err(error) = self.fetch.check_current() {
+                self.error = Some(format!("{error:#}"));
+                *stopped = true;
                 break;
             }
             let Some(card) = self.candidates.pop_front() else {
                 if self.next_page > self.cfg.max_pages.max(1) || self.error.is_some() {
                     break;
                 }
-                match scraper::fetch_popular(&fetch, &self.cfg, self.next_page).await {
+                let listing = tokio::select! {
+                    biased;
+                    _ = ctx.jobs.cancelled() => { *stopped = true; break; }
+                    result = scraper::fetch_popular(&self.fetch, &self.cfg, self.next_page) => result,
+                };
+                match listing {
                     Ok(cards) => {
                         // A listing request establishes the site session.
-                        ctx.session().mark_warm();
-                        self.candidates.extend(cards);
+                        match ctx.session().mark_warm(&self.fetch) {
+                            Ok(()) => self.candidates.extend(cards),
+                            Err(error) => self.error = Some(format!("{error:#}")),
+                        }
                     }
                     Err(error) => self.error = Some(format!("{error:#}")),
                 }
@@ -110,7 +123,12 @@ pub async fn run(
             s.daily_time = timer.config.daily_time.clone();
             s.next_run_at = timer.next.map(|next| next.to_rfc3339());
         });
-        if timer.tick().await {
+        let tick = tokio::select! {
+            biased;
+            _ = ctx.jobs.cancelled() => break,
+            tick = timer.tick() => tick,
+        };
+        if tick {
             if let Err(error) = run_daily(ctx.clone(), "scheduled").await {
                 log::error!("scheduled 91Porn run failed: {error:#}");
             }
@@ -122,6 +140,9 @@ pub async fn run(
 /// Follow each listing until its quota of new downloads completes or the page
 /// limit is reached. Serialised against other daily runs by `ctx.daily_lock`.
 pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyReport> {
+    let Some(_owner) = ctx.jobs.enter() else {
+        return Ok(DailyReport::default());
+    };
     // Only one daily run at a time: a second trigger (the timer firing while a
     // manual run is still going, for instance) is dropped rather than queued.
     let _guard = match ctx.daily_lock.try_lock() {
@@ -133,7 +154,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     };
     ctx.take_daily_cancel();
 
-    let cfg = ctx.config();
+    let (cfg, fetch) = ctx.request_context();
     let mut report = DailyReport::default();
 
     ctx.set_scheduler(|s| {
@@ -145,7 +166,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     let mut links: Vec<_> = cfg
         .listing_links()
         .iter()
-        .map(|link| LinkQueue::new(cfg.for_link(link)))
+        .map(|link| LinkQueue::new(cfg.for_link(link), fetch.clone()))
         .collect();
     let target: usize = links.iter().map(|link| link.cfg.top_n.max(1)).sum();
     let limit = cfg.concurrent_videos.clamp(1, 8);
@@ -154,11 +175,11 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     let mut workers = HashMap::new();
 
     loop {
-        stopped |= ctx.take_daily_cancel();
+        stopped |= ctx.jobs.is_closed() || ctx.take_daily_cancel();
         for link in &mut links {
             link.fill(&ctx, &mut stopped).await;
         }
-        stopped |= ctx.take_daily_cancel();
+        stopped |= ctx.jobs.is_closed() || ctx.take_daily_cancel();
         while !stopped && set.len() < limit {
             let Some((index, link)) = links
                 .iter_mut()
@@ -168,10 +189,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
                 break;
             };
             let card = link.queued.pop_front().expect("queue is not empty");
-            if !ctx
-                .task(&card.id)
-                .is_some_and(|t| t.state == TaskState::Queued)
-            {
+            if ctx.task_state(&card.id) != Some(TaskState::Queued) {
                 stopped = true;
                 break;
             }
@@ -179,8 +197,10 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
             link.report.attempted += 1;
             let id = card.id.clone();
             let ctx = Arc::clone(&ctx);
+            let cfg = link.cfg.clone();
+            let fetch = link.fetch.clone();
             let worker = set.spawn(async move {
-                download_video(ctx, card).await;
+                download_video_with(ctx, card, cfg, fetch).await;
             });
             workers.insert(worker.id(), (index, id));
         }
@@ -198,9 +218,10 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
         match joined {
             Ok(_) if ctx.is_completed(&id) => link.report.completed += 1,
             Ok(_) => {
-                if ctx.task(&id).is_some_and(|task| {
-                    matches!(task.state, TaskState::Paused | TaskState::Cancelled)
-                }) {
+                if matches!(
+                    ctx.task_state(&id),
+                    Some(TaskState::Paused | TaskState::Cancelled)
+                ) {
                     stopped = true;
                 } else {
                     link.report.failed += 1;
@@ -262,7 +283,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
         summaries.join("; ")
     );
     if stopped {
-        summary.push_str("; stopped by user");
+        summary.push_str("; stopped");
     }
     log::info!("91Porn daily job finished — {summary}");
     ctx.set_scheduler(|s| {
@@ -279,31 +300,27 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
 }
 
 /// Ask every in-flight download to stop and clean up.
-pub fn cancel_active(ctx: &AppCtx) {
+pub fn cancel_active(ctx: &AppCtx) -> usize {
     ctx.request_daily_cancel();
-    for task in ctx.tasks() {
-        if !task.is_terminal() {
-            ctx.update_task(&task.id, |t| {
-                t.state = TaskState::Cancelled;
-                t.phase = "cancelled".into();
-                t.message = "cancelled by user".into();
-            });
-        }
-    }
+    ctx.tasks()
+        .into_iter()
+        .filter(|task| {
+            let accepted = ctx.stop_task(&task.id, true);
+            !accepted && matches!(task.state, TaskState::Running | TaskState::Queued)
+        })
+        .count()
 }
 
 /// Pause every in-flight download.
-pub fn pause_active(ctx: &AppCtx) {
+pub fn pause_active(ctx: &AppCtx) -> usize {
     ctx.request_daily_cancel();
-    for task in ctx.tasks() {
-        if matches!(task.state, TaskState::Running | TaskState::Queued) {
-            ctx.update_task(&task.id, |t| {
-                t.state = TaskState::Paused;
-                t.phase = "paused".into();
-                t.message = "paused by user".into();
-            });
-        }
-    }
+    ctx.tasks()
+        .into_iter()
+        .filter(|task| {
+            let accepted = ctx.stop_task(&task.id, false);
+            !accepted && matches!(task.state, TaskState::Running | TaskState::Queued)
+        })
+        .count()
 }
 
 /// Re-run every paused or failed task.
@@ -313,11 +330,10 @@ pub async fn resume_all(ctx: Arc<AppCtx>) -> usize {
         .into_iter()
         .filter(|t| matches!(t.state, TaskState::Paused | TaskState::Failed))
         .collect();
-    let count = resumable.len();
-    for task in resumable {
-        resume_task(Arc::clone(&ctx), &task.id);
-    }
-    count
+    resumable
+        .into_iter()
+        .filter(|task| resume_task(Arc::clone(&ctx), &task.id))
+        .count()
 }
 
 /// Start (or restart) the download for a known view key.
@@ -345,15 +361,20 @@ pub fn resume_task(ctx: Arc<AppCtx>, id: &str) -> bool {
         hd: false,
         original: false,
     };
-    ctx.update_task(id, |t| {
-        t.state = TaskState::Queued;
-        t.phase = "queued".into();
-        t.message = "resuming".into();
-    });
-    tokio::spawn(async move {
-        download_video(ctx, card).await;
-    });
-    true
+    let mut resumed = task;
+    resumed.state = TaskState::Queued;
+    resumed.phase = "queued".into();
+    resumed.message = "resuming".into();
+    if !ctx.register_task(resumed) {
+        return false;
+    }
+    let jobs_ctx = ctx.clone();
+    jobs_ctx
+        .jobs
+        .spawn(async move {
+            download_video(ctx, card).await;
+        })
+        .is_some()
 }
 
 #[cfg(test)]

@@ -31,13 +31,24 @@ enum Outcome {
 /// Download one video end to end, updating the task registry and the dedup
 /// ledger as it goes. Errors are reported through the task, not returned.
 pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
+    let (cfg, fetch) = ctx.request_context();
+    download_video_with(ctx, card, cfg, fetch).await;
+}
+
+/// Daily and manual submissions retain their original request binding while queued.
+pub(crate) async fn download_video_with(
+    ctx: Arc<AppCtx>,
+    card: VideoCard,
+    cfg: crate::p91::config::Config,
+    fetch: Fetcher,
+) {
+    let Some(_owner) = ctx.jobs.enter() else {
+        return;
+    };
     let id = card.id.clone();
     let Some(_slot) = ctx.download_slot(&id).await else {
         return;
     };
-    let cfg = ctx.config();
-    let fetch = ctx.fetcher();
-
     let mut started = false;
     ctx.update_task(&id, |t| {
         if t.state != TaskState::Queued {
@@ -66,13 +77,8 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
     log::debug!("[{id}] resolving prefer_hd={}", cfg.prefer_hd);
     let resolution = tokio::select! {
         biased;
-        state = stopped(&ctx, &id) => {
-            ctx.update_task(&id, |t| {
-                t.state = state;
-                t.phase = if state == TaskState::Paused { "paused" } else { "cancelled" }.into();
-                t.message = t.phase.clone();
-                t.speed_kbps = 0.0;
-            });
+        _ = stopped(&ctx, &id) => {
+            finish_stopped(&ctx, &card).await;
             return;
         }
         result = resolver::resolve(ctx.session(), &fetch, &cfg, &card) => result,
@@ -139,29 +145,39 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard) {
                 .unwrap_or(0);
             finish_completed(&ctx, &card, &title, &final_path, size).await;
         }
-        Ok(Outcome::Paused) => {
-            log::info!("[{id}] paused");
-            ctx.update_task(&id, |t| {
-                t.state = TaskState::Paused;
-                t.phase = "paused".into();
-                t.speed_kbps = 0.0;
-                t.message = "paused — resume to continue from the partial file".into();
-            });
-        }
-        Ok(Outcome::Cancelled) => {
-            log::info!("[{id}] cancelled");
-            let _ = tokio::fs::remove_file(part_path(&final_path)).await;
-            ctx.update_task(&id, |t| {
-                t.state = TaskState::Cancelled;
-                t.phase = "cancelled".into();
-                t.speed_kbps = 0.0;
-                t.message = "cancelled".into();
-            });
+        Ok(Outcome::Paused | Outcome::Cancelled) => {
+            finish_stopped(&ctx, &card).await;
         }
         Err(error) => {
             // Keep the partial file: a failed transfer is resumable.
             finish_failed(&ctx, &card, &format!("{error:#}")).await;
         }
+    }
+}
+
+/// Reconcile the latest accepted stop, including errors returned during flush.
+async fn finish_stopped(ctx: &AppCtx, card: &VideoCard) {
+    ctx.update_task(&card.id, |task| {
+        if task.state != TaskState::Cancelled {
+            task.state = TaskState::Paused;
+            task.phase = "paused".into();
+            task.message = "paused — resume to continue from the partial file".into();
+            task.speed_kbps = 0.0;
+        }
+    });
+    if control(ctx, &card.id) == TaskState::Cancelled {
+        let task = ctx.task(&card.id);
+        let path = task
+            .filter(|task| !task.path.is_empty())
+            .map(|task| PathBuf::from(task.path))
+            .unwrap_or_else(|| output_path(&ctx.config().save_path, &card.id, &card.title));
+        let _ = tokio::fs::remove_file(part_path(&path)).await;
+        ctx.update_task(&card.id, |task| {
+            task.state = TaskState::Cancelled;
+            task.phase = "cancelled".into();
+            task.message = "cancelled".into();
+            task.speed_kbps = 0.0;
+        });
     }
 }
 
@@ -182,15 +198,7 @@ async fn existing_output(path: &Path) -> Option<(PathBuf, u64)> {
 
 /// Current control state of a task (`Cancelled` when it has vanished).
 fn control(ctx: &AppCtx, id: &str) -> TaskState {
-    ctx.task(id)
-        .map(|t| {
-            if t.phase == "pausing" && t.state == TaskState::Running {
-                TaskState::Paused
-            } else {
-                t.state
-            }
-        })
-        .unwrap_or(TaskState::Cancelled)
+    ctx.task_control(id).unwrap_or(TaskState::Cancelled)
 }
 
 async fn stopped(ctx: &AppCtx, id: &str) -> TaskState {
@@ -244,6 +252,9 @@ async fn download_file(
             offset > 0 && complete == Some(offset),
             "server rejected the resume offset {offset}"
         );
+        if !ctx.begin_terminal_commit(id) {
+            return Ok(stopped_outcome(control(ctx, id)));
+        }
         tokio::fs::rename(&part, final_path).await?;
         return Ok(Outcome::Done);
     }
@@ -324,6 +335,9 @@ async fn download_file(
                     "incomplete download: {written}/{total} bytes"
                 );
             }
+            if !ctx.begin_terminal_commit(id) {
+                return Ok(stopped_outcome(control(ctx, id)));
+            }
             tokio::fs::rename(&part, final_path).await?;
             Outcome::Done
         }
@@ -358,44 +372,50 @@ async fn transfer(
     }
     let mut file = options.open(part).await?;
 
-    let mut stream = response.bytes_stream();
-    let mut changes = ctx.subscribe();
-    loop {
-        if control(ctx, id) != TaskState::Running {
-            flush(&mut file).await?;
-            return Ok(false);
-        }
-        // A state change cancels the pending read. Nothing is lost: whatever
-        // was not written yet is simply re-requested from the new file length.
-        let next = tokio::select! {
-            biased;
-            _ = changes.recv() => continue,
-            result = tokio::time::timeout(Duration::from_secs(60), stream.next()) => result,
-        };
-        let chunk = match next {
-            Err(_) => anyhow::bail!("media read timed out"),
-            Ok(None) => break,
-            Ok(Some(Err(error))) => return Err(error.into()),
-            Ok(Some(Ok(chunk))) => chunk,
-        };
-        for piece in chunk.chunks(64 * 1024) {
-            tokio::select! {
-                biased;
-                _ = stopped(ctx, id) => {
-                    flush(&mut file).await?;
-                    return Ok(false);
-                }
-                _ = ctx.download_limiter.acquire(
-                    crate::runtime::download_limiter::DownloadModule::P91,
-                    piece.len(),
-                ) => {},
+    // Tokio's file writer can still own a blocking write when write_all returns.
+    // Drain it on network/write errors too, before the file lease can be released.
+    let result = async {
+        let mut stream = response.bytes_stream();
+        let mut changes = ctx.subscribe();
+        loop {
+            if control(ctx, id) != TaskState::Running {
+                return Ok(false);
             }
-            file.write_all(piece).await?;
-            downloaded.fetch_add(piece.len() as u64, Ordering::Relaxed);
+            // A state change cancels the pending read. Nothing is lost: whatever
+            // was not written yet is simply re-requested from the new file length.
+            let next = tokio::select! {
+                biased;
+                _ = changes.recv() => continue,
+                result = tokio::time::timeout(Duration::from_secs(60), stream.next()) => result,
+            };
+            let chunk = match next {
+                Err(_) => anyhow::bail!("media read timed out"),
+                Ok(None) => break,
+                Ok(Some(Err(error))) => return Err(error.into()),
+                Ok(Some(Ok(chunk))) => chunk,
+            };
+            for piece in chunk.chunks(64 * 1024) {
+                tokio::select! {
+                    biased;
+                    _ = stopped(ctx, id) => {
+                                return Ok(false);
+                    }
+                    _ = ctx.download_limiter.acquire(
+                        crate::runtime::download_limiter::DownloadModule::P91,
+                        piece.len(),
+                    ) => {},
+                }
+                file.write_all(piece).await?;
+                downloaded.fetch_add(piece.len() as u64, Ordering::Relaxed);
+            }
         }
+        Ok::<_, anyhow::Error>(true)
     }
-    flush(&mut file).await?;
-    Ok(control(ctx, id) == TaskState::Running)
+    .await;
+    let drained = flush(&mut file).await;
+    let complete = result?;
+    drained?;
+    Ok(complete && control(ctx, id) == TaskState::Running)
 }
 
 async fn flush(file: &mut tokio::fs::File) -> std::io::Result<()> {
@@ -427,7 +447,7 @@ fn total_from_content_length(value: &str, offset: u64) -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()
-        .map(|length| length + offset)
+        .and_then(|length| length.checked_add(offset))
 }
 
 async fn finish_completed(
@@ -437,6 +457,10 @@ async fn finish_completed(
     path: &Path,
     size: u64,
 ) {
+    if !ctx.begin_terminal_commit(&card.id) {
+        finish_stopped(ctx, card).await;
+        return;
+    }
     log::info!(
         "[{}] download complete bytes={size} path={}",
         card.id,
@@ -468,9 +492,14 @@ async fn finish_completed(
         t.message = "completed".into();
         t.path = path.to_string_lossy().to_string();
     });
+    ctx.end_terminal_commit(&card.id);
 }
 
 async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) {
+    if !ctx.begin_terminal_commit(&card.id) {
+        finish_stopped(ctx, card).await;
+        return;
+    }
     log::error!("[{}] download failed: {message}", card.id);
     let record = Record {
         id: card.id.clone(),
@@ -493,6 +522,7 @@ async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) {
         t.speed_kbps = 0.0;
         t.message = message;
     });
+    ctx.end_terminal_commit(&card.id);
 }
 
 #[cfg(test)]
@@ -526,6 +556,29 @@ mod tests {
         assert_eq!(total_from_content_length("", 0), None);
     }
 
+    #[test]
+    fn content_totals_check_u64_boundaries_without_wrapping() {
+        let max = u64::MAX.to_string();
+        assert_eq!(total_from_content_length(&max, 0), Some(u64::MAX));
+        assert_eq!(total_from_content_length(&max, 1), None);
+        assert_eq!(total_from_content_length("1", u64::MAX - 1), Some(u64::MAX));
+        assert_eq!(total_from_content_length("2", u64::MAX - 1), None);
+        assert_eq!(total_from_content_length("0", u64::MAX), Some(u64::MAX));
+        assert_eq!(total_from_content_length("18446744073709551616", 0), None);
+        assert_eq!(total_from_content_length("invalid", 1), None);
+        // Content-Range supplies an absolute total, not a length to add to
+        // the resumed offset. Its checked integer parsing needs no arithmetic.
+        assert_eq!(
+            total_from_content_range(&format!("bytes 1-2/{max}")),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            total_from_content_range("bytes 1-2/18446744073709551616"),
+            None
+        );
+        assert_eq!(total_from_content_range("bytes 1-2/*"), None);
+    }
+
     #[tokio::test]
     async fn existing_output_ignores_empty_files() {
         let dir = std::env::temp_dir().join(format!("p91d-out-{}", std::process::id()));
@@ -537,5 +590,374 @@ mod tests {
         std::fs::write(&path, b"data").unwrap();
         assert_eq!(existing_output(&path).await, Some((path.clone(), 4)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    mod transfers {
+        use super::*;
+        use crate::p91::app::TaskInfo;
+        use crate::test_support::http::{Server, response};
+
+        async fn context() -> Arc<AppCtx> {
+            let common =
+                tokio::sync::watch::channel(crate::configuration::app::Config::default()).1;
+            let ctx = Arc::new(
+                AppCtx::new(
+                    crate::p91::config::Config::default(),
+                    crate::storage::Database::open(":memory:").await.unwrap(),
+                    common.clone(),
+                    Arc::new(crate::runtime::download_limiter::DownloadLimiter::new(
+                        common,
+                    )),
+                )
+                .await
+                .unwrap(),
+            );
+            let mut task = TaskInfo::new("test", "http://127.0.0.1/");
+            task.state = TaskState::Running;
+            assert!(ctx.register_task(task));
+            ctx
+        }
+
+        fn start(
+            ctx: Arc<AppCtx>,
+            url: String,
+            path: PathBuf,
+        ) -> tokio::task::JoinHandle<anyhow::Result<Outcome>> {
+            tokio::spawn(async move {
+                let fetch = Fetcher::new(
+                    wreq::Client::builder().no_proxy().build().unwrap(),
+                    String::new(),
+                    ctx.session(),
+                );
+                download_file(&ctx, &fetch, "test", &url, &url, &path).await
+            })
+        }
+
+        #[tokio::test]
+        async fn download_file_resumes_206_and_restarts_on_200() {
+            for (status, headers, body) in [
+                (
+                    "206 Partial Content",
+                    "Content-Range: bytes 3-5/6\r\n",
+                    b"def".as_slice(),
+                ),
+                ("200 OK", "", b"abcdef".as_slice()),
+            ] {
+                let mut server = Server::new().await;
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("video.mp4");
+                tokio::fs::write(part_path(&path), b"abc").await.unwrap();
+                let ctx = context().await;
+                let run = start(ctx.clone(), server.url.clone(), path.clone());
+                let request = server.next().await;
+                assert!(
+                    request
+                        .head
+                        .to_ascii_lowercase()
+                        .contains("range: bytes=3-\r\n")
+                );
+                drop(request.respond(response(status, headers, body)));
+                assert!(matches!(run.await.unwrap().unwrap(), Outcome::Done));
+                assert_eq!(tokio::fs::read(&path).await.unwrap(), b"abcdef");
+                assert!(!part_path(&path).exists());
+                let task = ctx.task("test").unwrap();
+                assert_eq!((task.downloaded_bytes, task.total_bytes), (6, 6));
+            }
+        }
+
+        #[tokio::test]
+        async fn download_file_accepts_416_only_for_exact_existing_length() {
+            for total in [3, 4] {
+                let mut server = Server::new().await;
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("video.mp4");
+                tokio::fs::write(part_path(&path), b"abc").await.unwrap();
+                let run = start(context().await, server.url.clone(), path.clone());
+                let request = server.next().await;
+                assert!(
+                    request
+                        .head
+                        .to_ascii_lowercase()
+                        .contains("range: bytes=3-")
+                );
+                drop(request.respond(response(
+                    "416 Range Not Satisfiable",
+                    &format!("Content-Range: bytes */{total}\r\n"),
+                    b"",
+                )));
+                let result = run.await.unwrap();
+                if total == 3 {
+                    assert!(matches!(result.unwrap(), Outcome::Done));
+                    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"abc");
+                } else {
+                    assert!(result.is_err());
+                    assert!(!path.exists());
+                    assert_eq!(tokio::fs::read(part_path(&path)).await.unwrap(), b"abc");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn download_file_rejects_wrong_range_and_failed_responses_without_touching_partial() {
+            for reply in [
+                response(
+                    "206 Partial Content",
+                    "Content-Range: bytes 2-4/5\r\n",
+                    b"def",
+                ),
+                response("503 Unavailable", "", b"unavailable"),
+                response(
+                    "200 OK",
+                    "Content-Type: text/html\r\n",
+                    b"<html>error</html>",
+                ),
+            ] {
+                let mut server = Server::new().await;
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("video.mp4");
+                tokio::fs::write(part_path(&path), b"abc").await.unwrap();
+                let run = start(context().await, server.url.clone(), path.clone());
+                drop(server.next().await.respond(reply));
+                assert!(run.await.unwrap().is_err());
+                assert!(!path.exists());
+                assert_eq!(tokio::fs::read(part_path(&path)).await.unwrap(), b"abc");
+            }
+        }
+
+        #[tokio::test]
+        async fn download_file_rejects_truncated_body_and_retains_resumable_prefix() {
+            for reply in [
+                b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-8/9\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndef".to_vec(),
+                // Body framing is valid, but the advertised full range is incomplete.
+                response("206 Partial Content", "Content-Range: bytes 3-8/9\r\n", b"def"),
+            ] {
+                let mut server = Server::new().await;
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("video.mp4");
+                tokio::fs::write(part_path(&path), b"abc").await.unwrap();
+                let run = start(context().await, server.url.clone(), path.clone());
+                drop(server.next().await.respond(reply));
+                assert!(run.await.unwrap().is_err());
+                assert!(!path.exists());
+                let bytes = tokio::fs::read(part_path(&path)).await.unwrap();
+                assert!(bytes.starts_with(b"abc"));
+                assert!(b"abcdef".starts_with(&bytes));
+            }
+        }
+
+        #[tokio::test]
+        async fn download_file_pause_and_cancel_flush_prefix_while_body_is_pending() {
+            for cancel in [false, true] {
+                let mut server = Server::new().await;
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("video.mp4");
+                tokio::fs::write(part_path(&path), b"abc").await.unwrap();
+                let ctx = context().await;
+                let run = start(ctx.clone(), server.url.clone(), path.clone());
+                let held = server.next().await.respond(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-8/9\r\nContent-Length: 6\r\n\r\ndef".to_vec());
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while tokio::fs::metadata(part_path(&path)).await.unwrap().len() != 6 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                ctx.update_task("test", |task| {
+                    if cancel {
+                        task.state = TaskState::Cancelled;
+                    } else {
+                        task.phase = "pausing".into();
+                    }
+                });
+                let outcome = tokio::time::timeout(Duration::from_secs(5), run)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(if cancel {
+                    matches!(outcome, Outcome::Cancelled)
+                } else {
+                    matches!(outcome, Outcome::Paused)
+                });
+                assert_eq!(tokio::fs::read(part_path(&path)).await.unwrap(), b"abcdef");
+                assert!(!path.exists());
+                drop(held);
+                // The outer download_video owns cancel deletion; download_file only flushes.
+            }
+        }
+
+        async fn lifecycle_fixture(
+            root: &Path,
+        ) -> (Arc<AppCtx>, crate::storage::Database, VideoCard) {
+            let common = tokio::sync::watch::channel(crate::configuration::app::Config {
+                p91_download_path: root.join("output"),
+                temp_path: root.join("partial"),
+                ..Default::default()
+            })
+            .1;
+            let database = crate::storage::Database::open(":memory:").await.unwrap();
+            let ctx = Arc::new(
+                AppCtx::new(
+                    crate::p91::config::Config {
+                        concurrent_videos: 1,
+                        ..Default::default()
+                    },
+                    database.clone(),
+                    common.clone(),
+                    Arc::new(crate::runtime::download_limiter::DownloadLimiter::new(
+                        common,
+                    )),
+                )
+                .await
+                .unwrap(),
+            );
+            let card = VideoCard {
+                id: "test".into(),
+                url: "http://127.0.0.1/test".into(),
+                title: "fixture".into(),
+                image_url: String::new(),
+                duration_secs: None,
+                rank: None,
+                vid: None,
+                hd: false,
+                original: false,
+            };
+            (ctx, database, card)
+        }
+
+        #[tokio::test]
+        async fn terminal_commit_rejects_late_stops_inside_real_persistence_and_shutdown_drains_it()
+        {
+            for completed in [false, true] {
+                for database_error in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let (ctx, database, card) = lifecycle_fixture(root.path()).await;
+                    assert!(ctx.register_task(TaskInfo::new(&card.id, &card.url)));
+                    let slot = ctx.download_slot(&card.id).await.unwrap();
+                    ctx.update_task(&card.id, |task| task.state = TaskState::Running);
+                    let cfg = ctx.config();
+                    let cache = cfg.save_path.clone();
+                    tokio::fs::create_dir_all(&cache).await.unwrap();
+                    tokio::fs::write(
+                        part_path(&output_path(&cache, "test", "fixture")),
+                        b"cached",
+                    )
+                    .await
+                    .unwrap();
+                    // Hold the actual connection lock. The repository's write lock
+                    // proves the finalizer has entered persistence, past cleanup.
+                    let gate = database.connection().await;
+                    if database_error {
+                        gate.execute("DROP TABLE p91_records", ()).await.unwrap();
+                    }
+                    let owner_ctx = ctx.clone();
+                    let run = ctx
+                        .jobs
+                        .spawn(async move {
+                            let _slot = slot;
+                            if completed {
+                                finish_completed(
+                                    &owner_ctx,
+                                    &card,
+                                    &card.title,
+                                    &cfg.save_path.join("fixture.mp4"),
+                                    7,
+                                )
+                                .await;
+                            } else {
+                                finish_failed(&owner_ctx, &card, "fixture failure").await;
+                            }
+                        })
+                        .unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while !ctx.history_write_in_progress() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(part_path(&output_path(&cache, "test", "fixture")).exists());
+                    assert!(!ctx.stop_task("test", false));
+                    assert!(!ctx.stop_task("test", true));
+                    assert!(!crate::p91::scheduler::resume_task(ctx.clone(), "test"));
+                    assert_eq!(ctx.task_state("test"), Some(TaskState::Running));
+                    let shutdown = ctx.shutdown();
+                    tokio::pin!(shutdown);
+                    assert!(futures_util::poll!(&mut shutdown).is_pending());
+                    assert!(!run.is_finished());
+                    assert!(!ctx.register_task(TaskInfo::new("new", "u")));
+                    drop(gate);
+                    tokio::time::timeout(Duration::from_secs(5), &mut shutdown)
+                        .await
+                        .unwrap();
+                    run.await.unwrap();
+                    assert_eq!(
+                        ctx.task_state("test"),
+                        Some(if completed {
+                            TaskState::Completed
+                        } else {
+                            TaskState::Failed
+                        })
+                    );
+                    assert_eq!(ctx.history().len(), usize::from(!database_error));
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn stops_before_terminal_commit_win_over_success_and_failure() {
+            for completed in [false, true] {
+                for cancel in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let (ctx, _, card) = lifecycle_fixture(root.path()).await;
+                    assert!(ctx.register_task(TaskInfo::new(&card.id, &card.url)));
+                    let _slot = ctx.download_slot(&card.id).await.unwrap();
+                    ctx.update_task(&card.id, |task| task.state = TaskState::Running);
+                    let cfg = ctx.config();
+                    let cache = cfg.save_path.clone();
+                    tokio::fs::create_dir_all(&cache).await.unwrap();
+                    tokio::fs::write(
+                        part_path(&output_path(&cache, "test", "fixture")),
+                        b"cached",
+                    )
+                    .await
+                    .unwrap();
+                    assert!(ctx.stop_task("test", cancel));
+                    if completed {
+                        finish_completed(
+                            &ctx,
+                            &card,
+                            &card.title,
+                            &cfg.save_path.join("fixture.mp4"),
+                            7,
+                        )
+                        .await;
+                    } else {
+                        finish_failed(&ctx, &card, "fixture failure").await;
+                    }
+                    assert_eq!(
+                        ctx.task_state("test"),
+                        Some(if cancel {
+                            TaskState::Cancelled
+                        } else {
+                            TaskState::Paused
+                        })
+                    );
+                    assert!(ctx.history().is_empty());
+                    assert_eq!(
+                        part_path(&output_path(&cache, "test", "fixture")).exists(),
+                        !cancel
+                    );
+                    if !cancel {
+                        assert_eq!(
+                            tokio::fs::read(part_path(&output_path(&cache, "test", "fixture")))
+                                .await
+                                .unwrap(),
+                            b"cached"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

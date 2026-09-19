@@ -16,6 +16,7 @@ use anyhow::Context;
 use wreq_util::Profile;
 
 use crate::jav::source::cf::{CookieStore, is_cloudflare_challenge};
+use crate::jav::source::stream::m3u8::byte_range_end;
 
 /// Chrome emulation profile used for every request.
 ///
@@ -155,7 +156,7 @@ impl Fetcher {
         url: &str,
         origin: &str,
         range: Option<(u64, u64)>,
-    ) -> wreq::RequestBuilder {
+    ) -> anyhow::Result<wreq::RequestBuilder> {
         let mut req = self.client.get(url);
         if let Some(referer) = referer_for(origin) {
             req = req.header("referer", referer);
@@ -163,10 +164,10 @@ impl Fetcher {
         let (cookie, user_agent) = self.cookies.credentials();
         req = apply_cf_headers_scoped(req, url, &self.site_base, &cookie, &user_agent);
         if let Some((start, len)) = range {
-            let end = start + len.saturating_sub(1);
+            let end = byte_range_end(start, len).map_err(anyhow::Error::msg)? - 1;
             req = req.header("range", format!("bytes={start}-{end}"));
         }
-        req
+        Ok(req)
     }
 
     /// Reject access-denied and HTML responses before they become media files.
@@ -199,7 +200,7 @@ impl Fetcher {
         download: bool,
     ) -> anyhow::Result<wreq::Response> {
         let timeout = std::time::Duration::from_secs(60);
-        let request = self.media_request(url, origin, range);
+        let request = self.media_request(url, origin, range)?;
         let request = if download {
             request
         } else {
@@ -240,11 +241,7 @@ impl Fetcher {
             anyhow::bail!("media request for {}: HTTP {status}", resp.uri());
         }
         if let Some((start, length)) = range {
-            let end = start
-                .checked_add(length)
-                .and_then(|end| end.checked_sub(1))
-                .filter(|_| length > 0)
-                .ok_or_else(|| anyhow::anyhow!("invalid HLS byte range"))?;
+            let end = byte_range_end(start, length).map_err(anyhow::Error::msg)? - 1;
             let expected = format!("bytes {start}-{end}/");
             anyhow::ensure!(
                 status == wreq::StatusCode::PARTIAL_CONTENT
@@ -380,6 +377,63 @@ impl std::error::Error for ChallengeSignal {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn media_ranges_reject_before_io_and_keep_valid_wire_encoding() {
+        use crate::test_support::http::{Server, response};
+        let mut server = Server::new().await;
+        let fetch = Fetcher::new(
+            wreq::Client::builder().no_proxy().build().unwrap(),
+            Arc::new(CookieStore::new("", "", None)),
+            server.url.clone(),
+        );
+        for range in [
+            (0, 0),
+            (1, 0),
+            (u64::MAX, 1),
+            (u64::MAX - 1, 2),
+            (1, u64::MAX),
+        ] {
+            // Invalid requests must finish without needing a server response.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                fetch.download_response(&server.url, &server.url, Some(range)),
+            )
+            .await
+            .unwrap();
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid HLS byte range")
+            );
+        }
+        for (range, wire) in [
+            ((4, 3), "4-6"),
+            (
+                (u64::MAX - 1, 1),
+                "18446744073709551614-18446744073709551614",
+            ),
+        ] {
+            let fetch = fetch.clone();
+            let url = server.url.clone();
+            let run =
+                tokio::spawn(async move { fetch.download_response(&url, &url, Some(range)).await });
+            let request = server.next().await;
+            assert!(
+                request
+                    .head
+                    .to_ascii_lowercase()
+                    .contains(&format!("range: bytes={wire}\r\n"))
+            );
+            drop(request.respond(response(
+                "206 Partial Content",
+                &format!("Content-Range: bytes {wire}/18446744073709551615\r\n"),
+                b"x",
+            )));
+            assert!(run.await.unwrap().is_ok());
+        }
+    }
 
     #[test]
     fn normalizes_raw_value() {

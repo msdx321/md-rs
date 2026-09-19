@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use super::listing::{page_suffix, title_matcher};
+
 pub const FILE: crate::configuration::ConfigFile<Config> =
     crate::configuration::ConfigFile::new(crate::configuration::P91_FILE).with_groups(&[
         &["cookie", "site_base", "user_agent"],
@@ -143,19 +145,7 @@ impl Config {
 
     /// Compile once per listing request, using literal case-insensitive text by default.
     pub fn title_matcher(&self) -> anyhow::Result<Option<regex::Regex>> {
-        if self.title_filter.trim().is_empty() {
-            return Ok(None);
-        }
-        let pattern = if self.title_filter_regex {
-            self.title_filter.clone()
-        } else {
-            regex::escape(&self.title_filter)
-        };
-        regex::RegexBuilder::new(&pattern)
-            .case_insensitive(!self.title_filter_regex)
-            .build()
-            .map(Some)
-            .context("invalid title filter regex")
+        title_matcher(&self.title_filter, self.title_filter_regex)
     }
 
     /// Absolute listing URL for `page` (1-based).
@@ -194,35 +184,6 @@ impl Config {
     pub fn request_cookie(&self) -> Option<String> {
         let configured = self.cookie.trim().trim_end_matches(';').trim();
         (!configured.is_empty()).then(|| configured.to_string())
-    }
-}
-
-/// Append the page number as a query parameter, replacing a pasted `page`.
-fn page_suffix(path: &str, page: usize) -> String {
-    if let Ok(mut url) = url::Url::parse(path) {
-        let pairs: Vec<_> = url
-            .query_pairs()
-            .filter(|(key, _)| key != "page")
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect();
-        url.set_query(None);
-        if !pairs.is_empty() || page > 1 {
-            let mut query = url.query_pairs_mut();
-            query.extend_pairs(pairs);
-            if page > 1 {
-                query.append_pair("page", &page.to_string());
-            }
-        }
-        url.set_fragment(None);
-        return url.into();
-    }
-    if page <= 1 {
-        return path.to_string();
-    }
-    if path.contains('?') {
-        format!("{path}&page={page}")
-    } else {
-        format!("{path}?page={page}")
     }
 }
 
