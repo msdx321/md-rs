@@ -13,6 +13,7 @@ const queueSummary = scheduleRender(renderSummary);
 const queueActivity = scheduleRender(renderActivity);
 const queueHistory = scheduleRender(renderHistory);
 const renderedLists = new Map();
+const activityRows = new Map();
 const javRun = { value: undefined };
 const p91Run = { value: undefined };
 let lastTelegramRun;
@@ -237,7 +238,15 @@ function renderRows(target, rows, empty) {
 }
 
 function renderActivity() {
-  const rows = activeDownloads();
+  const downloads = activeDownloads();
+  const activeIds = new Set(downloads.map(item => item.id));
+  for (const id of activityRows.keys()) {
+    if (!activeIds.has(id)) activityRows.delete(id);
+  }
+  // Preserve first-seen order across progress events and reordered snapshots.
+  // Updating a Map entry keeps its position; only new tasks go at the end.
+  for (const item of downloads) activityRows.set(item.id, item);
+  const rows = [...activityRows.values()];
   $('activity-count').textContent = `${rows.length} active`;
   renderRows($('overview-downloads'), rows, telegram && tasks && p91Tasks ? 'All caught up. New downloads will appear here.' : 'Waiting for all modules…');
 }
