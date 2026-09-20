@@ -149,75 +149,100 @@ pub(super) fn merge_segments(
             .parent()
             .context("output has no parent directory")?,
     )?;
-    let mut command = Command::new("ffmpeg");
-    command.args([
-        "-nostdin",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-xerror",
-        "-abort_on",
-        "empty_output+empty_output_stream",
-    ]);
-    for input in std::iter::once(&video).chain(audio.iter()) {
+    let mut repair_audio_timestamps = false;
+    loop {
+        anyhow::ensure!(running(), "merge interrupted");
+        let mut command = Command::new("ffmpeg");
+        command.args([
+            "-nostdin",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-xerror",
+            "-abort_on",
+            "empty_output+empty_output_stream",
+        ]);
+        for input in std::iter::once(&video).chain(audio.iter()) {
+            command
+                .args([
+                    "-probesize",
+                    "50000000",
+                    "-analyzeduration",
+                    "30000000",
+                    "-i",
+                ])
+                .arg(input.path());
+        }
+        // Audio is mandatory. Optional maps would quietly produce a silent video.
+        command.args([
+            "-map",
+            "0:v:0",
+            "-map",
+            if audio.is_some() { "1:a:0" } else { "0:a:0" },
+        ]);
+        command.args(["-c:v", "copy", "-c:a"]);
+        if copy_audio && !repair_audio_timestamps {
+            command.arg("copy");
+        } else {
+            command.args(["aac", "-profile:a", "aac_low", "-b:a", "192k"]);
+        }
+        if repair_audio_timestamps {
+            // Reconcile audio samples with their timestamps without shifting the
+            // track's start relative to video (which may contain delayed audio).
+            command.args(["-af", "aresample=async=1"]);
+        }
         command
             .args([
-                "-probesize",
-                "50000000",
-                "-analyzeduration",
-                "30000000",
-                "-i",
+                "-movflags",
+                "+faststart",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-f",
+                "mp4",
             ])
-            .arg(input.path());
-    }
-    // Audio is mandatory. Optional maps would quietly produce a silent video.
-    command.args([
-        "-map",
-        "0:v:0",
-        "-map",
-        if audio.is_some() { "1:a:0" } else { "0:a:0" },
-    ]);
-    command.args(["-c:v", "copy", "-c:a"]);
-    if copy_audio {
-        command.arg("copy");
-    } else {
-        command.args(["aac", "-profile:a", "aac_low", "-b:a", "192k"]);
-    }
-    command
-        .args([
-            "-movflags",
-            "+faststart",
-            "-avoid_negative_ts",
-            "make_zero",
-            "-f",
-            "mp4",
-        ])
-        .arg(staged.path());
-    // Use a file instead of a pipe so stderr cannot block a long merge.
-    let mut errors = tempfile::tempfile()?;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(errors.try_clone()?)
-        .spawn()
-        .context("cannot start ffmpeg")?;
-    let status = loop {
-        if !running() {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("merge interrupted");
+            .arg(staged.path());
+        // Use a file instead of a pipe so stderr cannot block a long merge.
+        let mut errors = tempfile::tempfile()?;
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(errors.try_clone()?)
+            .spawn()
+            .context("cannot start ffmpeg")?;
+        let status = loop {
+            if !running() {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("merge interrupted");
+            }
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        if status.success() {
+            break;
         }
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    if !status.success() {
         use std::io::Read;
         errors.rewind()?;
         let mut message = String::new();
         errors.read_to_string(&mut message)?;
+        // Keep strict error handling: only retry non-monotonic output audio DTS,
+        // never video timestamp failures or unrelated decoding/muxing errors.
+        let audio_dts_error = message.lines().any(|line| {
+            (line.contains("Non-monotonous DTS") || line.contains("Non-monotonic DTS"))
+                && (line.contains("output stream 0:1;") || line.contains("[aost#0:1/"))
+        });
+        if !repair_audio_timestamps && audio_dts_error {
+            log::warn!(
+                "retrying merge for {} with audio timestamp repair: {}",
+                final_path.display(),
+                message.trim()
+            );
+            repair_audio_timestamps = true;
+            continue;
+        }
         anyhow::bail!("ffmpeg merge failed: {}", message.trim());
     }
     validate_output(staged.path(), Some(info.total_duration))?;
