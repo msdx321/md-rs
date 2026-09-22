@@ -25,6 +25,7 @@ const linkEl = document.querySelector("#chat-link");
 const actionEls = [...document.querySelectorAll("button[name=action]")];
 let paused = false;
 let historyBusy = false;
+let channelNamesSignature = null;
 const historyPager = bindHistoryPagination(renderHistoryPage);
 
 bindTabs(tabEls, (tab) => {
@@ -183,6 +184,12 @@ completedEl.addEventListener('click', (event) => {
 });
 
 function render(snapshot) {
+  const channelNames = snapshot.channel_names || {};
+  const namesSignature = JSON.stringify(channelNames);
+  if (namesSignature !== channelNamesSignature) {
+    channelNamesSignature = namesSignature;
+    window.dispatchEvent(new CustomEvent('telegram:channel-names', { detail: channelNames }));
+  }
   renderLogin(snapshot.login);
   historyPeriod("telegram", snapshot.history_retention_days);
   paused = snapshot.paused;
@@ -219,7 +226,7 @@ function render(snapshot) {
       <td></td>`;
     setText('.file', item.file_name, row);
     row.querySelector('.file').title = item.file_name;
-    setText('.source', `Message ${item.msg_id}`, row);
+    setText('.source', [item.source_name, `Message ${item.msg_id}`].filter(Boolean).join(' · '), row);
     setText('.task-speed', paused || cancelling ? '—' : sizeLabel(item.speed), row);
     setText('.detail', `${sizeLabel(item.downloaded)} / ${sizeLabel(item.total)}`, row);
     row.querySelector('.detail').title = item.path;

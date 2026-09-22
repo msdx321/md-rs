@@ -145,6 +145,7 @@ pub struct ApiState {
     status: Mutex<DashboardStatus>,
     scan: Mutex<ScanStatus>,
     stats: Mutex<DashboardStats>,
+    channel_names: Mutex<BTreeMap<String, String>>,
     updates: broadcast::Sender<String>,
 }
 
@@ -191,6 +192,7 @@ struct DashboardStats {
 struct DownloadStat {
     file_name: String,
     path: String,
+    source_name: String,
     downloaded: u64,
     total: u64,
     speed_bps: u64,
@@ -206,6 +208,7 @@ struct DashboardSnapshot {
     request_status: String,
     paused: bool,
     cancelling: bool,
+    channel_names: BTreeMap<String, String>,
     downloaded_files: u64,
     downloaded_bytes: String,
     active_count: usize,
@@ -228,6 +231,7 @@ struct DownloadSnapshot {
     msg_id: i32,
     file_name: String,
     path: String,
+    source_name: String,
     downloaded: String,
     total: String,
     speed: String,
@@ -268,6 +272,7 @@ impl ApiState {
                 completed: history::load(&database, now_millis(), days).await?,
                 ..DashboardStats::default()
             }),
+            channel_names: Mutex::new(BTreeMap::new()),
             updates,
             database,
         })
@@ -312,6 +317,33 @@ impl ApiState {
         self.publish().await;
     }
 
+    pub(crate) async fn set_channel_names(&self, names: BTreeMap<String, String>) {
+        *self.channel_names.lock().await = names;
+        self.publish().await;
+    }
+
+    pub(crate) async fn set_channel_name(&self, id: &str, name: &str) {
+        if name.trim().is_empty() {
+            return;
+        }
+        let key = id.trim().trim_start_matches('@').to_ascii_lowercase();
+        let changed = self
+            .channel_names
+            .lock()
+            .await
+            .insert(key, name.to_string())
+            .as_deref()
+            != Some(name);
+        if changed {
+            self.publish().await;
+        }
+    }
+
+    pub(crate) async fn channel_name(&self, id: &str) -> Option<String> {
+        let key = id.trim().trim_start_matches('@').to_ascii_lowercase();
+        self.channel_names.lock().await.get(&key).cloned()
+    }
+
     pub async fn wait_if_paused(&self) {
         if !self.paused.load(Ordering::Relaxed) {
             return;
@@ -324,7 +356,14 @@ impl ApiState {
         }
     }
 
-    pub async fn download_started(&self, msg_id: i32, path: &Path, downloaded: u64, total: u64) {
+    pub async fn download_started(
+        &self,
+        msg_id: i32,
+        path: &Path,
+        downloaded: u64,
+        total: u64,
+        source_name: &str,
+    ) {
         let mut stats = self.stats.lock().await;
         stats.active.insert(
             msg_id,
@@ -334,6 +373,7 @@ impl ApiState {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.display().to_string()),
                 path: path.display().to_string(),
+                source_name: source_name.to_string(),
                 downloaded,
                 total,
                 speed_bps: 0,
@@ -465,6 +505,7 @@ impl ApiState {
                     msg_id: *msg_id,
                     file_name: item.file_name.clone(),
                     path: item.path.clone(),
+                    source_name: item.source_name.clone(),
                     downloaded: format_byte(item.downloaded as f64),
                     total: format_byte(item.total as f64),
                     speed: format!("{}/s", format_byte(item.speed_bps as f64)),
@@ -497,6 +538,7 @@ impl ApiState {
             request_status,
             paused: self.paused.load(Ordering::Relaxed),
             cancelling: self.cancelling.load(Ordering::Relaxed),
+            channel_names: self.channel_names.lock().await.clone(),
             downloaded_files: stats.completed.len() as u64,
             downloaded_bytes: format_byte(
                 stats.completed.iter().map(|item| item.bytes as f64).sum(),
@@ -602,7 +644,12 @@ async fn queue_request(
         Ok(parsed) => parsed,
         Err(message) => return api_response(StatusCode::BAD_REQUEST, message),
     };
-    let label = target.label();
+    let label = match &target {
+        ChatTarget::DialogId(id) => state.channel_name(&id.to_string()).await,
+        ChatTarget::Username(username) => state.channel_name(username).await,
+        ChatTarget::Invite(_) => None,
+    }
+    .unwrap_or_else(|| target.label());
     let (request, message) = if subscribe {
         (
             ChatRequest::Subscribe(target),

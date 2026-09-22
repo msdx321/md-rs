@@ -18,6 +18,15 @@ const javRun = { value: undefined };
 const p91Run = { value: undefined };
 let lastTelegramRun;
 
+function telegramChatName(snapshot, chatId) {
+  const names = snapshot.channel_names || {};
+  const id = String(chatId);
+  const key = id.replace(/^@/, '').toLowerCase();
+  return (Object.hasOwn(names, id) && names[id])
+    || (Object.hasOwn(names, key) && names[key])
+    || id;
+}
+
 function renderTelegramRun(snapshot) {
   const scan = snapshot.scan;
   const run = scan?.last_run;
@@ -29,7 +38,7 @@ function renderTelegramRun(snapshot) {
     : snapshot.cancelling ? 'Cancelling' : snapshot.paused ? 'Paused'
     : scan?.running ? 'Scan running'
     : label(snapshot.status);
-  const signature = JSON.stringify(run);
+  const signature = JSON.stringify([run, snapshot.channel_names]);
   if (signature === lastTelegramRun) return;
   lastTelegramRun = signature;
   $('telegram-last-run').hidden = !run;
@@ -55,7 +64,7 @@ function renderTelegramRun(snapshot) {
   const details = [
     `Started ${dateTime(run.started_at)} · Finished ${dateTime(run.finished_at)}`,
     `${run.chats.filter(chat => chat.completed).length} / ${run.total_chats} chats scanned`,
-    ...run.chats.map(chat => `${chat.chat_id}: ${chat.downloaded} downloaded, ${chat.scanned} scanned, ${chat.failed} failed, ${chat.skipped} skipped${chat.error ? ` · ${chat.error}` : !chat.completed ? ' · Interrupted' : ''}`),
+    ...run.chats.map(chat => `${telegramChatName(snapshot, chat.chat_id)}: ${chat.downloaded} downloaded, ${chat.scanned} scanned, ${chat.failed} failed, ${chat.skipped} skipped${chat.error ? ` · ${chat.error}` : !chat.completed ? ' · Interrupted' : ''}`),
   ];
   if (!run.total_chats) details.push('No subscribed chats to scan');
   if (run.error) details.push(run.error);
@@ -137,7 +146,7 @@ function activeDownloads() {
     ...(telegram?.active || []).map((item) => ({
       id: `telegram:${item.msg_id}:${item.path}`,
       source: 'Telegram', name: item.file_name,
-      detail: telegram.paused ? 'Paused' : `${sizeLabel(item.downloaded)} / ${sizeLabel(item.total)}`,
+      detail: `${item.source_name ? `${item.source_name} · ` : ''}${telegram.paused ? 'Paused' : `${sizeLabel(item.downloaded)} / ${sizeLabel(item.total)}`}`,
       progress: item.percent, status: telegram.paused ? 'Paused' : sizeLabel(item.speed),
     })),
     ...(tasks || []).filter((task) => !terminal.has(task.state)).map((task) => ({

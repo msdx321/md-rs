@@ -6,6 +6,7 @@ mod shutdown;
 mod state;
 mod temp;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
@@ -15,7 +16,7 @@ use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
 use grammers_session::types::PeerRef;
 use indicatif::MultiProgress;
-use log::{debug, info};
+use log::{debug, info, warn};
 use rustc_hash::FxHashMap as HashMap;
 use tokio::sync::{Mutex, mpsc};
 
@@ -66,6 +67,10 @@ pub(crate) async fn run_downloader(
         .login_status("ready", "Connected to Telegram")
         .await;
     info!("Authorized - ready");
+    match load_channel_names(&client, &cfg.chat).await {
+        Ok(names) => web_state.set_channel_names(names).await,
+        Err(error) => warn!("cannot load Telegram chat names: {error:#}"),
+    }
 
     let file_ids: Arc<Mutex<HashMap<String, u64>>> =
         Arc::new(Mutex::new(data.downloaded_file_ids.into_iter().collect()));
@@ -236,7 +241,12 @@ pub(crate) async fn run_downloader(
                 match request {
                     Some(ChatRequest::Scan) => { scan_due = Some("manual"); }
                     Some(ChatRequest::Once(target, message_id)) => {
-                        let label = target.label();
+                        let label = match &target {
+                            ChatTarget::DialogId(id) => web_state.channel_name(&id.to_string()).await,
+                            ChatTarget::Username(username) => web_state.channel_name(username).await,
+                            ChatTarget::Invite(_) => None,
+                        }
+                        .unwrap_or_else(|| target.label());
                         web_state.set_status("running").await;
                         web_state
                             .set_request_status(&format!("Opening message {message_id} from {label}"))
@@ -251,11 +261,11 @@ pub(crate) async fn run_downloader(
                         )
                         .await
                         {
-                            Ok(chat_id) => {
+                            Ok(channel_name) => {
                                 persist_state(&web_state.database, &file_ids, &data_chats, web_state.history_cutoff()).await?;
                                 web_state
                                     .set_request_status(&format!(
-                                        "Finished downloading message {message_id} from {label} as {chat_id}"
+                                        "Finished downloading message {message_id} from {channel_name}"
                                     ))
                                     .await;
                             }
@@ -267,16 +277,21 @@ pub(crate) async fn run_downloader(
                         }
                     }
                     Some(ChatRequest::Subscribe(target)) => {
-                        let label = target.label();
+                        let label = match &target {
+                            ChatTarget::DialogId(id) => web_state.channel_name(&id.to_string()).await,
+                            ChatTarget::Username(username) => web_state.channel_name(username).await,
+                            ChatTarget::Invite(_) => None,
+                        }
+                        .unwrap_or_else(|| target.label());
                         web_state
                             .set_request_status(&format!("Opening {label}"))
                             .await;
                         match subscribe_chat(&client, &mut cfg, target, &web_state).await {
-                            Ok((chat_id, true)) => web_state
-                                .set_request_status(&format!("Subscribed to {label} as {chat_id}"))
+                            Ok((_, true, channel_name)) => web_state
+                                .set_request_status(&format!("Subscribed to {channel_name}"))
                                 .await,
-                            Ok((_, false)) => web_state
-                                .set_request_status(&format!("Already subscribed to {label}"))
+                            Ok((_, false, channel_name)) => web_state
+                                .set_request_status(&format!("Already subscribed to {channel_name}"))
                                 .await,
                             Err(error) => web_state
                                 .set_request_status(&format!("Could not subscribe to {label}: {error:#}"))
@@ -304,9 +319,12 @@ async fn download_message(
     message_id: i32,
     shutdown: &Shutdown,
 ) -> anyhow::Result<String> {
-    let (chat_id, peer) = resolve_target(client, target).await?;
+    let (chat_id, peer, channel_name) = resolve_target(client, target).await?;
+    if let Some(name) = &channel_name {
+        runtime.web_state.set_channel_name(&chat_id, name).await;
+    }
     scan::run_message_download(client, cfg, runtime, peer, message_id, shutdown).await?;
-    Ok(chat_id)
+    Ok(channel_name.unwrap_or(chat_id))
 }
 
 async fn subscribe_chat(
@@ -314,18 +332,24 @@ async fn subscribe_chat(
     cfg: &mut Config,
     target: ChatTarget,
     state: &ApiState,
-) -> anyhow::Result<(String, bool)> {
+) -> anyhow::Result<(String, bool, String)> {
     if let ChatTarget::Username(username) = &target
         && cfg.chat.iter().any(|chat| chat.chat_id == *username)
     {
-        return Ok((username.clone(), false));
+        let name = state
+            .channel_name(username)
+            .await
+            .unwrap_or_else(|| username.clone());
+        return Ok((username.clone(), false, name));
     }
 
-    let (chat_id, _) = resolve_target(client, target).await?;
+    let (chat_id, _, channel_name) = resolve_target(client, target).await?;
+    let channel_name = channel_name.unwrap_or_else(|| chat_id.clone());
+    state.set_channel_name(&chat_id, &channel_name).await;
     let _edit = state.config_update.lock().await;
     let mut next = FILE.load_optional()?.unwrap_or_else(|| cfg.clone());
     if next.chat.iter().any(|chat| chat.chat_id == chat_id) {
-        return Ok((chat_id, false));
+        return Ok((chat_id, false, channel_name));
     }
     next.chat.push(ChatConfig {
         chat_id: chat_id.clone(),
@@ -333,15 +357,68 @@ async fn subscribe_chat(
     });
     FILE.save(&next)?;
     *cfg = next;
-    Ok((chat_id, true))
+    Ok((chat_id, true, channel_name))
 }
 
-async fn resolve_target(client: &Client, target: ChatTarget) -> anyhow::Result<(String, PeerRef)> {
+async fn load_channel_names(
+    client: &Client,
+    chats: &[ChatConfig],
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let wanted: BTreeMap<_, _> = chats
+        .iter()
+        .map(|chat| {
+            (
+                chat.chat_id
+                    .trim()
+                    .trim_start_matches('@')
+                    .to_ascii_lowercase(),
+                (),
+            )
+        })
+        .collect();
+    let mut names = BTreeMap::new();
+    if wanted.is_empty() {
+        return Ok(names);
+    }
+
+    let mut dialogs = client.iter_dialogs();
+    while let Some(dialog) = dialogs.next().await? {
+        let Some(name) = dialog.peer().name().filter(|name| !name.trim().is_empty()) else {
+            continue;
+        };
+        let name = name.to_string();
+        if let Some(id) = dialog.peer_id().bot_api_dialog_id() {
+            let id = id.to_string();
+            if wanted.contains_key(&id) {
+                names.insert(id, name.clone());
+            }
+        }
+        let usernames = dialog
+            .peer()
+            .username()
+            .into_iter()
+            .chain(dialog.peer().usernames());
+        for username in usernames {
+            let username = username.to_ascii_lowercase();
+            if wanted.contains_key(&username) {
+                names.insert(username, name.clone());
+            }
+        }
+        if names.len() == wanted.len() {
+            break;
+        }
+    }
+    Ok(names)
+}
+
+async fn resolve_target(
+    client: &Client,
+    target: ChatTarget,
+) -> anyhow::Result<(String, PeerRef, Option<String>)> {
     if let ChatTarget::DialogId(id) = target {
-        return Ok((
-            id.to_string(),
-            scan::resolve_chat(client, &id.to_string()).await?,
-        ));
+        let chat_id = id.to_string();
+        let (peer, name) = scan::resolve_chat(client, &chat_id).await?;
+        return Ok((chat_id, peer, name));
     }
 
     let peer = match target {
@@ -356,12 +433,13 @@ async fn resolve_target(client: &Client, target: ChatTarget) -> anyhow::Result<(
         ChatTarget::DialogId(_) => unreachable!(),
     };
     let chat_id = peer.id().to_string();
+    let name = peer.name().map(str::to_string);
     let peer = peer
         .to_ref()
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?
         .context("peer not found")?;
-    Ok((chat_id, peer))
+    Ok((chat_id, peer, name))
 }
 
 #[cfg(test)]

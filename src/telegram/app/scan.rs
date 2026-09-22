@@ -170,7 +170,13 @@ async fn process_chat(
         retry_ids.len()
     );
 
-    let peer = resolve_chat(client, &chat_cfg.chat_id).await?;
+    let (peer, channel_name) = resolve_chat(client, &chat_cfg.chat_id).await?;
+    if let Some(name) = channel_name {
+        runtime
+            .web_state
+            .set_channel_name(&chat_cfg.chat_id, &name)
+            .await;
+    }
 
     let mut messages = client.iter_messages(peer);
 
@@ -375,25 +381,31 @@ pub(super) async fn run_message_download(
     result.map(|_| ())
 }
 
-pub(super) async fn resolve_chat(client: &Client, chat_id: &str) -> anyhow::Result<PeerRef> {
+pub(super) async fn resolve_chat(
+    client: &Client,
+    chat_id: &str,
+) -> anyhow::Result<(PeerRef, Option<String>)> {
     if let Ok(dialog_id) = chat_id.parse::<i64>() {
         let mut dialogs = client.iter_dialogs();
         while let Some(dialog) = dialogs.next().await? {
             if dialog.peer_id().bot_api_dialog_id() == Some(dialog_id) {
-                return Ok(dialog.peer_ref());
+                return Ok((dialog.peer_ref(), dialog.peer().name().map(str::to_string)));
             }
         }
         anyhow::bail!("chat {chat_id} is not accessible to the signed-in account");
     }
 
-    client
+    let peer = client
         .resolve_username(chat_id)
         .await?
-        .context("cannot resolve peer")?
+        .context("cannot resolve peer")?;
+    let name = peer.name().map(str::to_string);
+    let peer = peer
         .to_ref()
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?
-        .context("peer not found")
+        .context("peer not found")?;
+    Ok((peer, name))
 }
 
 fn drain_finished_tasks(tasks: &mut JoinSet<()>) {

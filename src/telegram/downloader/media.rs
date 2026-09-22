@@ -36,6 +36,11 @@ pub(crate) async fn download_media_inner(
         None => return Ok(false),
     };
     let msg_id = msg.id();
+    let source_name = msg
+        .peer()
+        .and_then(|peer| peer.name())
+        .unwrap_or_default()
+        .to_string();
     let paths = build_media_paths(msg, &media, cfg)?;
     let temp_path = &paths.temp;
     let final_path = &paths.final_path;
@@ -83,7 +88,7 @@ pub(crate) async fn download_media_inner(
             }
             let size = metadata.len();
             web_state
-                .download_started(msg_id, final_path, size, size)
+                .download_started(msg_id, final_path, size, size, &source_name)
                 .await;
             web_state.download_finished(msg_id, size, true).await;
             return Ok(true);
@@ -105,7 +110,7 @@ pub(crate) async fn download_media_inner(
     };
     let existing = resume_offset(temp_path, total, &web_state.database).await?;
     web_state
-        .download_started(msg_id, final_path, existing, total)
+        .download_started(msg_id, final_path, existing, total, &source_name)
         .await;
 
     // The database checkpoint marks a prior run as fully fetched but not yet renamed into

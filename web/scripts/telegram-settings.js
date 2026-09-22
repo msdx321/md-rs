@@ -16,12 +16,26 @@ let saved = null;
 let saving = false;
 let chatSequence = 0;
 let originalChats = [];
+let channelNames = {};
+function channelName(chatId) {
+  const id = chatId.trim();
+  const key = id.replace(/^@/, '').toLowerCase();
+  return (Object.hasOwn(channelNames, id) && channelNames[id])
+    || (Object.hasOwn(channelNames, key) && channelNames[key])
+    || id;
+}
+function updateChatSummary(row) {
+  const chatId = row.querySelector('[data-chat-id]').value.trim();
+  row.querySelector('[data-chat-name]').textContent = channelName(chatId) || 'New subscription';
+  row.querySelector('[data-chat-preview]').textContent = row.querySelector('[data-chat-filter]').value.trim() || 'All matching media';
+}
 function updateChatEmpty() {
   const rows = [...$('subscribed-chats').children];
   const query = $('chat-search').value.trim().toLowerCase();
   let visible = 0;
   for (const row of rows) {
-    const text = `${row.querySelector('[data-chat-id]').value} ${row.querySelector('[data-chat-filter]').value}`.toLowerCase();
+    const chatId = row.querySelector('[data-chat-id]').value;
+    const text = `${channelName(chatId)} ${chatId} ${row.querySelector('[data-chat-filter]').value}`.toLowerCase();
     row.hidden = query !== '' && !text.includes(query);
     if (!row.hidden) visible++;
   }
@@ -30,6 +44,11 @@ function updateChatEmpty() {
   $('no-subscriptions').hidden = rows.length > 0;
   $('no-chat-matches').hidden = rows.length === 0 || visible > 0;
 }
+window.addEventListener('telegram:channel-names', (event) => {
+  channelNames = event.detail || {};
+  for (const row of $('subscribed-chats').children) updateChatSummary(row);
+  updateChatEmpty();
+});
 $('chat-search').addEventListener('input', queueChatSearch);
 $('chat-search').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') event.preventDefault();
@@ -47,10 +66,7 @@ function addChat(chat = { chat_id: '', download_filter: null }) {
   row.querySelector('[data-chat-id]').value = chat.chat_id;
   row.querySelector('[data-chat-filter]').value = chat.download_filter || '';
   row.querySelector('[data-chat-cursor]').value = chat.last_read_message_id ?? '';
-  const updateSummary = () => {
-    row.querySelector('[data-chat-name]').textContent = row.querySelector('[data-chat-id]').value.trim() || 'New subscription';
-    row.querySelector('[data-chat-preview]').textContent = row.querySelector('[data-chat-filter]').value.trim() || 'All matching media';
-  };
+  const updateSummary = () => updateChatSummary(row);
   updateSummary();
   row.addEventListener('input', updateSummary);
   row.querySelector('[data-remove-chat]').addEventListener('click', () => {
