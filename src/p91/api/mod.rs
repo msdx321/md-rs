@@ -444,12 +444,9 @@ async fn events(State(ctx): State<Arc<AppCtx>>) -> impl IntoResponse {
     let rx = ctx.subscribe();
     let tasks = BroadcastStream::new(rx).filter_map(|result| async move {
         match result {
-            Ok(task) => match serde_json::to_string(&task) {
-                Ok(data) => Some(Ok::<_, Infallible>(
-                    Event::default().event("task").data(data),
-                )),
-                Err(_) => None,
-            },
+            Ok(task) => Some(Ok::<_, Infallible>(
+                Event::default().event("task").data(&*task),
+            )),
             // A lagged subscriber simply misses intermediate frames.
             Err(_) => None,
         }

@@ -511,15 +511,11 @@ async fn while_running<T>(
     id: &str,
     work: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
-    let mut changes = ctx.subscribe();
+    // Only state transitions wake this, not every task's progress update.
+    let mut changes = ctx.subscribe_status();
     let stopped = async {
         loop {
-            if control(ctx, id) != TaskState::Running {
-                return;
-            }
-            if changes.recv().await.is_err_and(|error| {
-                matches!(error, tokio::sync::broadcast::error::RecvError::Closed)
-            }) {
+            if control(ctx, id) != TaskState::Running || changes.changed().await.is_err() {
                 return;
             }
         }

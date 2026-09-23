@@ -202,13 +202,13 @@ fn control(ctx: &AppCtx, id: &str) -> TaskState {
 }
 
 async fn stopped(ctx: &AppCtx, id: &str) -> TaskState {
-    let mut changes = ctx.subscribe();
+    // Only state transitions wake this, not every task's progress update.
+    let mut changes = ctx.subscribe_status();
     loop {
         let state = control(ctx, id);
-        if state != TaskState::Running {
+        if state != TaskState::Running || changes.changed().await.is_err() {
             return state;
         }
-        let _ = changes.recv().await;
     }
 }
 
@@ -376,17 +376,32 @@ async fn transfer(
     // Drain it on network/write errors too, before the file lease can be released.
     let result = async {
         let mut stream = response.bytes_stream();
-        let mut changes = ctx.subscribe();
+        // Only state transitions wake this, not every task's progress update.
+        let mut changes = ctx.subscribe_status();
         loop {
             if control(ctx, id) != TaskState::Running {
                 return Ok(false);
             }
-            // A state change cancels the pending read. Nothing is lost: whatever
-            // was not written yet is simply re-requested from the new file length.
-            let next = tokio::select! {
-                biased;
-                _ = changes.recv() => continue,
-                result = tokio::time::timeout(Duration::from_secs(60), stream.next()) => result,
+            // Buffer only bursts that are already available; while the network
+            // is idle, write through so the file holds every received byte.
+            let next = match futures_util::FutureExt::now_or_never(stream.next()) {
+                Some(next) => Ok(next),
+                None => {
+                    file.flush().await?;
+                    // A state change cancels the pending read. Nothing is lost:
+                    // whatever was not written yet is simply re-requested from
+                    // the new file length.
+                    tokio::select! {
+                        biased;
+                        changed = changes.changed() => {
+                            if changed.is_err() {
+                                return Ok(false);
+                            }
+                            continue;
+                        }
+                        result = tokio::time::timeout(Duration::from_secs(60), stream.next()) => result,
+                    }
+                }
             };
             let chunk = match next {
                 Err(_) => anyhow::bail!("media read timed out"),
@@ -395,15 +410,21 @@ async fn transfer(
                 Ok(Some(Ok(chunk))) => chunk,
             };
             for piece in chunk.chunks(64 * 1024) {
-                tokio::select! {
-                    biased;
-                    _ = stopped(ctx, id) => {
+                let acquire = ctx.download_limiter.acquire(
+                    crate::runtime::download_limiter::DownloadModule::P91,
+                    piece.len(),
+                );
+                tokio::pin!(acquire);
+                loop {
+                    tokio::select! {
+                        biased;
+                        changed = changes.changed() => {
+                            if changed.is_err() || control(ctx, id) != TaskState::Running {
                                 return Ok(false);
+                            }
+                        }
+                        () = &mut acquire => break,
                     }
-                    _ = ctx.download_limiter.acquire(
-                        crate::runtime::download_limiter::DownloadModule::P91,
-                        piece.len(),
-                    ) => {},
                 }
                 file.write_all(piece).await?;
                 downloaded.fetch_add(piece.len() as u64, Ordering::Relaxed);

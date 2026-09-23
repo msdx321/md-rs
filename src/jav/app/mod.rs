@@ -142,7 +142,8 @@ pub struct AppCtx {
     tasks: Mutex<TaskRegistry>,
     downloads: Arc<DownloadSlots>,
     pub(crate) jobs: crate::runtime::http_lifecycle::HttpLifecycle,
-    events: broadcast::Sender<TaskInfo>,
+    /// Task JSON, serialized once per update for every SSE subscriber.
+    events: broadcast::Sender<Arc<str>>,
     scheduler: Mutex<SchedulerStatus>,
     /// Serialises the daily job so a manual trigger cannot race the timer.
     pub daily_lock: tokio::sync::Mutex<()>,
@@ -282,7 +283,7 @@ impl AppCtx {
                 .into();
                 task.state = TaskState::Paused;
                 task.message = "service shutting down; partials retained".into();
-                let _ = self.events.send(task.clone());
+                self.publish(task);
             }
         }
         drop(registry);
@@ -400,7 +401,7 @@ impl AppCtx {
                         registry.requests.remove(id);
                         return false;
                     }
-                    let _ = self.events.send(task.clone());
+                    self.publish(&task);
                     registry.tasks.insert(id.to_string(), task);
                 }
                 true
@@ -497,7 +498,7 @@ impl AppCtx {
             }
         };
         if let Some(task) = updated {
-            let _ = self.events.send(task);
+            self.publish(&task);
         }
         if state_changed {
             self.downloads.notify();
@@ -530,7 +531,7 @@ impl AppCtx {
                         restart: None,
                     },
                 );
-                let _ = self.events.send(info.clone());
+                self.publish(&info);
                 registry.tasks.insert(info.id.clone(), info);
                 Some(token)
             })
@@ -622,7 +623,7 @@ impl AppCtx {
             registry.requests.remove(id);
             updated
         };
-        let _ = self.events.send(updated);
+        self.publish(&updated);
         self.downloads.notify();
         true
     }
@@ -671,7 +672,7 @@ impl AppCtx {
             task.updated_at = now_rfc3339();
             task.clone()
         };
-        let _ = self.events.send(updated);
+        self.publish(&updated);
         self.downloads.notify();
     }
 
@@ -697,10 +698,24 @@ impl AppCtx {
         removed
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<TaskInfo> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<str>> {
         self.events.subscribe()
     }
 
+    fn publish(&self, task: &TaskInfo) {
+        if self.events.receiver_count() == 0 {
+            return;
+        }
+        match serde_json::to_string(task) {
+            Ok(json) => {
+                let _ = self.events.send(json.into());
+            }
+            Err(error) => log::warn!("cannot serialize task {}: {error}", task.id),
+        }
+    }
+
+    /// Wakes after every task state transition (and other slot changes), but
+    /// not after progress-only updates.
     pub fn subscribe_status(&self) -> watch::Receiver<()> {
         self.downloads.subscribe()
     }
