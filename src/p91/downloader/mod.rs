@@ -21,6 +21,9 @@ use crate::p91::storage::Record;
 use crate::p91::util::{SpeedTracker, sanitize_filename};
 use crate::runtime::BackgroundTask;
 
+/// Buffered bytes are flushed on every pause, cancel and error.
+const WRITE_BUFFER: usize = 1024 * 1024;
+
 /// How a download run ended.
 enum Outcome {
     Done,
@@ -370,7 +373,8 @@ async fn transfer(
     } else {
         options.truncate(true);
     }
-    let mut file = options.open(part).await?;
+    // Batch network bursts into fewer blocking filesystem writes.
+    let mut file = tokio::io::BufWriter::with_capacity(WRITE_BUFFER, options.open(part).await?);
 
     // Tokio's file writer can still own a blocking write when write_all returns.
     // Drain it on network/write errors too, before the file lease can be released.
@@ -439,9 +443,9 @@ async fn transfer(
     Ok(complete && control(ctx, id) == TaskState::Running)
 }
 
-async fn flush(file: &mut tokio::fs::File) -> std::io::Result<()> {
+async fn flush(file: &mut tokio::io::BufWriter<tokio::fs::File>) -> std::io::Result<()> {
     file.flush().await?;
-    file.sync_data().await
+    file.get_mut().sync_data().await
 }
 
 /// Total body length, from `Content-Range` when resuming, else `Content-Length`.
