@@ -11,7 +11,11 @@ services:
       MEDIA_PORT: ${MEDIA_PORT:-8080}
       RUST_LOG: ${RUST_LOG:-warn,md_rs=info}
     volumes:
-      - ./data:/data
+      # Keep SQLite/WAL, browser profiles and active temporary files on local SSD.
+      - ${MEDIA_DATA_PATH:-./data}:/data
+      # Only completed media belongs on NAS/HDD. Defaults preserve existing data.
+      - ${MEDIA_DOWNLOADS_PATH:-${MEDIA_DATA_PATH:-./data}/downloads}:/data/downloads
+    # Chromium uses shared memory instead of temporary-file-backed renderer IPC.
     shm_size: 1gb
     stop_grace_period: 2m
     restart: unless-stopped
