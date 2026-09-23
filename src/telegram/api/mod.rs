@@ -140,6 +140,8 @@ pub struct ApiState {
     download_tx: mpsc::Sender<ChatRequest>,
     paused: AtomicBool,
     last_progress_publish_ms: AtomicU64,
+    /// Bumped whenever retained history changes, so clients refetch only then.
+    history_revision: AtomicU64,
     pause_tx: watch::Sender<bool>,
     request_status: Mutex<String>,
     status: Mutex<DashboardStatus>,
@@ -209,11 +211,11 @@ struct DashboardSnapshot {
     paused: bool,
     cancelling: bool,
     channel_names: BTreeMap<String, String>,
+    history_revision: u64,
     downloaded_files: u64,
     downloaded_bytes: String,
     active_count: usize,
     active: Vec<DownloadSnapshot>,
-    completed: Vec<CompletedSnapshot>,
 }
 
 #[derive(Serialize)]
@@ -259,6 +261,8 @@ impl ApiState {
             download_tx,
             paused: AtomicBool::new(false),
             last_progress_publish_ms: AtomicU64::new(0),
+            // Distinct across restarts so reconnecting clients refetch.
+            history_revision: AtomicU64::new(now_millis()),
             pause_tx,
             request_status: Mutex::new(
                 "Paste a Telegram message or chat link to begin".to_string(),
@@ -392,27 +396,38 @@ impl ApiState {
     }
 
     pub async fn download_finished(&self, msg_id: i32, bytes: u64, completed: bool) {
-        let mut stats = self.stats.lock().await;
-        if let Some(item) = stats.active.remove(&msg_id)
+        let item = self.stats.lock().await.active.remove(&msg_id);
+        if let Some(item) = item
             && completed
         {
-            let now = now_millis();
             let mut completed = CompletedDownload {
                 id: 0,
                 msg_id,
                 file_name: item.file_name,
                 path: item.path,
                 bytes,
-                completed_at: now,
+                completed_at: now_millis(),
             };
-            let conn = self.database.connection().await;
-            match history::insert(&conn, &mut completed).await {
-                Ok(()) => stats.completed.push(completed),
+            // Keep live snapshots available while the history row commits.
+            let saved = history::insert(&*self.database.connection().await, &mut completed).await;
+            match saved {
+                Ok(()) => {
+                    let mut stats = self.stats.lock().await;
+                    let key = (completed.completed_at, completed.id);
+                    let at = stats
+                        .completed
+                        .partition_point(|item| (item.completed_at, item.id) <= key);
+                    stats.completed.insert(at, completed);
+                    self.history_changed();
+                }
                 Err(error) => warn!("cannot save download history: {error:#}"),
             }
         }
-        drop(stats);
         self.publish().await;
+    }
+
+    pub(super) fn history_changed(&self) {
+        self.history_revision.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn history_cutoff(&self) -> u64 {
@@ -440,7 +455,13 @@ impl ApiState {
         let cutoff = now.saturating_sub(history::retention_ms(days));
         // Forgotten paths still need pruning when the visible history is empty.
         match history::delete_expired(&*self.database.connection().await, now, days).await {
-            Ok(()) => stats.completed.retain(|item| item.completed_at > cutoff),
+            Ok(()) => {
+                let before = stats.completed.len();
+                stats.completed.retain(|item| item.completed_at > cutoff);
+                if stats.completed.len() != before {
+                    self.history_changed();
+                }
+            }
             Err(error) => warn!("cannot prune download history: {error:#}"),
         }
     }
@@ -514,20 +535,6 @@ impl ApiState {
             })
             .collect();
 
-        let completed = stats
-            .completed
-            .iter()
-            .rev()
-            .map(|item| CompletedSnapshot {
-                id: item.key(),
-                msg_id: item.msg_id,
-                file_name: item.file_name.clone(),
-                path: item.path.clone(),
-                size: format_byte(item.bytes as f64),
-                completed_at: item.completed_at,
-            })
-            .collect();
-
         let history_retention_days = self.common.borrow().history_retention_days;
         DashboardSnapshot {
             history_retention_days,
@@ -539,14 +546,33 @@ impl ApiState {
             paused: self.paused.load(Ordering::Relaxed),
             cancelling: self.cancelling.load(Ordering::Relaxed),
             channel_names: self.channel_names.lock().await.clone(),
+            history_revision: self.history_revision.load(Ordering::Relaxed),
             downloaded_files: stats.completed.len() as u64,
             downloaded_bytes: format_byte(
                 stats.completed.iter().map(|item| item.bytes as f64).sum(),
             ),
             active_count: stats.active.len(),
             active,
-            completed,
         }
+    }
+
+    /// Retained history, newest first, optionally limited to the latest entries.
+    async fn history_snapshot(&self, limit: Option<usize>) -> Vec<CompletedSnapshot> {
+        let stats = self.stats.lock().await;
+        stats
+            .completed
+            .iter()
+            .rev()
+            .take(limit.unwrap_or(usize::MAX))
+            .map(|item| CompletedSnapshot {
+                id: item.key(),
+                msg_id: item.msg_id,
+                file_name: item.file_name.clone(),
+                path: item.path.clone(),
+                size: format_byte(item.bytes as f64),
+                completed_at: item.completed_at,
+            })
+            .collect()
     }
 }
 

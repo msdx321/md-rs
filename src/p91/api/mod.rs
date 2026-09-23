@@ -406,11 +406,23 @@ async fn resume_all(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
     Json(json!({ "status": "resumed", "count": count }))
 }
 
-async fn list_history(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
-    let records = ctx.history();
+#[derive(Deserialize)]
+struct HistoryQuery {
+    limit: Option<usize>,
+}
+
+async fn list_history(
+    State(ctx): State<Arc<AppCtx>>,
+    Query(query): Query<HistoryQuery>,
+) -> Json<Value> {
+    let mut records = ctx.history();
+    let count = records.len();
+    if let Some(limit) = query.limit {
+        records.truncate(limit);
+    }
     Json(json!({
         "history_retention_days": ctx.history_retention_days(),
-        "count": records.len(),
+        "count": count,
         "records": records,
     }))
 }

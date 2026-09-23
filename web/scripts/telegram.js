@@ -1,4 +1,5 @@
 import "./telegram-settings.js";
+import { createSnapshotRefresh } from "./snapshot-refresh.js";
 import { api, bindTabs, bindHistoryPagination, connectEvents, scheduleRender, reconcileRows, historyPeriod, dateTime, label, sizeLabel } from "./shared.js";
 
 const statusEl = document.querySelector("#status");
@@ -26,6 +27,7 @@ const actionEls = [...document.querySelectorAll("button[name=action]")];
 let paused = false;
 let historyBusy = false;
 let channelNamesSignature = null;
+let historyRevision = null;
 const historyPager = bindHistoryPagination(renderHistoryPage);
 
 bindTabs(tabEls, (tab) => {
@@ -140,13 +142,13 @@ function renderHistoryPage(items) {
   updateHistoryControls();
 }
 
-async function refreshHistory() {
-  const snapshot = await api('/telegram/api/history');
+const historySnapshots = createSnapshotRefresh((signal) => api('/telegram/api/history', { signal }), (snapshot) => {
   renderHistory(snapshot.records, snapshot.history_retention_days);
   historyPeriod('telegram', snapshot.history_retention_days);
   filesEl.textContent = snapshot.downloaded_files.toLocaleString();
   bytesEl.textContent = sizeLabel(snapshot.downloaded_bytes);
-}
+}, (error) => { throw error; });
+function refreshHistory() { return historySnapshots.refresh({ fresh: true }); }
 
 async function historyAction(path, message) {
   if (historyBusy) return;
@@ -207,7 +209,14 @@ function render(snapshot) {
   filesEl.textContent = snapshot.downloaded_files.toLocaleString();
   bytesEl.textContent = sizeLabel(snapshot.downloaded_bytes);
   activeEl.textContent = snapshot.active_count;
-  renderHistory(snapshot.completed, snapshot.history_retention_days);
+  // Live snapshots carry only a history revision; fetch records when it moves.
+  if (snapshot.history_revision !== historyRevision) {
+    historyRevision = snapshot.history_revision;
+    historySnapshots.invalidate();
+    if (document.querySelector('#completed-tab').getAttribute('aria-selected') === 'true') {
+      historySnapshots.refresh().catch(() => {});
+    }
+  }
 
   const rows = [];
   document.querySelector('#tasks-empty').style.display = snapshot.active.length ? 'none' : 'block';

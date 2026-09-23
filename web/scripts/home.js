@@ -8,6 +8,10 @@ let tasks = null;
 let p91Tasks = null;
 let history = null;
 let p91History = null;
+let telegramHistory = null;
+let telegramHistoryRevision = null;
+// Only the newest entries are shown, so each module sends just that many.
+const RECENT_LIMIT = 10;
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 const queueSummary = scheduleRender(renderSummary);
 const queueActivity = scheduleRender(renderActivity);
@@ -169,7 +173,7 @@ function activeDownloads() {
 
 function recentDownloads() {
   return [
-    ...(telegram?.completed || []).map((item) => ({
+    ...(telegramHistory || []).map((item) => ({
       id: `telegram:${item.id}`,
       source: 'Telegram', name: item.file_name, detail: `${sizeLabel(item.size)} · Completed`, date: new Date(item.completed_at).getTime(),
     })),
@@ -181,7 +185,7 @@ function recentDownloads() {
       id: `p91:${item.id}`,
       source: '91Porn', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
     })),
-  ].sort((a, b) => b.date - a.date).slice(0, 10);
+  ].sort((a, b) => b.date - a.date).slice(0, RECENT_LIMIT);
 }
 
 function renderRows(target, rows, empty) {
@@ -260,7 +264,7 @@ function renderActivity() {
   renderRows($('overview-downloads'), rows, telegram && tasks && p91Tasks ? 'All caught up. New downloads will appear here.' : 'Waiting for all modules…');
 }
 function renderHistory() {
-  renderRows($('overview-history'), recentDownloads(), telegram && history && p91History ? 'No downloads recorded yet' : 'Waiting for all modules…');
+  renderRows($('overview-history'), recentDownloads(), telegramHistory && history && p91History ? 'No downloads recorded yet' : 'Waiting for all modules…');
 }
 const providers = ['jav', 'p91'];
 const taskErrors = new Set();
@@ -282,7 +286,7 @@ const taskResources = Object.fromEntries(providers.map((provider) => {
 const historyResources = Object.fromEntries(providers.map((provider) => {
   const showError = (failed) => refreshError(historyErrors, provider, failed, 'history-error',
     'Download history is unavailable. Retrying automatically.');
-  return [provider, createSnapshotRefresh((signal) => api(`/${provider}/api/history`, { signal }), (data) => {
+  return [provider, createSnapshotRefresh((signal) => api(`/${provider}/api/history?limit=${RECENT_LIMIT}`, { signal }), (data) => {
     if (provider === 'jav') history = data.records; else p91History = data.records;
     showError(false);
     queueHistory();
@@ -294,10 +298,22 @@ function refreshTasks(provider, fresh = false) {
 function refreshHistory(provider, fresh = false) {
   return Promise.all((provider ? [provider] : providers).map((name) => historyResources[name].refresh({ fresh })));
 }
+const telegramHistoryResource = createSnapshotRefresh((signal) => api(`/telegram/api/history?limit=${RECENT_LIMIT}`, { signal }), (data) => {
+  telegramHistory = data.records;
+  refreshError(historyErrors, 'telegram', false, 'history-error', 'Download history is unavailable. Retrying automatically.');
+  queueHistory();
+}, () => {
+  refreshError(historyErrors, 'telegram', true, 'history-error', 'Download history is unavailable. Retrying automatically.');
+  queueHistory();
+});
 connectEvents('/telegram/events', {
   message(event) {
     telegram = JSON.parse(event.data);
-    queueSummary(); queueActivity(); queueHistory();
+    if (telegram.history_revision !== telegramHistoryRevision) {
+      telegramHistoryRevision = telegram.history_revision;
+      telegramHistoryResource.refresh({ fresh: true });
+    }
+    queueSummary(); queueActivity();
   },
 }, $('telegram-connection'));
 connectEvents('/jav/api/events', {
@@ -329,4 +345,5 @@ connectEvents('/p91/api/events', {
   open() { refreshTasks('p91', true); refreshHistory('p91', true); },
 }, $('p91-connection'));
 // Refresh removals and history changes made in another tab, which have no task event.
-pollWhenVisible(() => Promise.all([refreshTasks(), refreshHistory()]), 30000);
+pollWhenVisible(() => Promise.all([refreshTasks(), refreshHistory(),
+  historyErrors.has('telegram') && telegramHistoryResource.refresh()]), 30000);
