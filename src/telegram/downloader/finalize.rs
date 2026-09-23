@@ -51,18 +51,7 @@ pub(super) async fn finalize_download(
     }
     clear_progress(temp_path, &web_state.database).await?;
 
-    if !fid.is_empty() {
-        let mut cache = file_ids.lock().await;
-        if cache.len() >= MAX_FILE_ID_CACHE {
-            // HashSet order is arbitrary, so this evicts a random entry
-            // (not truly the oldest). Fine for a dedup cache: the worst
-            // case is a one-off re-download of the evicted file.
-            if let Some(evicted) = cache.keys().next().cloned() {
-                cache.remove(&evicted);
-            }
-        }
-        cache.insert(fid.to_string(), crate::telegram::api::now_millis());
-    }
+    remember_file_id(msg_id, fid, file_ids, web_state).await;
 
     info!(
         "msg={msg_id}: saved {} -> {}",
@@ -71,6 +60,39 @@ pub(super) async fn finalize_download(
     );
     web_state.download_finished(msg_id, actual, true).await;
     Ok(())
+}
+
+/// Record a completed file ID in the bounded dedup cache and its database copy.
+pub(super) async fn remember_file_id(
+    msg_id: i32,
+    fid: &str,
+    file_ids: &Arc<Mutex<HashMap<String, u64>>>,
+    web_state: &Arc<ApiState>,
+) {
+    if fid.is_empty() {
+        return;
+    }
+    let now = crate::telegram::api::now_millis();
+    let evicted = {
+        let mut cache = file_ids.lock().await;
+        // HashMap order is arbitrary, so this evicts a random entry (not truly
+        // the oldest). Fine for a dedup cache: the worst case is a one-off
+        // re-download of the evicted file.
+        let evicted = (cache.len() >= MAX_FILE_ID_CACHE && !cache.contains_key(fid))
+            .then(|| cache.keys().next().cloned())
+            .flatten();
+        if let Some(evicted) = &evicted {
+            cache.remove(evicted);
+        }
+        cache.insert(fid.to_string(), now);
+        evicted
+    };
+    if let Err(error) =
+        crate::telegram::storage::record_file_id(&web_state.database, fid, now, evicted.as_deref())
+            .await
+    {
+        log::warn!("msg={msg_id}: cannot save file id: {error:#}");
+    }
 }
 
 /// Drop a partial `.part` download and its sidecar so the next attempt starts

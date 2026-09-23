@@ -53,8 +53,10 @@ pub(crate) async fn download_media_inner(
     };
     if !fid.is_empty() {
         let mut cache = file_ids.lock().await;
-        cache.retain(|_, time| *time > web_state.history_cutoff());
-        if cache.contains_key(&fid) {
+        if cache
+            .get(&fid)
+            .is_some_and(|time| *time > web_state.history_cutoff())
+        {
             // History predates stored media IDs. A durable path override lets
             // forgotten entries be requested again without resetting other media.
             let forgotten = crate::telegram::storage::history::was_forgotten(
@@ -67,8 +69,13 @@ pub(crate) async fn download_media_inner(
                 return Ok(false);
             }
             cache.remove(&fid);
+            drop(cache);
+            if let Err(error) =
+                crate::telegram::storage::forget_file_id(&web_state.database, &fid).await
+            {
+                warn!("msg={msg_id}: cannot forget file id: {error:#}");
+            }
         }
-        drop(cache);
     }
 
     // Already fully downloaded?
@@ -80,12 +87,7 @@ pub(crate) async fn download_media_inner(
                 final_path.display()
             );
             debug!("msg={msg_id}: file already exists, marking complete");
-            if !fid.is_empty() {
-                file_ids
-                    .lock()
-                    .await
-                    .insert(fid, crate::telegram::api::now_millis());
-            }
+            super::finalize::remember_file_id(msg_id, &fid, file_ids, web_state).await;
             let size = metadata.len();
             web_state
                 .download_started(msg_id, final_path, size, size, &source_name)

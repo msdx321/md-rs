@@ -6,9 +6,11 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use tokio::sync::Mutex;
 
 use crate::telegram::config::Config;
-use crate::telegram::storage::{AppData, ChatData};
+use crate::telegram::storage::ChatData;
 
-/// Commit the dedup cache, retry sets, and scan cursors in one transaction.
+/// Commit retry sets and scan cursors in one transaction. File IDs are
+/// recorded individually when downloads finish; expired ones are only evicted
+/// from memory here (the database copy is pruned with history).
 pub(super) async fn persist_state(
     database: &crate::storage::Database,
     file_ids: &Arc<Mutex<HashMap<String, u64>>>,
@@ -16,19 +18,9 @@ pub(super) async fn persist_state(
     cutoff: u64,
 ) -> anyhow::Result<()> {
     file_ids.lock().await.retain(|_, time| *time > cutoff);
-    let mut data = AppData::default();
-    let mut ids: Vec<(String, u64)> = file_ids
-        .lock()
-        .await
-        .iter()
-        .map(|(id, time)| (id.clone(), *time))
-        .collect();
-    ids.sort();
-    data.downloaded_file_ids = ids;
     let mut chats: Vec<ChatData> = data_chats.values().cloned().collect();
     chats.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-    data.chat = chats;
-    crate::telegram::storage::save(database, &data).await
+    crate::telegram::storage::save(database, &chats).await
 }
 
 pub(super) async fn sync_retry_set(
