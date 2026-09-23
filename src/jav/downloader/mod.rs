@@ -5,6 +5,7 @@
 //! a later resume only fetches the missing segments.
 
 mod merge;
+mod segment;
 
 use anyhow::Context;
 use std::collections::HashMap;
@@ -22,7 +23,7 @@ use crate::jav::source::scraper::VideoCard;
 use crate::jav::source::stream::m3u8::{M3u8Info, Segment};
 use crate::jav::source::stream::{self, StreamKind};
 use crate::jav::storage::Record;
-use crate::jav::util::{SpeedTracker, cloudflare_hint, sanitize_filename, strip_fake_header};
+use crate::jav::util::{SpeedTracker, cloudflare_hint, sanitize_filename};
 use crate::runtime::BackgroundTask;
 
 /// How a download run ended.
@@ -689,9 +690,6 @@ async fn download_segments(
     }
 }
 
-/// Largest per-segment buffer reserved up front from a declared length.
-const SEGMENT_PREALLOCATION_LIMIT: u64 = 64 * 1024 * 1024;
-
 /// Shared state of one track's segment workers.
 struct SegmentPool<'a> {
     ctx: &'a Arc<AppCtx>,
@@ -800,19 +798,43 @@ async fn fetch_segment(
     keys: &HashMap<String, Vec<u8>>,
     bytes: &AtomicU64,
 ) -> anyhow::Result<()> {
-    let data = while_running(ctx, id, async {
-        let resp = fetch
+    let resp = while_running(ctx, id, async {
+        fetch
             .download_response(&segment.url, page_url, segment.byte_range)
-            .await?;
-
-        // Size the buffer once from the range or header, bounded against bogus lengths.
-        let expected = segment
-            .byte_range
-            .map(|(_, length)| length)
-            .or(resp.content_length())
-            .unwrap_or(0)
-            .min(SEGMENT_PREALLOCATION_LIMIT);
-        let mut data = Vec::with_capacity(expected as usize);
+            .await
+    })
+    .await?;
+    let encryption = segment
+        .encryption
+        .as_ref()
+        .map(|encryption| {
+            let key = keys
+                .get(&encryption.key_url)
+                .ok_or_else(|| anyhow::anyhow!("segment key is missing"))?;
+            Ok::<_, anyhow::Error>((key.clone(), encryption.iv))
+        })
+        .transpose()?;
+    let tmp = path.with_extension("part");
+    // A bounded queue and buffered blocking writer keep memory independent of
+    // segment length. The writer owns every chunk; no whole-body copy is made.
+    let (send, mut receive) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
+    let writer_path = tmp.clone();
+    let writer = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let file = std::fs::File::create(writer_path)?;
+        let output = std::io::BufWriter::with_capacity(256 * 1024, file);
+        let mut writer = segment::SegmentWriter::new(
+            output,
+            encryption.as_ref().map(|(key, iv)| (key.as_slice(), iv)),
+        )?;
+        while let Some(chunk) = receive.blocking_recv() {
+            writer.push(&chunk)?;
+        }
+        writer.finish()?;
+        Ok(())
+    });
+    let transfer = while_running(ctx, id, async {
+        let mut prefix = Vec::with_capacity(8192);
+        let mut length = 0u64;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = tokio::time::timeout(Duration::from_secs(60), stream.next())
             .await
@@ -827,73 +849,36 @@ async fn fetch_segment(
                     )
                     .await;
                 bytes.fetch_add(part.len() as u64, Ordering::Relaxed);
-                data.extend_from_slice(part);
+                length += part.len() as u64;
+                if prefix.len() < 8192 {
+                    prefix.extend_from_slice(&part[..part.len().min(8192 - prefix.len())]);
+                    validate_media_body(&segment.url, &prefix)?;
+                }
+                if send.send(part.to_vec()).await.is_err() {
+                    // The writer's error below is more useful than a closed queue.
+                    return Ok(());
+                }
             }
         }
-        Ok(data)
+        validate_media_body(&segment.url, &prefix)?;
+        if let Some((_, expected)) = segment.byte_range {
+            anyhow::ensure!(
+                length == expected,
+                "incomplete HLS byte range for {}",
+                segment.url
+            );
+        }
+        Ok(())
     })
-    .await?;
-    validate_media_body(&segment.url, &data)?;
-
-    if let Some((_, length)) = segment.byte_range {
-        anyhow::ensure!(
-            data.len() as u64 == length,
-            "incomplete HLS byte range for {}",
-            segment.url
-        );
-    }
-    let data = if let Some(encryption) = &segment.encryption {
-        let key = keys
-            .get(&encryption.key_url)
-            .ok_or_else(|| anyhow::anyhow!("segment key is missing"))?;
-        decrypt(data, key, &encryption.iv)?
-    } else {
-        data
-    };
-
-    // SupJav prefixes every segment with a decoy image header. If no MPEG-TS
-    // sync run is found the payload is not a decoy-wrapped TS fragment (an
-    // fMP4 part, for instance), so it is stored untouched.
-    let stripped = strip_fake_header(&data);
-    let payload: &[u8] = if stripped.is_empty() && !data.is_empty() {
-        log::trace!(
-            "segment {}: no MPEG-TS sync found, keeping the raw payload",
-            path.display()
-        );
-        &data
-    } else {
-        stripped
-    };
-
-    // Drain filesystem writes even after pause: Tokio filesystem work may keep
-    // running after its future is dropped. Ownership must outlive rename.
-    // Write via a temp name so a crash mid-write cannot look like a
-    // complete segment on the next resume.
-    let tmp = path.with_extension("part");
-    tokio::fs::write(&tmp, payload).await?;
+    .await;
+    drop(send);
+    // Drain the writer on success, error AND pause/cancel before releasing the
+    // download lease or touching its directory. Only a complete body is renamed.
+    let written = writer.await.context("segment writer failed")?;
+    transfer?;
+    written?;
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
-}
-
-/// HLS AES-128 uses PKCS#7 padding. Reject truncation so the segment is retried.
-/// Decrypts in place, reusing the downloaded buffer.
-fn decrypt(mut data: Vec<u8>, key: &[u8], iv: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
-    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
-    type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
-    anyhow::ensure!(key.len() == 16, "unexpected AES key length {}", key.len());
-    anyhow::ensure!(
-        !data.is_empty() && data.len().is_multiple_of(16),
-        "truncated AES segment"
-    );
-    let cipher =
-        Aes128CbcDec::new_from_slices(key, iv).map_err(|e| anyhow::anyhow!("cipher init: {e}"))?;
-    let len = cipher
-        .decrypt_padded::<Pkcs7>(&mut data)
-        .map_err(|e| anyhow::anyhow!("decrypt: {e}"))?
-        .len();
-    anyhow::ensure!(len > 0, "empty decrypted segment");
-    data.truncate(len);
-    Ok(data)
 }
 
 #[cfg(test)]
@@ -901,6 +886,14 @@ mod tests {
     use super::*;
     use crate::jav::source::stream::m3u8::parse_media_m3u8;
     use crate::jav::util::iv_for_segment;
+
+    fn decrypt(data: Vec<u8>, key: &[u8], iv: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
+        let mut writer = segment::SegmentWriter::new(Vec::new(), Some((key, iv)))?;
+        for chunk in data.chunks(17) {
+            writer.push(chunk)?;
+        }
+        writer.finish()
+    }
 
     #[test]
     fn decrypts_aes_cbc_round_trip() {
