@@ -2,7 +2,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Mutex,
+        LazyLock, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -10,13 +10,14 @@ use std::{
 
 use axum::{
     Json,
-    extract::{MatchedPath, Request},
+    extract::{MatchedPath, Query, Request},
     http::header,
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use log::{Log, Metadata, Record};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 const CAPACITY: usize = 1_000;
 static ENTRIES: Mutex<VecDeque<Entry>> = Mutex::new(VecDeque::new());
@@ -114,7 +115,41 @@ pub(crate) async fn request_log(request: Request, next: Next) -> Response {
     response
 }
 
-pub(crate) async fn snapshot() -> impl IntoResponse {
-    let entries = ENTRIES.lock().expect("log buffer lock poisoned").clone();
-    ([(header::CACHE_CONTROL, "no-store")], Json(entries))
+#[derive(Default, Deserialize)]
+pub(crate) struct LogQuery {
+    after_id: Option<u64>,
+    session: Option<String>,
+}
+
+pub(crate) async fn snapshot(Query(query): Query<LogQuery>) -> impl IntoResponse {
+    static SESSION: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "{}-{}",
+            std::process::id(),
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+        )
+    });
+    let entries = ENTRIES.lock().expect("log buffer lock poisoned");
+    let cursor = entries.back().map_or(0, |entry| entry.id);
+    let oldest_id = entries.front().map_or(1, |entry| entry.id);
+    let reset = query.session.as_deref() != Some(SESSION.as_str())
+        || query
+            .after_id
+            .is_none_or(|id| id > cursor || id < oldest_id.saturating_sub(1));
+    let rows: Vec<_> = entries
+        .iter()
+        .filter(|entry| reset || query.after_id.is_none_or(|id| entry.id > id))
+        .cloned()
+        .collect();
+    drop(entries);
+    // Preserve the original full-array API for clients without a cursor.
+    let body = if query.after_id.is_none() {
+        json!(rows)
+    } else {
+        json!({
+            "session": *SESSION, "reset": reset, "cursor": cursor,
+            "oldest_id": oldest_id, "entries": rows,
+        })
+    };
+    ([(header::CACHE_CONTROL, "no-store")], Json(body))
 }

@@ -18,6 +18,8 @@ let loaded = false;
 let paused = false;
 let loading = false;
 let error = false;
+let cursor = 0;
+let session = '';
 
 source.value = ['telegram', 'jav', 'p91'].find(module => document.body.classList.contains(module)) || '';
 
@@ -94,13 +96,17 @@ async function refresh() {
   if (!panel.open || !panel.getClientRects().length || document.hidden || paused || loading) return;
   loading = true;
   try {
-    const response = await fetch('/api/logs', { cache: 'no-store', signal: AbortSignal.timeout(10000) });
+    const query = new URLSearchParams({ after_id: String(cursor), session });
+    const response = await fetch(`/api/logs?${query}`, { cache: 'no-store', signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error('Could not load logs');
     const next = await response.json();
     if (!panel.open || !panel.getClientRects().length || document.hidden || paused) return;
-    const changed = !loaded || next.at(-1)?.id !== entries.at(-1)?.id
-      || next.at(-1)?.timestamp !== entries.at(-1)?.timestamp;
-    entries = next;
+    const changed = !loaded || next.reset || next.entries.length > 0
+      || (entries.length > 0 && entries[0].id < next.oldest_id);
+    entries = next.reset ? next.entries
+      : [...entries.filter(entry => entry.id >= next.oldest_id), ...next.entries];
+    cursor = next.cursor;
+    session = next.session;
     loaded = true;
     error = false;
     if (changed) {
