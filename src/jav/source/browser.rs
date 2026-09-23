@@ -9,6 +9,8 @@
 //! stay on the much faster `wreq` path. Chromium stays alive between mints, but
 //! each mint gets an isolated context and a short-lived DevTools connection.
 //! Disposing both leaves no challenge pages or transport polling threads idle.
+//! Between mints, background services and spare-renderer prewarming are disabled;
+//! a one-shot memory-pressure notification asks Chromium to release idle caches.
 //!
 //! Two details are load-bearing and easy to get wrong:
 //!
@@ -30,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use headless_chrome::browser::transport::{SessionId, Transport};
 use headless_chrome::browser::{DEFAULT_ARGS, default_executable};
-use headless_chrome::protocol::cdp::{Emulation, Network, Page, Target};
+use headless_chrome::protocol::cdp::{Emulation, Memory, Network, Page, Target};
 
 use crate::jav::source::cf::MintedCookie;
 
@@ -234,11 +236,14 @@ fn launch(opts: &BrowserOptions, user_agent: &str) -> Result<Process, String> {
     log::info!("launching the cookie-minting browser ({})", describe(opts));
     let mut args: Vec<std::ffi::OsString> = vec![
         "--disable-gpu".into(),
-        "--disable-dev-shm-usage".into(),
         "--no-first-run".into(),
         "--no-startup-window".into(),
         "--no-default-browser-check".into(),
         "--disable-background-networking".into(),
+        // This process only mints cookies; it needs no background component
+        // downloads or domain-reliability uploads between challenges.
+        "--disable-component-update".into(),
+        "--disable-domain-reliability".into(),
         "--disable-blink-features=AutomationControlled".into(),
         // Crashpad cannot write to its default directory when the process
         // is confined by a sandbox, and a renderer that cannot record a
@@ -269,14 +274,30 @@ fn launch(opts: &BrowserOptions, user_agent: &str) -> Result<Process, String> {
     let profile_path = std::fs::canonicalize(profile.path())
         .map_err(|e| format!("cannot resolve browser profile: {e}"))?;
     let port_file = profile_path.join("DevToolsActivePort");
+    // Keep a warm browser, not a spare renderer or background discovery/hint
+    // services. Merge the library's disabled features into one switch: repeated
+    // --disable-features switches would overwrite rather than extend each other.
+    let disabled_features = DEFAULT_ARGS
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("--disable-features="))
+        .chain([
+            "MediaRouter",
+            "OptimizationHints",
+            "SpareRendererForSitePerProcess",
+        ])
+        .collect::<Vec<_>>()
+        .join(",");
+    args.push(format!("--disable-features={disabled_features}").into());
     // Keep the library's automation setup, but restore Chrome's idle throttling.
     let defaults = DEFAULT_ARGS.iter().filter(|arg| {
-        !matches!(
-            **arg,
-            "--disable-background-timer-throttling"
-                | "--disable-backgrounding-occluded-windows"
-                | "--disable-renderer-backgrounding"
-        )
+        !arg.starts_with("--disable-features=")
+            && !matches!(
+                **arg,
+                "--disable-dev-shm-usage"
+                    | "--disable-background-timer-throttling"
+                    | "--disable-backgrounding-occluded-windows"
+                    | "--disable-renderer-backgrounding"
+            )
     });
     let mut child = BrowserChild(
         Command::new(executable)
@@ -346,6 +367,15 @@ fn mint_with_browser(
     }) {
         // disposeOnDetach is the fallback, including cancellation and failed CDP calls.
         log::warn!("mint context cleanup deferred to disconnect: {error}");
+    }
+    // Reclaim caches only after the challenge is over, while the mint lock still
+    // excludes the next caller. This is a one-shot notification, not persistent
+    // pressure or a periodic idle timer. Unsupported CDP versions must not turn
+    // a successfully minted cookie into an error.
+    if let Err(error) = transport.call_method_on_browser(Memory::SimulatePressureNotification {
+        level: Memory::PressureLevel::Critical,
+    }) {
+        log::debug!("Chromium idle memory reclamation unavailable: {error}");
     }
     result
 }
