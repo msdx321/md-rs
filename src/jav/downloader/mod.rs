@@ -244,10 +244,8 @@ async fn migrate_segments(legacy: &Path, destination: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-fn is_non_empty(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
+async fn is_non_empty(path: &Path) -> bool {
+    tokio::fs::metadata(path).await.is_ok_and(|m| m.len() > 0)
 }
 
 async fn existing_output(path: &Path) -> Option<(PathBuf, u64)> {
@@ -569,7 +567,7 @@ async fn prepare_track(
     }
     if let Some(init) = &info.init_segment {
         let path = dir.join("init.mp4");
-        if !is_non_empty(&path) {
+        if !is_non_empty(&path).await {
             fetch_segment(
                 ctx,
                 id,
@@ -633,77 +631,24 @@ async fn download_segments(
     };
 
     let rejected = Arc::new(AtomicBool::new(false));
-    let mut failed: Vec<usize> = Vec::new();
     let mut last_error = String::new();
-    let mut segments = info.segments.iter().enumerate();
-    let mut downloads = FuturesUnordered::new();
-    // Spawn only the configured number of workers, rather than allocating a
-    // waiting task for every segment. Dropping the stream aborts its workers.
-    loop {
-        while downloads.len() < segment_concurrency.clamp(1, 32) {
-            let Some((index, segment)) = segments.next() else {
-                break;
-            };
-            let fetch = fetch.clone();
-            let ctx = Arc::clone(ctx);
-            let id = id.to_string();
-            let page_url = page_url.to_string();
-            let dir = temp_dir.to_path_buf();
-            let segment = segment.clone();
-            let keys = Arc::clone(&keys);
-            let done = Arc::clone(&done);
-            let bytes = Arc::clone(&bytes);
-            let rejected = Arc::clone(&rejected);
+    let pool = SegmentPool {
+        ctx,
+        fetch,
+        id,
+        page_url,
+        info,
+        keys: &keys,
+        temp_dir,
+        done: &done,
+        bytes: &bytes,
+        rejected: &rejected,
+        concurrency: segment_concurrency.clamp(1, 32),
+    };
+    let mut failed = pool.run(0..info.segments.len(), &mut last_error).await;
 
-            let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-                if rejected.load(Ordering::Relaxed) || control(&ctx, &id) != TaskState::Running {
-                    anyhow::bail!("paused, cancelled or media rejected");
-                }
-                let path = dir.join(format!("{index}.ts"));
-                if is_non_empty(&path) {
-                    log::trace!("[{id}] segment={index} cached path={}", path.display());
-                    done.fetch_add(1, Ordering::Relaxed);
-                    return Ok(());
-                }
-                log::trace!("[{id}] segment={index} fetching path={}", path.display());
-                let started = Instant::now();
-                fetch_segment(&ctx, &id, &fetch, &page_url, &segment, &path, &keys, &bytes)
-                    .await
-                    .inspect_err(|e| {
-                        if e.is::<MediaRejected>() {
-                            rejected.store(true, Ordering::Relaxed);
-                        }
-                    })?;
-                log::trace!(
-                    "[{id}] segment={index} complete elapsed_ms={}",
-                    started.elapsed().as_millis()
-                );
-                done.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }));
-            downloads.push(async move { (index, handle.await) });
-        }
-        let Some((index, result)) = downloads.next().await else {
-            break;
-        };
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                log::debug!("[{id}] segment={index} fetch failed: {e:#}");
-                if e.is::<MediaRejected>() || !rejected.load(Ordering::Relaxed) {
-                    last_error = format!("{e:#}");
-                }
-                failed.push(index);
-            }
-            Err(e) => {
-                log::error!("[{id}] segment {index} task failed: {e}");
-                failed.push(index);
-            }
-        }
-    }
-
-    // Retry transient failures in playlist order a few times before giving up.
-    failed.sort_unstable();
+    // Retry transient failures a few times before giving up. Rounds reuse the
+    // bounded worker pool and dispatch in playlist order.
     let mut attempt = 0;
     while !failed.is_empty() && attempt < 3 && !rejected.load(Ordering::Relaxed) {
         attempt += 1;
@@ -716,37 +661,7 @@ async fn download_segments(
         if state != TaskState::Running {
             break;
         }
-        let mut still_failed = Vec::new();
-        for &index in &failed {
-            let path = temp_dir.join(format!("{index}.ts"));
-            match fetch_segment(
-                ctx,
-                id,
-                fetch,
-                page_url,
-                &info.segments[index],
-                &path,
-                &keys,
-                &bytes,
-            )
-            .await
-            {
-                Ok(()) => {
-                    log::trace!("[{id}] segment={index} retry={attempt}/3 complete");
-                    done.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    log::debug!("[{id}] segment {index} retry {attempt}/3 failed: {e:#}");
-                    last_error = format!("{e:#}");
-                    if e.is::<MediaRejected>() {
-                        rejected.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    still_failed.push(index);
-                }
-            }
-        }
-        failed = still_failed;
+        failed = pool.run(failed, &mut last_error).await;
     }
 
     reporter.abort().await;
@@ -774,6 +689,106 @@ async fn download_segments(
     }
 }
 
+/// Largest per-segment buffer reserved up front from a declared length.
+const SEGMENT_PREALLOCATION_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Shared state of one track's segment workers.
+struct SegmentPool<'a> {
+    ctx: &'a Arc<AppCtx>,
+    fetch: &'a Fetcher,
+    id: &'a str,
+    page_url: &'a str,
+    info: &'a M3u8Info,
+    keys: &'a Arc<HashMap<String, Vec<u8>>>,
+    temp_dir: &'a Path,
+    done: &'a Arc<AtomicU64>,
+    bytes: &'a Arc<AtomicU64>,
+    rejected: &'a Arc<AtomicBool>,
+    concurrency: usize,
+}
+
+impl SegmentPool<'_> {
+    /// Fetch `indices` with at most `concurrency` workers; returns the failed
+    /// indices in playlist order.
+    async fn run(
+        &self,
+        indices: impl IntoIterator<Item = usize>,
+        last_error: &mut String,
+    ) -> Vec<usize> {
+        let id = self.id;
+        let mut indices = indices.into_iter();
+        let mut failed = Vec::new();
+        let mut downloads = FuturesUnordered::new();
+        // Spawn only the configured number of workers, rather than allocating a
+        // waiting task for every segment. Dropping the stream aborts its workers.
+        loop {
+            while downloads.len() < self.concurrency {
+                let Some(index) = indices.next() else {
+                    break;
+                };
+                let fetch = self.fetch.clone();
+                let ctx = Arc::clone(self.ctx);
+                let id = id.to_string();
+                let page_url = self.page_url.to_string();
+                let dir = self.temp_dir.to_path_buf();
+                let segment = self.info.segments[index].clone();
+                let keys = Arc::clone(self.keys);
+                let done = Arc::clone(self.done);
+                let bytes = Arc::clone(self.bytes);
+                let rejected = Arc::clone(self.rejected);
+
+                let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+                    if rejected.load(Ordering::Relaxed) || control(&ctx, &id) != TaskState::Running
+                    {
+                        anyhow::bail!("paused, cancelled or media rejected");
+                    }
+                    let path = dir.join(format!("{index}.ts"));
+                    if is_non_empty(&path).await {
+                        log::trace!("[{id}] segment={index} cached path={}", path.display());
+                        done.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    log::trace!("[{id}] segment={index} fetching path={}", path.display());
+                    let started = Instant::now();
+                    fetch_segment(&ctx, &id, &fetch, &page_url, &segment, &path, &keys, &bytes)
+                        .await
+                        .inspect_err(|e| {
+                            if e.is::<MediaRejected>() {
+                                rejected.store(true, Ordering::Relaxed);
+                            }
+                        })?;
+                    log::trace!(
+                        "[{id}] segment={index} complete elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    );
+                    done.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }));
+                downloads.push(async move { (index, handle.await) });
+            }
+            let Some((index, result)) = downloads.next().await else {
+                break;
+            };
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    log::debug!("[{id}] segment={index} fetch failed: {e:#}");
+                    if e.is::<MediaRejected>() || !self.rejected.load(Ordering::Relaxed) {
+                        *last_error = format!("{e:#}");
+                    }
+                    failed.push(index);
+                }
+                Err(e) => {
+                    log::error!("[{id}] segment {index} task failed: {e}");
+                    failed.push(index);
+                }
+            }
+        }
+        failed.sort_unstable();
+        failed
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn fetch_segment(
     ctx: &AppCtx,
@@ -790,7 +805,14 @@ async fn fetch_segment(
             .download_response(&segment.url, page_url, segment.byte_range)
             .await?;
 
-        let mut data = Vec::new();
+        // Size the buffer once from the range or header, bounded against bogus lengths.
+        let expected = segment
+            .byte_range
+            .map(|(_, length)| length)
+            .or(resp.content_length())
+            .unwrap_or(0)
+            .min(SEGMENT_PREALLOCATION_LIMIT);
+        let mut data = Vec::with_capacity(expected as usize);
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = tokio::time::timeout(Duration::from_secs(60), stream.next())
             .await
@@ -824,7 +846,7 @@ async fn fetch_segment(
         let key = keys
             .get(&encryption.key_url)
             .ok_or_else(|| anyhow::anyhow!("segment key is missing"))?;
-        decrypt(&data, key, &encryption.iv)?
+        decrypt(data, key, &encryption.iv)?
     } else {
         data
     };
@@ -854,7 +876,8 @@ async fn fetch_segment(
 }
 
 /// HLS AES-128 uses PKCS#7 padding. Reject truncation so the segment is retried.
-fn decrypt(data: &[u8], key: &[u8], iv: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
+/// Decrypts in place, reusing the downloaded buffer.
+fn decrypt(mut data: Vec<u8>, key: &[u8], iv: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
     use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
     type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
     anyhow::ensure!(key.len() == 16, "unexpected AES key length {}", key.len());
@@ -862,14 +885,15 @@ fn decrypt(data: &[u8], key: &[u8], iv: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
         !data.is_empty() && data.len().is_multiple_of(16),
         "truncated AES segment"
     );
-    let mut buf = data.to_vec();
     let cipher =
         Aes128CbcDec::new_from_slices(key, iv).map_err(|e| anyhow::anyhow!("cipher init: {e}"))?;
-    let out = cipher
-        .decrypt_padded::<Pkcs7>(&mut buf)
-        .map_err(|e| anyhow::anyhow!("decrypt: {e}"))?;
-    anyhow::ensure!(!out.is_empty(), "empty decrypted segment");
-    Ok(out.to_vec())
+    let len = cipher
+        .decrypt_padded::<Pkcs7>(&mut data)
+        .map_err(|e| anyhow::anyhow!("decrypt: {e}"))?
+        .len();
+    anyhow::ensure!(len > 0, "empty decrypted segment");
+    data.truncate(len);
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -892,7 +916,7 @@ mod tests {
         let enc = Enc::new_from_slices(&key, &iv).unwrap();
         let ciphertext = enc.encrypt_padded::<Pkcs7>(&mut buf, len).unwrap().to_vec();
 
-        let out = decrypt(&ciphertext, &key, &iv_for_segment(0, &None)).unwrap();
+        let out = decrypt(ciphertext.clone(), &key, &iv_for_segment(0, &None)).unwrap();
         assert_eq!(out, plaintext);
     }
 
@@ -910,12 +934,12 @@ mod tests {
         let ciphertext = enc.encrypt_padded::<Pkcs7>(&mut buf, len).unwrap().to_vec();
 
         assert_eq!(
-            decrypt(&ciphertext, &key, &iv_for_segment(5, &None)).unwrap(),
+            decrypt(ciphertext.clone(), &key, &iv_for_segment(5, &None)).unwrap(),
             plaintext
         );
         // Wrong index → wrong IV → garbage, never the plaintext.
         assert_ne!(
-            decrypt(&ciphertext, &key, &iv_for_segment(6, &None)).unwrap(),
+            decrypt(ciphertext.clone(), &key, &iv_for_segment(6, &None)).unwrap(),
             plaintext
         );
     }
@@ -931,12 +955,12 @@ mod tests {
         let enc = Enc::new_from_slices(&key, &iv_for_segment(0, &None)).unwrap();
         let mut ciphertext = enc.encrypt_padded::<Pkcs7>(&mut buf, len).unwrap().to_vec();
         ciphertext.extend_from_slice(&[0xde, 0xad]); // truncated tail
-        assert!(decrypt(&ciphertext, &key, &iv_for_segment(0, &None)).is_err());
+        assert!(decrypt(ciphertext.clone(), &key, &iv_for_segment(0, &None)).is_err());
     }
 
     #[test]
     fn rejects_wrong_key_length() {
-        assert!(decrypt(&[0u8; 16], &[0u8; 8], &iv_for_segment(0, &None)).is_err());
+        assert!(decrypt(vec![0u8; 16], &[0u8; 8], &iv_for_segment(0, &None)).is_err());
     }
 
     #[test]
@@ -1157,7 +1181,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn download_segments_retries_transient_failures_in_playlist_order() {
+        async fn download_segments_retries_transient_failures_concurrently() {
             let mut server = Server::new().await;
             let dir = tempfile::tempdir().unwrap();
             let info = playlist(&server.url, 2);
@@ -1165,14 +1189,22 @@ mod tests {
             let run = start(ctx.clone(), info.clone(), dir.path().into(), 2);
             let a = server.next().await;
             let b = server.next().await;
-            // Failure completion order must not choose retry order.
             drop(b.respond(response("503 Unavailable", "", b"retry")));
             drop(a.respond(response("503 Unavailable", "", b"retry")));
-            for i in 0..2 {
-                let request = server.next().await;
+            // Both retries are in flight together, so either may arrive first.
+            let first = server.next().await;
+            let second = tokio::time::timeout(Duration::from_secs(5), server.next())
+                .await
+                .expect("retries run concurrently");
+            let mut retried = Vec::new();
+            for request in [first, second] {
+                let i = u8::from(request.head.starts_with("GET /1.ts "));
                 assert!(request.head.starts_with(&format!("GET /{i}.ts ")));
+                retried.push(i);
                 drop(request.respond(response("200 OK", "", &[b'A' + i])));
             }
+            retried.sort_unstable();
+            assert_eq!(retried, [0, 1]);
             assert!(matches!(run.await.unwrap().unwrap(), Outcome::Done));
             let raw = merge::assemble_track(dir.path(), &info, || true).unwrap();
             assert_eq!(std::fs::read(raw.path()).unwrap(), b"AB");
