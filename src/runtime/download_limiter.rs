@@ -30,7 +30,7 @@ impl Bucket {
         // earned under a faster limit (or while the limiter was disabled).
         self.tokens = if rate == self.rate {
             (self.tokens + now.duration_since(self.updated).as_secs_f64() * rate as f64)
-                .min(quantum(rate) as f64)
+                .min(capacity(rate) as f64)
         } else {
             0.0
         };
@@ -39,8 +39,10 @@ impl Bucket {
     }
 }
 
-fn quantum(rate: u64) -> u64 {
-    (rate / 10).clamp(1, 64 * 1024)
+// Allow up to 100ms of credit (at most 1 MiB), so millisecond timer jitter
+// does not throw away bandwidth. Charges stay small for competing downloads.
+fn capacity(rate: u64) -> u64 {
+    (rate / 10).clamp(1, 1024 * 1024)
 }
 
 impl DownloadLimiter {
@@ -75,7 +77,7 @@ impl DownloadLimiter {
                 let Some(rate) = indices.iter().map(|&i| rates[i]).filter(|&r| r > 0).min() else {
                     return;
                 };
-                let amount = (bytes as u64).min(quantum(rate)) as usize;
+                let amount = (bytes as u64).min(capacity(rate)).min(64 * 1024) as usize;
                 let now = Instant::now();
                 let mut wait = 0.0_f64;
                 for &i in &indices {
