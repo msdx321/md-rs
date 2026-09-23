@@ -150,7 +150,9 @@ impl Database {
     pub async fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let db = libsql::Builder::new_local(path).build().await?;
         let connection = db.connect()?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;").await?;
+        // WAL with NORMAL stays consistent after crashes; power loss can only
+        // drop the newest commits, so checkpoints may move back but never ahead.
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;").await?;
         let tx = connection.transaction().await?;
         let mut rows = tx.query("PRAGMA user_version", ()).await?;
         let version: i64 = rows
