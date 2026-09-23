@@ -52,11 +52,22 @@ struct ChatStats {
     failed: AtomicU64,
 }
 
+/// Downloads of a chat whose scan has finished, still running in the shared
+/// slot pool while the next chat is scanned.
+struct PendingChat<'a> {
+    chat_cfg: &'a ChatConfig,
+    live_retry: Arc<Mutex<HashSet<i32>>>,
+    scan: ChatScan,
+}
+
 /// Run one scan pass over every configured chat.
 ///
 /// Returns `true` if the whole cycle ran to completion, `false` if it was cut
 /// short by shutdown. In either case `data_chats` is left holding the live
 /// retry sets, which `run_downloader` persists immediately after this returns.
+///
+/// A chat's remaining downloads overlap the next chat's scan so free slots
+/// are refilled; its cursor becomes durable once those downloads drain.
 pub(super) async fn run_check_cycle(
     client: &Client,
     cfg: &mut Config,
@@ -66,9 +77,13 @@ pub(super) async fn run_check_cycle(
     report: &mut ScanReport,
 ) -> anyhow::Result<bool> {
     let chats = cfg.chat.clone();
+    let mut dialogs = DialogLookup::new(client);
+    let mut pending: Option<PendingChat> = None;
+    let mut completed = true;
     for chat_cfg in &chats {
         if shutdown.is_cancelled() {
-            return Ok(false);
+            completed = false;
+            break;
         }
         let chat_id = chat_cfg.chat_id.clone();
         // Retry ids live in SQLite (data_chats). The scan mutates this set
@@ -80,7 +95,7 @@ pub(super) async fn run_check_cycle(
             .unwrap_or_default();
         let live_retry = Arc::new(Mutex::new(old_retry));
 
-        match process_chat(
+        let scanned = process_chat(
             client,
             cfg,
             chat_cfg,
@@ -90,62 +105,117 @@ pub(super) async fn run_check_cycle(
             live_retry.clone(),
             runtime,
             shutdown,
+            &mut dialogs,
         )
-        .await
-        {
-            Ok(outcome) => {
-                report.chats.push(outcome.report);
-                sync_retry_set(data_chats, &chat_id, &live_retry).await;
-
-                if outcome.completed || shutdown.work_cancelled() {
-                    // The cursor and retry IDs must become durable together.
-                    if let Some(data) = data_chats.get_mut(&chat_id) {
-                        data.last_read_message_id = data.last_read_message_id.max(outcome.last_id);
+        .await;
+        let (previous, error) = match scanned {
+            Ok(scan) => (
+                pending.replace(PendingChat {
+                    chat_cfg,
+                    live_retry: live_retry.clone(),
+                    scan,
+                }),
+                None,
+            ),
+            Err(e) => (pending.take(), Some(e)),
+        };
+        if let Some(previous) = previous {
+            match finish_chat(runtime, data_chats, shutdown, report, previous).await {
+                Ok(done) => completed &= done,
+                Err(error) => {
+                    // Never abort a running chat's transfers by dropping them.
+                    if let Some(current) = pending.take() {
+                        let chat_id = &current.chat_cfg.chat_id;
+                        drain_chat(current.chat_cfg, current.scan, shutdown).await;
+                        sync_retry_set(data_chats, chat_id, &current.live_retry).await;
                     }
-                    persist_state(
-                        &runtime.web_state.database,
-                        &runtime.file_ids,
-                        data_chats,
-                        runtime.web_state.history_cutoff(),
-                    )
-                    .await?;
-                    info!(
-                        "chat {}: scan complete - last_read advanced to {}, {} id(s) pending retry",
-                        chat_cfg.chat_id,
-                        outcome.last_id,
-                        data_chats
-                            .get(&chat_cfg.chat_id)
-                            .map(|d| d.ids_to_retry.len())
-                            .unwrap_or(0)
-                    );
-                } else {
-                    info!(
-                        "chat {}: scan interrupted at msg {} - state preserved for resume",
-                        chat_cfg.chat_id, outcome.last_id
-                    );
-                    return Ok(false);
-                }
-            }
-            Err(e) => {
-                report.chats.push(ChatScanReport {
-                    chat_id: chat_id.clone(),
-                    error: Some(format!("{e:#}")),
-                    ..ChatScanReport::default()
-                });
-                // A real error (peer resolution, etc.). Still flush the live
-                // retry set so partial progress survives, then keep going unless
-                // we were also asked to shut down.
-                sync_retry_set(data_chats, &chat_id, &live_retry).await;
-                error!("chat {chat_id}: {e:#}");
-                if shutdown.is_cancelled() {
-                    return Ok(false);
+                    return Err(error);
                 }
             }
         }
+        if let Some(e) = error {
+            report.chats.push(ChatScanReport {
+                chat_id: chat_id.clone(),
+                error: Some(format!("{e:#}")),
+                ..ChatScanReport::default()
+            });
+            // A real error (peer resolution, etc.). Still flush the live
+            // retry set so partial progress survives, then keep going unless
+            // we were also asked to shut down.
+            sync_retry_set(data_chats, &chat_id, &live_retry).await;
+            error!("chat {chat_id}: {e:#}");
+            completed &= !shutdown.is_cancelled();
+        }
+        if !completed {
+            break;
+        }
     }
-    Ok(true)
+    if let Some(last) = pending.take() {
+        completed &= finish_chat(runtime, data_chats, shutdown, report, last).await?;
+    }
+    // Only once no transfer can be between creating its directory and file.
+    super::temp::clean_empty_dirs(&cfg.temp_path).await;
+    Ok(completed)
 }
 
+/// Drain one chat's downloads and record its outcome. Returns `false` when
+/// the scan was interrupted and the cycle must stop.
+async fn finish_chat(
+    runtime: &DownloadRuntime,
+    data_chats: &mut HashMap<String, ChatData>,
+    shutdown: &Shutdown,
+    report: &mut ScanReport,
+    pending: PendingChat<'_>,
+) -> anyhow::Result<bool> {
+    let PendingChat {
+        chat_cfg,
+        live_retry,
+        scan,
+    } = pending;
+    let chat_id = &chat_cfg.chat_id;
+    let outcome = drain_chat(chat_cfg, scan, shutdown).await;
+    report.chats.push(outcome.report);
+    sync_retry_set(data_chats, chat_id, &live_retry).await;
+
+    if outcome.completed || shutdown.work_cancelled() {
+        // The cursor and retry IDs must become durable together.
+        if let Some(data) = data_chats.get_mut(chat_id) {
+            data.last_read_message_id = data.last_read_message_id.max(outcome.last_id);
+        }
+        persist_state(
+            &runtime.web_state.database,
+            &runtime.file_ids,
+            data_chats,
+            runtime.web_state.history_cutoff(),
+        )
+        .await?;
+        info!(
+            "chat {chat_id}: scan complete - last_read advanced to {}, {} id(s) pending retry",
+            outcome.last_id,
+            data_chats
+                .get(chat_id)
+                .map(|d| d.ids_to_retry.len())
+                .unwrap_or(0)
+        );
+        Ok(true)
+    } else {
+        info!(
+            "chat {chat_id}: scan interrupted at msg {} - state preserved for resume",
+            outcome.last_id
+        );
+        Ok(false)
+    }
+}
+
+/// A finished message scan whose downloads may still be running.
+struct ChatScan {
+    tasks: JoinSet<()>,
+    stats: Arc<ChatStats>,
+    last_read_message_id: i32,
+    last_id: i32,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn process_chat(
     client: &Client,
     cfg: &Config,
@@ -154,7 +224,8 @@ async fn process_chat(
     live_retry: Arc<Mutex<HashSet<i32>>>,
     runtime: &DownloadRuntime,
     shutdown: &Shutdown,
-) -> anyhow::Result<ChatOutcome> {
+    dialogs: &mut DialogLookup,
+) -> anyhow::Result<ChatScan> {
     // `retry_ids` mirrors the live set purely for scan-control: it tracks which
     // retry ids have NOT yet been seen so the scan knows when it can stop. The
     // live set itself is mutated by the download tasks (success removes, failure
@@ -170,7 +241,7 @@ async fn process_chat(
         retry_ids.len()
     );
 
-    let (peer, channel_name) = resolve_chat(client, &chat_cfg.chat_id).await?;
+    let (peer, channel_name) = resolve_chat(client, &chat_cfg.chat_id, dialogs).await?;
     if let Some(name) = channel_name {
         runtime
             .web_state
@@ -290,6 +361,21 @@ async fn process_chat(
         drain_finished_tasks(&mut tasks);
     }
 
+    Ok(ChatScan {
+        tasks,
+        stats,
+        last_read_message_id,
+        last_id,
+    })
+}
+
+async fn drain_chat(chat_cfg: &ChatConfig, scan: ChatScan, shutdown: &Shutdown) -> ChatOutcome {
+    let ChatScan {
+        mut tasks,
+        stats,
+        last_read_message_id,
+        last_id,
+    } = scan;
     // Process shutdown preserves partial files. User cancellation drains writers
     // cooperatively before the worker deletes their files and checkpoints.
     if shutdown.is_cancelled() && !shutdown.work_cancelled() {
@@ -302,7 +388,6 @@ async fn process_chat(
             Err(e) => warn!("download task panicked: {e}"),
         }
     }
-    super::temp::clean_empty_dirs(&cfg.temp_path).await;
 
     let completed = !shutdown.is_cancelled();
     let last_id = if completed || shutdown.work_cancelled() {
@@ -321,7 +406,7 @@ async fn process_chat(
         if completed { "" } else { " [interrupted]" }
     );
 
-    Ok(ChatOutcome {
+    ChatOutcome {
         completed,
         last_id,
         report: ChatScanReport {
@@ -333,7 +418,7 @@ async fn process_chat(
             completed,
             error: None,
         },
-    })
+    }
 }
 
 pub(super) async fn run_message_download(
@@ -381,18 +466,55 @@ pub(super) async fn run_message_download(
     result.map(|_| ())
 }
 
+/// Dialogs read so far, shared by the lookups of one scan cycle. The listing
+/// is paged only as far as the requested chat, and never twice per cycle.
+pub(super) struct DialogLookup {
+    dialogs: grammers_client::client::DialogIter,
+    exhausted: bool,
+    seen: HashMap<i64, (PeerRef, Option<String>)>,
+}
+
+impl DialogLookup {
+    pub(super) fn new(client: &Client) -> Self {
+        Self {
+            dialogs: client.iter_dialogs(),
+            exhausted: false,
+            seen: HashMap::default(),
+        }
+    }
+
+    async fn find(&mut self, dialog_id: i64) -> anyhow::Result<Option<(PeerRef, Option<String>)>> {
+        if let Some(found) = self.seen.get(&dialog_id) {
+            return Ok(Some(found.clone()));
+        }
+        while !self.exhausted {
+            let Some(dialog) = self.dialogs.next().await? else {
+                self.exhausted = true;
+                break;
+            };
+            let Some(id) = dialog.peer_id().bot_api_dialog_id() else {
+                continue;
+            };
+            let entry = (dialog.peer_ref(), dialog.peer().name().map(str::to_string));
+            self.seen.insert(id, entry.clone());
+            if id == dialog_id {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
+    }
+}
+
 pub(super) async fn resolve_chat(
     client: &Client,
     chat_id: &str,
+    dialogs: &mut DialogLookup,
 ) -> anyhow::Result<(PeerRef, Option<String>)> {
     if let Ok(dialog_id) = chat_id.parse::<i64>() {
-        let mut dialogs = client.iter_dialogs();
-        while let Some(dialog) = dialogs.next().await? {
-            if dialog.peer_id().bot_api_dialog_id() == Some(dialog_id) {
-                return Ok((dialog.peer_ref(), dialog.peer().name().map(str::to_string)));
-            }
-        }
-        anyhow::bail!("chat {chat_id} is not accessible to the signed-in account");
+        return dialogs
+            .find(dialog_id)
+            .await?
+            .with_context(|| format!("chat {chat_id} is not accessible to the signed-in account"));
     }
 
     let peer = client

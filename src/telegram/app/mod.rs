@@ -417,7 +417,8 @@ async fn resolve_target(
 ) -> anyhow::Result<(String, PeerRef, Option<String>)> {
     if let ChatTarget::DialogId(id) = target {
         let chat_id = id.to_string();
-        let (peer, name) = scan::resolve_chat(client, &chat_id).await?;
+        let (peer, name) =
+            scan::resolve_chat(client, &chat_id, &mut scan::DialogLookup::new(client)).await?;
         return Ok((chat_id, peer, name));
     }
 
