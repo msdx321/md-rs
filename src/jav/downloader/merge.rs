@@ -134,9 +134,8 @@ pub(super) fn merge_segments(
     let copy_audio = audio_stream["codec_name"] == "aac" && audio_stream["profile"] == "LC";
     anyhow::ensure!(running(), "merge interrupted");
     // Publish from a staging file beside the destination: temp and downloads
-    // may be different mounts. ffmpeg's +faststart rewrites its whole output a
-    // second time, so on another filesystem it runs locally and the result is
-    // copied across exactly once.
+    // may be different mounts. Mux locally when they differ, including any
+    // faststart fallback, then copy the finished result across exactly once.
     let parent = final_path
         .parent()
         .context("output has no parent directory")?;
@@ -153,6 +152,11 @@ pub(super) fn merge_segments(
     }
     let staged = staging.tempfile_in(if local { temp_dir } else { parent })?;
     let mut repair_audio_timestamps = false;
+    // Reserve a bounded header region to put metadata before media in one pass.
+    // This estimate is only an optimization: unusual streams fall back to the
+    // existing faststart rewrite if their metadata does not fit.
+    let moov_size = (info.total_duration * 2048.0).clamp(1_048_576.0, 33_554_432.0) as u64;
+    let mut reserve_moov = true;
     loop {
         anyhow::ensure!(running(), "merge interrupted");
         let mut command = Command::new("ffmpeg");
@@ -195,15 +199,13 @@ pub(super) fn merge_segments(
             // track's start relative to video (which may contain delayed audio).
             command.args(["-af", "aresample=async=1"]);
         }
+        if reserve_moov {
+            command.arg("-moov_size").arg(moov_size.to_string());
+        } else {
+            command.args(["-movflags", "+faststart"]);
+        }
         command
-            .args([
-                "-movflags",
-                "+faststart",
-                "-avoid_negative_ts",
-                "make_zero",
-                "-f",
-                "mp4",
-            ])
+            .args(["-avoid_negative_ts", "make_zero", "-f", "mp4"])
             .arg(staged.path());
         // Use a file instead of a pipe so stderr cannot block a long merge.
         let mut errors = tempfile::tempfile()?;
@@ -231,6 +233,11 @@ pub(super) fn merge_segments(
         errors.rewind()?;
         let mut message = String::new();
         errors.read_to_string(&mut message)?;
+        if reserve_moov && message.contains("reserved_moov_size") && message.contains("too small") {
+            log::warn!("MP4 metadata exceeded reserved space; retrying with faststart");
+            reserve_moov = false;
+            continue;
+        }
         // Keep strict error handling: only retry non-monotonic output audio DTS,
         // never video timestamp failures or unrelated decoding/muxing errors.
         let audio_dts_error = message.lines().any(|line| {
