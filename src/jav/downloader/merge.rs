@@ -133,7 +133,14 @@ pub(super) fn merge_segments(
         .context("no audio stream found; refusing to produce a silent video")?;
     let copy_audio = audio_stream["codec_name"] == "aac" && audio_stream["profile"] == "LC";
     anyhow::ensure!(running(), "merge interrupted");
-    // Stage beside the destination: temp and downloads may be different mounts.
+    // Publish from a staging file beside the destination: temp and downloads
+    // may be different mounts. ffmpeg's +faststart rewrites its whole output a
+    // second time, so on another filesystem it runs locally and the result is
+    // copied across exactly once.
+    let parent = final_path
+        .parent()
+        .context("output has no parent directory")?;
+    let local = !same_filesystem(temp_dir, parent);
     let mut staging = tempfile::Builder::new();
     staging.prefix(".jav-merge-").suffix(".mp4.part");
     #[cfg(unix)]
@@ -144,11 +151,7 @@ pub(super) fn merge_segments(
         // Apply normal output-file permissions, respecting umask and default ACLs.
         staging.permissions(std::fs::Permissions::from_mode(0o666));
     }
-    let staged = staging.tempfile_in(
-        final_path
-            .parent()
-            .context("output has no parent directory")?,
-    )?;
+    let staged = staging.tempfile_in(if local { temp_dir } else { parent })?;
     let mut repair_audio_timestamps = false;
     loop {
         anyhow::ensure!(running(), "merge interrupted");
@@ -247,10 +250,46 @@ pub(super) fn merge_segments(
     }
     validate_output(staged.path(), Some(info.total_duration))?;
     anyhow::ensure!(running(), "merge interrupted");
+    let staged = if local {
+        let mut published = staging.tempfile_in(parent)?;
+        copy_while(staged.as_file(), published.as_file_mut(), &running)?;
+        published
+    } else {
+        staged
+    };
     staged.as_file().sync_all()?;
     anyhow::ensure!(commit(), "merge interrupted before publication");
     staged
         .persist(final_path)
         .context("cannot publish merged MP4")?;
     Ok(final_path.to_path_buf())
+}
+
+/// True unless both paths are known to be on different filesystems.
+fn same_filesystem(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return a.dev() == b.dev();
+        }
+    }
+    true
+}
+
+/// Copy in large chunks so a pause or cancel is observed during long copies.
+/// `io::copy` still uses kernel copy offloading where available.
+fn copy_while(
+    mut source: &std::fs::File,
+    destination: &mut std::fs::File,
+    running: impl Fn() -> bool,
+) -> anyhow::Result<()> {
+    use std::io::Read;
+    source.rewind()?;
+    loop {
+        anyhow::ensure!(running(), "merge interrupted");
+        if std::io::copy(&mut source.take(64 * 1024 * 1024), destination)? == 0 {
+            return Ok(());
+        }
+    }
 }
