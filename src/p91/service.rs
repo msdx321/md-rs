@@ -21,12 +21,13 @@ pub async fn start(
     let cleanup_ctx = ctx.clone();
     let mut settings = schedule.clone();
     let cleanup = BackgroundTask::spawn("p91 history cleanup", async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {},
-                changed = settings.changed() => { if changed.is_err() { break; } },
+        let mut days = settings.borrow_and_update().history_retention_days;
+        while settings.changed().await.is_ok() {
+            let next = settings.borrow_and_update().history_retention_days;
+            if next == days {
+                continue;
             }
+            days = next;
             if let Err(error) = cleanup_ctx.prune_history().await {
                 log::warn!("cannot prune 91Porn history: {error:#}");
             }

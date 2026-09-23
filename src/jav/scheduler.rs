@@ -279,6 +279,9 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     if stopped {
         summary.push_str("; stopped by user");
     }
+    if let Err(error) = ctx.prune_history().await {
+        log::warn!("cannot prune JAV history after job: {error:#}");
+    }
     log::info!("daily job finished — {summary}");
     ctx.set_scheduler(|s| {
         s.running = false;
@@ -347,7 +350,10 @@ pub fn resume_task(ctx: Arc<AppCtx>, id: &str) -> bool {
     jobs_ctx
         .jobs
         .spawn(async move {
-            download_video(ctx, card, request).await;
+            download_video(ctx.clone(), card, request).await;
+            if let Err(error) = ctx.prune_history().await {
+                log::warn!("cannot prune JAV history after resume: {error:#}");
+            }
         })
         .is_some()
 }

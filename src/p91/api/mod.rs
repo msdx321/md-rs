@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 
 use crate::configuration::patch::merge_json;
-use crate::p91::app::{AppCtx, TaskInfo, TaskState};
+use crate::p91::app::{AppCtx, TaskInfo};
 use crate::p91::config::Config;
 use crate::p91::scheduler;
 use crate::p91::source::scraper::{self, VideoCard};
@@ -98,6 +98,7 @@ fn status_snapshot(ctx: &AppCtx) -> Value {
         "top_n": cfg.listing_links().iter().map(|link| link.daily_quota).sum::<usize>(),
         "links": cfg.listing_links(),
         "history_retention_days": ctx.history_retention_days(),
+        "library_revision": ctx.library_revision(),
         "downloaded": history.completed,
         "failed_records": history.failed,
         "downloaded_bytes": history.total_bytes,
@@ -227,12 +228,7 @@ async fn list_videos(
 }
 
 async fn list_tasks(State(ctx): State<Arc<AppCtx>>) -> Json<Vec<TaskInfo>> {
-    Json(
-        ctx.tasks()
-            .into_iter()
-            .filter(|t| t.state != TaskState::Completed)
-            .collect(),
-    )
+    Json(ctx.visible_tasks())
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,7 +302,11 @@ async fn start_download(
     let ctx_for_task = Arc::clone(&ctx);
     ctx.jobs
         .spawn(async move {
-            crate::p91::downloader::download_video_with(ctx_for_task, card, cfg, fetch).await;
+            crate::p91::downloader::download_video_with(ctx_for_task.clone(), card, cfg, fetch)
+                .await;
+            if let Err(error) = ctx_for_task.prune_history().await {
+                log::warn!("cannot prune 91Porn history after download: {error:#}");
+            }
         })
         .ok_or_else(|| ApiError::bad_request("service shutting down; download rejected"))?;
 
@@ -415,11 +415,14 @@ async fn list_history(
     State(ctx): State<Arc<AppCtx>>,
     Query(query): Query<HistoryQuery>,
 ) -> Json<Value> {
-    let mut records = ctx.history();
-    let count = records.len();
-    if let Some(limit) = query.limit {
-        records.truncate(limit);
-    }
+    let (records, count) = match query.limit {
+        Some(limit) => ctx.history_limited(limit),
+        None => {
+            let records = ctx.history();
+            let count = records.len();
+            (records, count)
+        }
+    };
     Json(json!({
         "history_retention_days": ctx.history_retention_days(),
         "count": count,
@@ -447,8 +450,8 @@ async fn events(State(ctx): State<Arc<AppCtx>>) -> impl IntoResponse {
             Ok(task) => Some(Ok::<_, Infallible>(
                 Event::default().event("task").data(&*task),
             )),
-            // A lagged subscriber simply misses intermediate frames.
-            Err(_) => None,
+            // Snapshot reconciliation replaces polling when a client falls behind.
+            Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
         }
     });
     // WatchStream emits its current value immediately, flushing the SSE body
@@ -466,6 +469,7 @@ async fn events(State(ctx): State<Arc<AppCtx>>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::p91::app::TaskState;
 
     #[test]
     fn merge_overlays_nested_objects() {

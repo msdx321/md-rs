@@ -96,12 +96,31 @@ impl State {
 
     /// Time-limited history, newest first.
     pub fn history(&self, days: u32) -> Vec<Record> {
-        let mut recent: Vec<_> = self.recent_records(days).collect();
-        recent.sort_by(|(a, _), (b, _)| b.cmp(a));
-        recent
-            .into_iter()
-            .map(|(_, record)| record.clone())
-            .collect()
+        self.history_limited(days, usize::MAX).0
+    }
+
+    /// Select only the requested newest entries before sorting and cloning.
+    pub fn history_limited(&self, days: u32, limit: usize) -> (Vec<Record>, usize) {
+        let mut recent: Vec<_> = self.recent_records(days).enumerate().collect();
+        let count = recent.len();
+        // Preserve insertion order for equal timestamps, just like the full list.
+        let newest =
+            |(ai, (a, _)): &(usize, (chrono::DateTime<chrono::FixedOffset>, &Record)),
+             (bi, (b, _)): &(usize, (chrono::DateTime<chrono::FixedOffset>, &Record))| {
+                b.cmp(a).then_with(|| ai.cmp(bi))
+            };
+        if limit < recent.len() {
+            recent.select_nth_unstable_by(limit, newest);
+            recent.truncate(limit);
+        }
+        recent.sort_unstable_by(newest);
+        (
+            recent
+                .into_iter()
+                .map(|(_, (_, record))| record.clone())
+                .collect(),
+            count,
+        )
     }
 }
 

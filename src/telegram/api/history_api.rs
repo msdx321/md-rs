@@ -30,7 +30,6 @@ pub(super) async fn list(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<ListQuery>,
 ) -> Json<Value> {
-    state.prune_history().await;
     let records = state.history_snapshot(query.limit).await;
     let snapshot = state.snapshot().await;
     Json(json!({

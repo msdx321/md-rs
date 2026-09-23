@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -138,6 +138,7 @@ pub struct AppCtx {
     browser: RwLock<Option<Arc<BrowserMinter>>>,
     pub(crate) config_update: tokio::sync::Mutex<()>,
     ledger: Repository,
+    library_revision: AtomicU64,
     database: Database,
     tasks: Mutex<TaskRegistry>,
     downloads: Arc<DownloadSlots>,
@@ -172,6 +173,7 @@ impl AppCtx {
             browser: RwLock::new(browser),
             config_update: tokio::sync::Mutex::new(()),
             ledger,
+            library_revision: AtomicU64::new(0),
             database,
             tasks: Mutex::new(TaskRegistry::default()),
             downloads: Arc::new(DownloadSlots::new()),
@@ -326,12 +328,26 @@ impl AppCtx {
         });
         requests.retain(|id, _| tasks.contains_key(id));
         drop(registry);
-        self.downloads.notify();
+        self.library_changed();
         Ok(())
     }
 
     pub fn history(&self) -> Vec<Record> {
         self.ledger.history(self.history_retention_days())
+    }
+
+    pub fn history_limited(&self, limit: usize) -> (Vec<Record>, usize) {
+        self.ledger
+            .history_limited(self.history_retention_days(), limit)
+    }
+
+    pub fn library_revision(&self) -> u64 {
+        self.library_revision.load(Ordering::Relaxed)
+    }
+
+    fn library_changed(&self) {
+        self.library_revision.fetch_add(1, Ordering::Relaxed);
+        self.downloads.notify();
     }
 
     pub fn history_summary(&self) -> HistorySummary {
@@ -349,13 +365,13 @@ impl AppCtx {
 
     pub async fn upsert_record(&self, record: Record) -> anyhow::Result<()> {
         self.ledger.upsert_record(record).await?;
-        self.downloads.notify();
+        self.library_changed();
         Ok(())
     }
 
     pub async fn forget_record(&self, id: &str) -> anyhow::Result<()> {
         self.ledger.forget_record(id).await?;
-        self.downloads.notify();
+        self.library_changed();
         Ok(())
     }
 
@@ -364,7 +380,7 @@ impl AppCtx {
             .ledger
             .clear_history(self.history_retention_days())
             .await?;
-        self.downloads.notify();
+        self.library_changed();
         Ok(removed)
     }
 
@@ -446,8 +462,21 @@ impl AppCtx {
     }
 
     pub fn tasks(&self) -> Vec<TaskInfo> {
+        self.tasks_matching(|_| true)
+    }
+
+    pub fn visible_tasks(&self) -> Vec<TaskInfo> {
+        self.tasks_matching(|task| task.state != TaskState::Completed)
+    }
+
+    fn tasks_matching(&self, include: impl Fn(&TaskInfo) -> bool) -> Vec<TaskInfo> {
         let guard = self.tasks.lock().expect("task lock poisoned");
-        let mut out: Vec<TaskInfo> = guard.tasks.values().cloned().collect();
+        let mut out: Vec<TaskInfo> = guard
+            .tasks
+            .values()
+            .filter(|task| include(task))
+            .cloned()
+            .collect();
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         out
     }
@@ -694,7 +723,9 @@ impl AppCtx {
         requests.retain(|id, _| entries.contains_key(id));
         let removed = before - tasks.tasks.len();
         drop(tasks);
-        self.downloads.notify();
+        if removed > 0 {
+            self.library_changed();
+        }
         removed
     }
 
@@ -742,7 +773,9 @@ impl AppCtx {
         registry.requests.remove(id);
         let removed = registry.tasks.remove(id).is_some();
         drop(registry);
-        self.downloads.notify();
+        if removed {
+            self.library_changed();
+        }
         removed
     }
 

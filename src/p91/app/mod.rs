@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -117,6 +117,7 @@ pub struct AppCtx {
     session: Session,
     pub(crate) config_update: tokio::sync::Mutex<()>,
     ledger: Repository,
+    library_revision: AtomicU64,
     tasks: Mutex<TaskRegistry>,
     downloads: Arc<DownloadSlots>,
     pub(crate) jobs: crate::runtime::http_lifecycle::HttpLifecycle,
@@ -149,6 +150,7 @@ impl AppCtx {
             session,
             config_update: tokio::sync::Mutex::new(()),
             ledger,
+            library_revision: AtomicU64::new(0),
             tasks: Mutex::new(TaskRegistry::default()),
             downloads: Arc::new(DownloadSlots::new()),
             jobs: Default::default(),
@@ -233,12 +235,26 @@ impl AppCtx {
                     || chrono::DateTime::parse_from_rfc3339(&task.updated_at)
                         .is_ok_and(|time| time > cutoff)
             });
-        self.downloads.notify();
+        self.library_changed();
         Ok(())
     }
 
     pub fn history(&self) -> Vec<Record> {
         self.ledger.history(self.history_retention_days())
+    }
+
+    pub fn history_limited(&self, limit: usize) -> (Vec<Record>, usize) {
+        self.ledger
+            .history_limited(self.history_retention_days(), limit)
+    }
+
+    pub fn library_revision(&self) -> u64 {
+        self.library_revision.load(Ordering::Relaxed)
+    }
+
+    fn library_changed(&self) {
+        self.library_revision.fetch_add(1, Ordering::Relaxed);
+        self.downloads.notify();
     }
 
     pub fn history_summary(&self) -> HistorySummary {
@@ -256,13 +272,13 @@ impl AppCtx {
 
     pub async fn upsert_record(&self, record: Record) -> anyhow::Result<()> {
         self.ledger.upsert_record(record).await?;
-        self.downloads.notify();
+        self.library_changed();
         Ok(())
     }
 
     pub async fn forget_record(&self, id: &str) -> anyhow::Result<()> {
         self.ledger.forget_record(id).await?;
-        self.downloads.notify();
+        self.library_changed();
         Ok(())
     }
 
@@ -271,7 +287,7 @@ impl AppCtx {
             .ledger
             .clear_history(self.history_retention_days())
             .await?;
-        self.downloads.notify();
+        self.library_changed();
         Ok(removed)
     }
 
@@ -305,8 +321,21 @@ impl AppCtx {
     }
 
     pub fn tasks(&self) -> Vec<TaskInfo> {
+        self.tasks_matching(|_| true)
+    }
+
+    pub fn visible_tasks(&self) -> Vec<TaskInfo> {
+        self.tasks_matching(|task| task.state != TaskState::Completed)
+    }
+
+    fn tasks_matching(&self, include: impl Fn(&TaskInfo) -> bool) -> Vec<TaskInfo> {
         let guard = self.tasks.lock().expect("task lock poisoned");
-        let mut out: Vec<TaskInfo> = guard.tasks.values().cloned().collect();
+        let mut out: Vec<TaskInfo> = guard
+            .tasks
+            .values()
+            .filter(|task| include(task))
+            .cloned()
+            .collect();
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         out
     }
@@ -414,7 +443,12 @@ impl AppCtx {
         tasks
             .tasks
             .retain(|_, task| task.state != TaskState::Failed);
-        before - tasks.tasks.len()
+        let removed = before - tasks.tasks.len();
+        drop(tasks);
+        if removed > 0 {
+            self.library_changed();
+        }
+        removed
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<str>> {
@@ -441,7 +475,8 @@ impl AppCtx {
 
     /// Forget a finished task so it disappears from the UI.
     pub fn drop_task(&self, id: &str) -> bool {
-        self.downloads
+        let removed = self
+            .downloads
             .while_idle(id, || {
                 let mut registry = self.tasks.lock().expect("task lock poisoned");
                 if registry
@@ -454,7 +489,11 @@ impl AppCtx {
                 registry.pausing.remove(id);
                 registry.tasks.remove(id).is_some()
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if removed {
+            self.library_changed();
+        }
+        removed
     }
 
     /// Preserve p91's Running/pausing unwind contract while serializing stops

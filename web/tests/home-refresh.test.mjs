@@ -27,40 +27,48 @@ function dashboard(api) {
   return { handlers, elements, poll: () => poll() };
 }
 
-test('home refresh: two provider opens issue four GETs, terminal refresh is provider-local, polling still reconciles both', async () => {
+test('home refresh: initial revisions issue four GETs, changes are provider-local, unchanged polling is idle', async () => {
   const requests = [];
   const home = dashboard(async (path) => {
     requests.push(path);
-    return path.endsWith('/history') ? { records: [] } : [];
+    return path.includes('/history') ? { records: [] } : [];
   });
-  home.handlers.get('/jav/api/events').open();
-  home.handlers.get('/p91/api/events').open();
+  for (const provider of ['jav', 'p91']) {
+    const events = home.handlers.get(`/${provider}/api/events`);
+    events.open();
+    events.status({ data: JSON.stringify({ library_revision: 0 }) });
+  }
   await tick();
-  assert.deepEqual(requests.sort(), ['/jav/api/history', '/jav/api/tasks', '/p91/api/history', '/p91/api/tasks']);
+  assert.deepEqual(requests.sort(), ['/jav/api/history?limit=10', '/jav/api/tasks', '/p91/api/history?limit=10', '/p91/api/tasks']);
   requests.length = 0;
-  home.handlers.get('/jav/api/events').task({ data: JSON.stringify({ id: 'done', state: 'completed' }) });
+  const jav = home.handlers.get('/jav/api/events');
+  jav.task({ data: JSON.stringify({ id: 'done', state: 'completed' }) });
+  jav.status({ data: JSON.stringify({ library_revision: 1 }) });
   await tick();
-  assert.deepEqual(requests, ['/jav/api/history']);
+  assert.deepEqual(requests, ['/jav/api/tasks', '/jav/api/history?limit=10']);
   requests.length = 0;
+  jav.status({ data: JSON.stringify({ library_revision: 1 }) });
   await home.poll();
-  assert.deepEqual(requests.sort(), ['/jav/api/history', '/jav/api/tasks', '/p91/api/history', '/p91/api/tasks']);
+  assert.deepEqual(requests, []);
 });
 
-test('home refresh: terminal bursts during history GET coalesce into one follow-up, not cross-provider GETs', async () => {
+test('home refresh: revision bursts during history GET coalesce into one follow-up, not cross-provider GETs', async () => {
   const requests = [];
   const reads = [];
   const home = dashboard((path) => {
     requests.push(path);
-    if (path === '/jav/api/history') return new Promise((resolve) => reads.push(resolve));
+    if (path === '/jav/api/history?limit=10') return new Promise((resolve) => reads.push(resolve));
     return Promise.resolve([]);
   });
   const jav = home.handlers.get('/jav/api/events');
   jav.open();
+  jav.status({ data: JSON.stringify({ library_revision: 0 }) });
   await tick();
-  for (let i = 0; i < 20; i++) jav.task({ data: JSON.stringify({ id: `done-${i}`, state: 'completed' }) });
+  for (let i = 1; i <= 20; i++) jav.status({ data: JSON.stringify({ library_revision: i }) });
   reads[0]({ records: [] });
   await tick();
-  assert.deepEqual(requests, ['/jav/api/tasks', '/jav/api/history', '/jav/api/history']);
+  assert.deepEqual(requests.filter(path => path.includes('/history')), ['/jav/api/history?limit=10', '/jav/api/history?limit=10']);
+  assert(requests.every(path => path.startsWith('/jav/')));
   reads[1]({ records: [] });
   await tick();
 });
@@ -68,13 +76,15 @@ test('home refresh: terminal bursts during history GET coalesce into one follow-
 test('home refresh: successful provider cannot hide another provider failure', async () => {
   let failing = true;
   const home = dashboard(async (path) => {
-    if (path === '/jav/api/history' && failing) throw new Error('mock failure');
-    return path.endsWith('/history') ? { records: [] } : [];
+    if (path === '/jav/api/history?limit=10' && failing) throw new Error('mock failure');
+    return path.includes('/history') ? { records: [] } : [];
   });
   home.handlers.get('/jav/api/events').open();
+  home.handlers.get('/jav/api/events').status({ data: JSON.stringify({ library_revision: 0 }) });
   await tick();
   assert.equal(home.elements.get('history-error').hidden, false);
   home.handlers.get('/p91/api/events').open();
+  home.handlers.get('/p91/api/events').status({ data: JSON.stringify({ library_revision: 0 }) });
   await tick();
   assert.equal(home.elements.get('history-error').hidden, false);
   failing = false;

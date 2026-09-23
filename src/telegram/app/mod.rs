@@ -203,6 +203,7 @@ pub(crate) async fn run_downloader(
             report.finished_at = Some(chrono::Utc::now().to_rfc3339());
             report.stopped = work_shutdown.is_cancelled() || matches!(result, Ok(false));
             report.error = result.as_ref().err().map(|error| format!("{error:#}"));
+            web_state.prune_history().await;
             web_state.finish_scan(report).await;
             let completed = result?;
             debug!(
@@ -300,6 +301,7 @@ pub(crate) async fn run_downloader(
                     }
                     None => {}
                 }
+                web_state.prune_history().await;
             }
         }
         web_state.set_status("running").await;

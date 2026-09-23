@@ -31,6 +31,13 @@ impl Repository {
             .history(days)
     }
 
+    pub fn history_limited(&self, days: u32, limit: usize) -> (Vec<Record>, usize) {
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .history_limited(days, limit)
+    }
+
     pub fn history_summary(&self, days: u32) -> HistorySummary {
         self.state
             .lock()
@@ -92,18 +99,34 @@ impl Repository {
     pub async fn prune_history(&self, days: u32) -> anyhow::Result<()> {
         let _write = self.state_write.lock().await;
         let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
-        self.database.connection().await.execute(
-            "DELETE FROM p91_records WHERE julianday(finished_at) <= julianday(?) OR julianday(finished_at) IS NULL",
-            [cutoff.to_rfc3339()],
-        ).await?;
+        let ids: std::collections::HashSet<_> = self
+            .state
+            .lock()
+            .expect("state lock poisoned")
+            .records
+            .iter()
+            .filter(|record| {
+                !chrono::DateTime::parse_from_rfc3339(&record.finished_at)
+                    .is_ok_and(|time| time > cutoff)
+            })
+            .map(|record| record.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // Delete by the indexed identity, not an SQL function over every timestamp.
+        let tx = self.database.transaction().await?;
+        let delete = tx.prepare("DELETE FROM p91_records WHERE id=?").await?;
+        for id in &ids {
+            delete.reset();
+            delete.execute([id.as_str()]).await?;
+        }
+        tx.commit().await?;
         self.state
             .lock()
             .expect("state lock poisoned")
             .records
-            .retain(|record| {
-                chrono::DateTime::parse_from_rfc3339(&record.finished_at)
-                    .is_ok_and(|time| time > cutoff)
-            });
+            .retain(|record| !ids.contains(&record.id));
         Ok(())
     }
 

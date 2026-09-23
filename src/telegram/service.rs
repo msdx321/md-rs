@@ -12,6 +12,7 @@ pub async fn start(
     let shutdown = app::Shutdown::new();
     let (tx, mut rx) = mpsc::channel(16);
     let state = Arc::new(api::ApiState::new(tx, database, schedule.clone(), limiter).await?);
+    state.prune_history().await;
     let router = api::router(state.clone());
     let mut retention_settings = schedule.clone();
     let worker_shutdown = shutdown.clone();
@@ -55,12 +56,17 @@ pub async fn start(
         }
     });
     let cleanup = BackgroundTask::spawn("telegram history cleanup", async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {},
-                changed = retention_settings.changed() => { if changed.is_err() { break; } },
+        let mut days = retention_settings
+            .borrow_and_update()
+            .history_retention_days;
+        while retention_settings.changed().await.is_ok() {
+            let next = retention_settings
+                .borrow_and_update()
+                .history_retention_days;
+            if next == days {
+                continue;
             }
+            days = next;
             state.prune_history().await;
             state.publish().await;
         }

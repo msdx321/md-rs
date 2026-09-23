@@ -409,10 +409,12 @@ for (const id of ['btn-run', 'btn-pause', 'btn-cancel', 'btn-resume']) {
 const es = connectEvents('/jav/api/events');
 es.addEventListener('status', (ev) => renderStatus(JSON.parse(ev.data)));
 es.addEventListener('task', (ev) => receiveTask(JSON.parse(ev.data)));
-es.addEventListener('open', () => {
+function reconcileLibrary() {
   loadTasks({ fresh: true });
   if ($('history-tab').getAttribute('aria-selected') === 'true') loadHistory({ fresh: true });
-});
+}
+es.addEventListener('open', reconcileLibrary);
+es.addEventListener('resync', reconcileLibrary);
 
 loadSettings().catch((e) => {
   toast('Could not load settings: ' + e.message, 'err');

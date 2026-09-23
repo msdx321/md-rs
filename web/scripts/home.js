@@ -267,6 +267,7 @@ function renderHistory() {
   renderRows($('overview-history'), recentDownloads(), telegramHistory && history && p91History ? 'No downloads recorded yet' : 'Waiting for all modules…');
 }
 const providers = ['jav', 'p91'];
+const libraryRevisions = new Map();
 const taskErrors = new Set();
 const historyErrors = new Set();
 function refreshError(errors, provider, failed, target, message) {
@@ -298,6 +299,13 @@ function refreshTasks(provider, fresh = false) {
 function refreshHistory(provider, fresh = false) {
   return Promise.all((provider ? [provider] : providers).map((name) => historyResources[name].refresh({ fresh })));
 }
+function receiveLibraryStatus(provider, snapshot) {
+  if (!libraryRevisions.has(provider) || libraryRevisions.get(provider) !== snapshot.library_revision) {
+    libraryRevisions.set(provider, snapshot.library_revision);
+    refreshTasks(provider, true);
+    refreshHistory(provider, true);
+  }
+}
 const telegramHistoryResource = createSnapshotRefresh((signal) => api(`/telegram/api/history?limit=${RECENT_LIMIT}`, { signal }), (data) => {
   telegramHistory = data.records;
   refreshError(historyErrors, 'telegram', false, 'history-error', 'Download history is unavailable. Retrying automatically.');
@@ -317,7 +325,7 @@ connectEvents('/telegram/events', {
   },
 }, $('telegram-connection'));
 connectEvents('/jav/api/events', {
-  status(event) { jav = JSON.parse(event.data); queueSummary(); },
+  status(event) { jav = JSON.parse(event.data); receiveLibraryStatus('jav', jav); queueSummary(); },
   task(event) {
     const task = JSON.parse(event.data);
     taskResources.jav.receive(task);
@@ -326,12 +334,12 @@ connectEvents('/jav/api/events', {
       tasks.push(task);
       queueActivity();
     }
-    if (terminal.has(task.state)) refreshHistory('jav', true);
   },
-  open() { refreshTasks('jav', true); refreshHistory('jav', true); },
+  open() { libraryRevisions.delete('jav'); },
+  resync() { refreshTasks('jav', true); refreshHistory('jav', true); },
 }, $('jav-connection'));
 connectEvents('/p91/api/events', {
-  status(event) { p91 = JSON.parse(event.data); queueSummary(); },
+  status(event) { p91 = JSON.parse(event.data); receiveLibraryStatus('p91', p91); queueSummary(); },
   task(event) {
     const task = JSON.parse(event.data);
     taskResources.p91.receive(task);
@@ -340,10 +348,13 @@ connectEvents('/p91/api/events', {
       p91Tasks.push(task);
       queueActivity();
     }
-    if (terminal.has(task.state)) refreshHistory('p91', true);
   },
-  open() { refreshTasks('p91', true); refreshHistory('p91', true); },
+  open() { libraryRevisions.delete('p91'); },
+  resync() { refreshTasks('p91', true); refreshHistory('p91', true); },
 }, $('p91-connection'));
-// Refresh removals and history changes made in another tab, which have no task event.
-pollWhenVisible(() => Promise.all([refreshTasks(), refreshHistory(),
-  historyErrors.has('telegram') && telegramHistoryResource.refresh()]), 30000);
+// Revisions reconcile cross-tab deletions; polling retries only failed reads.
+pollWhenVisible(() => Promise.all([
+  ...[...taskErrors].map((provider) => refreshTasks(provider)),
+  ...[...historyErrors].map((provider) => provider === 'telegram'
+    ? telegramHistoryResource.refresh() : refreshHistory(provider)),
+]), 30000);
