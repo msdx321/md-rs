@@ -12,7 +12,7 @@ let telegramHistory = null;
 let telegramHistoryRevision = null;
 // Only the newest entries are shown, so each module sends just that many.
 const RECENT_LIMIT = 10;
-const terminal = new Set(['completed', 'failed', 'cancelled']);
+const terminal = new Set(['completed', 'failed', 'skipped', 'cancelled']);
 const queueSummary = scheduleRender(renderSummary);
 const queueActivity = scheduleRender(renderActivity);
 const queueHistory = scheduleRender(renderHistory);

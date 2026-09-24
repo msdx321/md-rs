@@ -36,6 +36,20 @@ pub(crate) async fn download_media_inner(
         None => return Ok(false),
     };
     let msg_id = msg.id();
+    if let Media::Document(doc) = &media
+        && doc
+            .mime_type()
+            .is_some_and(|mime| mime.starts_with("video/"))
+        && let Some(reason) = crate::runtime::video_resolution::rejection(
+            web_state.minimum_video_resolution(),
+            doc.resolution().and_then(|(width, height)| {
+                Some((u64::try_from(width).ok()?, u64::try_from(height).ok()?))
+            }),
+        )
+    {
+        info!("msg={msg_id}: {reason}");
+        return Ok(false);
+    }
     let source_name = msg
         .peer()
         .and_then(|peer| peer.name())

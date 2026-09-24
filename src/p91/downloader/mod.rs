@@ -77,6 +77,7 @@ pub(crate) async fn download_video_with(
         return;
     }
 
+    let minimum_resolution = ctx.minimum_video_resolution();
     log::debug!("[{id}] resolving prefer_hd={}", cfg.prefer_hd);
     let resolution = tokio::select! {
         biased;
@@ -93,6 +94,47 @@ pub(crate) async fn download_video_with(
             return;
         }
     };
+
+    let origin = resolver::media_referer(&cfg, &card);
+    if minimum_resolution > 0 {
+        let probe = tokio::select! {
+            biased;
+            _ = stopped(&ctx, &id) => {
+                finish_stopped(&ctx, &card).await;
+                return;
+            }
+            result = tokio::time::timeout(
+                Duration::from_secs(20),
+                crate::p91::source::mp4::dimensions(
+                    &fetch, &resolved.source_url, &origin, &ctx.download_limiter,
+                ),
+            ) => result,
+        };
+        let dimensions = match probe {
+            Ok(Ok(dimensions)) => dimensions,
+            result => {
+                log::warn!("[{id}] video resolution unknown; allowing download: {result:?}");
+                None
+            }
+        };
+        if let Some(reason) =
+            crate::runtime::video_resolution::rejection(minimum_resolution, dimensions)
+        {
+            if !ctx.begin_terminal_commit(&id) {
+                finish_stopped(&ctx, &card).await;
+                return;
+            }
+            log::info!("[{id}] {reason}");
+            ctx.update_task(&id, |task| {
+                task.state = TaskState::Skipped;
+                task.phase = "filtered".into();
+                task.message = reason;
+                task.speed_kbps = 0.0;
+            });
+            ctx.end_terminal_commit(&id);
+            return;
+        }
+    }
 
     let title = resolved.title.clone();
     let final_path = output_path(&cfg.save_path, &card.id, &title);
@@ -129,7 +171,6 @@ pub(crate) async fn download_video_with(
         return;
     }
 
-    let origin = resolver::media_referer(&cfg, &card);
     let run = download_file(
         &ctx,
         &fetch,

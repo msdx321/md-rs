@@ -1,6 +1,6 @@
 import { $, api, scheduleRender } from './shared.js';
 const paths = ['host', 'telegram_download_path', 'jav_download_path', 'p91_download_path', 'temp_path'];
-const numbers = ['port', 'history_retention_days', 'download_limit_mb_per_sec', 'telegram_download_limit_mb_per_sec', 'jav_download_limit_mb_per_sec', 'p91_download_limit_mb_per_sec'];
+const numbers = ['port', 'history_retention_days', 'min_video_resolution', 'download_limit_mb_per_sec', 'telegram_download_limit_mb_per_sec', 'jav_download_limit_mb_per_sec', 'p91_download_limit_mb_per_sec'];
 const modules = ['telegram', 'jav', 'p91'];
 let current;
 let saving = false;
@@ -22,6 +22,10 @@ function read() {
   const config = structuredClone(current);
   for (const key of paths) config[key] = $(key).value.trim();
   for (const key of numbers) config[key] = Number($(key).value);
+  for (const name of modules) {
+    const key = `${name}_min_video_resolution`;
+    config[key] = $(key).value.trim() === '' ? null : Number($(key).value);
+  }
   for (const name of modules) for (const [key, value] of Object.entries(config.schedules[name])) {
     const raw = $(`${name}-${key}`).value;
     config.schedules[name][key] = typeof value === 'boolean' ? raw === 'true' : typeof value === 'number' ? Number(raw) : raw;
@@ -30,6 +34,16 @@ function read() {
 }
 function changed() { return current && JSON.stringify(read()) !== saved; }
 function update() {
+  const global = Number($('min_video_resolution').value);
+  const describe = value => value > 0 ? `${value}p` : 'no filtering';
+  for (const name of modules) {
+    const input = $(`${name}_min_video_resolution`);
+    const inherited = input.value.trim() === '';
+    input.placeholder = `Use global (${describe(global)})`;
+    $(`${name}-resolution-hint`).textContent = inherited
+      ? `Using global: ${describe(global)}.`
+      : `Override: ${describe(Number(input.value))}. Clear to use global.`;
+  }
   const dirty = changed();
   $('save-settings').disabled = saving || !dirty;
   $('reload-settings').disabled = saving || !dirty;
@@ -40,6 +54,7 @@ function render(config) {
   current = config;
   saved = JSON.stringify(config);
   for (const key of [...paths, ...numbers]) $(key).value = config[key];
+  for (const name of modules) $(`${name}_min_video_resolution`).value = config[`${name}_min_video_resolution`] ?? '';
   for (const name of modules) for (const [key, value] of Object.entries(config.schedules[name])) $(`${name}-${key}`).value = String(value);
   visibility();
   update();

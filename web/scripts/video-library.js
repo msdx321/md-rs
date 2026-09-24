@@ -18,13 +18,13 @@ export function createVideoLibrary({ apiBase, progress, detail, loadStatus }) {
   function renderTasks() {
     tasks = tasks.filter((t) => !['completed', 'cancelled'].includes(t.state));
     $('btn-clear-failed').disabled = clearingFailed || !tasks.some((t) => t.state === 'failed');
-    const active = tasks.filter((t) => !['completed', 'failed', 'cancelled'].includes(t.state)).length;
+    const active = tasks.filter((t) => !['completed', 'failed', 'skipped', 'cancelled'].includes(t.state)).length;
     $('task-count').textContent = active ? `(${active})` : '';
     $('stat-active').textContent = tasks.filter((t) => t.state === 'running').length;
     $('tasks-empty').style.display = tasks.length ? 'none' : 'block';
     const nextRows = document.createElement('tbody');
     nextRows.innerHTML = tasks.map((t) => {
-      const terminal = ['completed', 'failed', 'cancelled'].includes(t.state);
+      const terminal = ['completed', 'failed', 'skipped', 'cancelled'].includes(t.state);
       const pct = progress(t);
       const barClass = t.state === 'completed' ? 'done' : t.state === 'failed' ? 'fail' : '';
       const speed = t.speed_kbps > 0 && t.state === 'running' ? bytes(t.speed_kbps * 1024) + '/s' : '—';
@@ -39,7 +39,7 @@ export function createVideoLibrary({ apiBase, progress, detail, loadStatus }) {
         <td class="muted"><span class="truncate" title="${esc(description)}">${esc(description)}</span></td>
         <td style="white-space:nowrap">
           ${t.state === 'running' || t.state === 'queued' ? `<button class="tiny" data-act="pause" data-id="${esc(t.id)}" ${disabled('pause')}>Pause</button>` : ''}
-          ${t.state === 'paused' || t.state === 'failed' ? `<button class="tiny" data-act="resume" data-id="${esc(t.id)}" ${disabled('resume')}>Resume</button>` : ''}
+          ${['paused', 'failed', 'skipped'].includes(t.state) ? `<button class="tiny" data-act="resume" data-id="${esc(t.id)}" ${disabled('resume')}>Resume</button>` : ''}
           ${!terminal ? `<button class="tiny danger" data-act="cancel" data-id="${esc(t.id)}" ${disabled('cancel')}>Cancel</button>` : ''}
           ${terminal ? `<button class="tiny" data-act="dismiss" data-id="${esc(t.id)}" aria-label="Dismiss task" ${disabled('dismiss')}>✕</button>` : ''}
         </td>

@@ -26,6 +26,7 @@ pub enum TaskState {
     Paused,
     Completed,
     Failed,
+    Skipped,
     Cancelled,
 }
 
@@ -74,7 +75,7 @@ impl TaskInfo {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.state,
-            TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+            TaskState::Completed | TaskState::Failed | TaskState::Skipped | TaskState::Cancelled
         )
     }
 }
@@ -305,6 +306,12 @@ impl AppCtx {
     }
 
     // ── dedup ledger ─────────────────────────────────────────────────────
+
+    pub fn minimum_video_resolution(&self) -> u32 {
+        self.common
+            .borrow()
+            .minimum_video_resolution(crate::runtime::download_limiter::DownloadModule::Jav)
+    }
 
     pub fn history_retention_days(&self) -> u32 {
         self.common.borrow().history_retention_days
@@ -580,7 +587,7 @@ impl AppCtx {
         let mut task = registry.tasks.get(id)?.clone();
         if !matches!(
             task.state,
-            TaskState::Paused | TaskState::Failed | TaskState::Cancelled
+            TaskState::Paused | TaskState::Failed | TaskState::Skipped | TaskState::Cancelled
         ) || registry
             .requests
             .get(id)

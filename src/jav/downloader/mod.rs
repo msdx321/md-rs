@@ -74,6 +74,7 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard, request: Download
     }
 
     // ── resolve ──────────────────────────────────────────────────────────
+    let minimum_resolution = ctx.minimum_video_resolution();
     log::debug!("[{id}] resolving stream resolution={}", cfg.resolution);
     let resolved = match while_running(
         &ctx,
@@ -89,6 +90,29 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard, request: Download
             return;
         }
     };
+
+    if let Some(reason) = crate::runtime::video_resolution::rejection(
+        minimum_resolution,
+        resolved
+            .playlist
+            .variant
+            .resolution
+            .map(|(w, h)| (w as u64, h as u64)),
+    ) {
+        if !ctx.begin_terminal_commit(&id) {
+            finish_stopped(&ctx, &cfg, &id).await;
+            return;
+        }
+        log::info!("[{id}] {reason}");
+        ctx.update_task(&id, |task| {
+            task.state = TaskState::Skipped;
+            task.phase = "filtered".into();
+            task.message = reason;
+            task.speed_kbps = 0.0;
+        });
+        ctx.end_terminal_commit(&id);
+        return;
+    }
 
     let title = if resolved.title.trim().is_empty() {
         card.title.clone()

@@ -23,6 +23,17 @@
         </div>
         <p class="hint">Each module also obeys the combined limit.</p>
       </section>
+      <section class="settings-card full" id="video-resolution">
+        <h2>Minimum video resolution</h2>
+        <p>Skip videos below a minimum shorter-side dimension: landscape 1920 × 1080 and portrait 1080 × 1920 both count as 1080p. Photos and other files are unaffected.</p>
+        <div class="form">
+          <div class="field"><label for="min_video_resolution">Global minimum (pixels)</label><input id="min_video_resolution" type="number" min="0" max="16384" step="1" required><span class="hint">For example, 720 or 1080. 0 = no filtering.</span></div>
+          <div class="field"><label for="telegram_min_video_resolution">Telegram override (pixels)</label><input id="telegram_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="telegram-resolution-hint"><span class="hint" id="telegram-resolution-hint"></span></div>
+          <div class="field"><label for="jav_min_video_resolution">JAV override (pixels)</label><input id="jav_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="jav-resolution-hint"><span class="hint" id="jav-resolution-hint"></span></div>
+          <div class="field"><label for="p91_min_video_resolution">91Porn override (pixels)</label><input id="p91_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="p91-resolution-hint"><span class="hint" id="p91-resolution-hint"></span></div>
+        </div>
+        <p class="hint">Leave an override blank to use the global minimum; enter 0 to disable filtering for that service. Changes apply to new attempts, including resumes, not active downloads or existing files. Unknown resolutions are allowed. JAV checks the stream selected by its quality preference; 91Porn probes MP4 metadata, not the HD badge.</p>
+      </section>
       <section class="settings-card" data-schedule="telegram">
         <h2>Telegram schedule</h2>
         <p>Choose when to check for new media.</p>

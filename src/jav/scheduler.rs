@@ -211,6 +211,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
         link.in_flight -= 1;
         match joined {
             Ok(_) if ctx.is_completed(&id) => link.report.completed += 1,
+            Ok(_) if ctx.task_state(&id) == Some(TaskState::Skipped) => link.report.skipped += 1,
             Ok(_) => {
                 if matches!(
                     ctx.task_state(&id),

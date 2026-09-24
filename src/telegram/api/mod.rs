@@ -430,6 +430,12 @@ impl ApiState {
         self.history_revision.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn minimum_video_resolution(&self) -> u32 {
+        self.common
+            .borrow()
+            .minimum_video_resolution(crate::runtime::download_limiter::DownloadModule::Telegram)
+    }
+
     pub(crate) fn history_cutoff(&self) -> u64 {
         now_millis().saturating_sub(history::retention_ms(
             self.common.borrow().history_retention_days,

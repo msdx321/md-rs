@@ -8,6 +8,7 @@ pub mod schedule;
 mod service;
 mod task;
 pub mod video_filename;
+pub mod video_resolution;
 pub mod web;
 
 pub use service::{RunningEngine, shutdown_all};
