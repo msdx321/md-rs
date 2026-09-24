@@ -64,14 +64,14 @@ impl Log for Logger {
 }
 
 pub(crate) fn init() {
-    // Keep dependency chatter (including Chromium's listener cleanup) out of
-    // normal logs. Parse RUST_LOG as the complete filter so explicit dependency
-    // debug/trace directives are never silently overridden.
-    let logger = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("warn,md_rs=info"),
-    )
-    .format_timestamp_millis()
-    .build();
+    // Chromium's transport logs routine disconnects at INFO. Keep those quiet
+    // even with RUST_LOG=info, but allow an explicit headless_chrome=debug (or a
+    // more specific target directive) to restore dependency diagnostics.
+    let logger = env_logger::Builder::new()
+        .filter_module("headless_chrome", log::LevelFilter::Warn)
+        .parse_env(env_logger::Env::default().default_filter_or("warn,md_rs=info"))
+        .format_timestamp_millis()
+        .build();
     let filter = logger.filter();
     log::set_boxed_logger(Box::new(Logger(logger))).expect("logger already initialized");
     log::set_max_level(filter);

@@ -24,8 +24,9 @@
 //! * `headless_chrome` is synchronous, so every call runs on a blocking thread
 //!   instead of stalling the async runtime.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -214,6 +215,40 @@ impl Drop for BrowserChild {
     }
 }
 
+// Chromium writes directly to stderr, outside RUST_LOG. Preserve its diagnostics
+// except two known failures of optional Google messaging registration, which this
+// cookie-only browser does not use. Keep them available at debug level.
+fn forward_browser_stderr(stderr: ChildStderr) {
+    let mut reader = BufReader::new(stderr);
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&bytes);
+                let registration_noise = line
+                    .contains("google_apis/gcm/engine/registration_request.cc:")
+                    && [
+                        "Registration response error message: DEPRECATED_ENDPOINT",
+                        "Registration response error message: PHONE_REGISTRATION_ERROR",
+                    ]
+                    .iter()
+                    .any(|message| line.trim_end().ends_with(message));
+                if registration_noise {
+                    log::debug!("{}", line.trim_end());
+                } else {
+                    let _ = std::io::stderr().lock().write_all(&bytes);
+                }
+            }
+            Err(error) => {
+                log::warn!("cannot read Chromium diagnostics: {error}");
+                break;
+            }
+        }
+    }
+}
+
 fn connect(process: &Process) -> Result<MintConnection, String> {
     Transport::new(
         process.debug_ws_url.clone(),
@@ -244,6 +279,8 @@ fn launch(opts: &BrowserOptions, user_agent: &str) -> Result<Process, String> {
         // downloads or domain-reliability uploads between challenges.
         "--disable-component-update".into(),
         "--disable-domain-reliability".into(),
+        // Web push is not needed to render a challenge or obtain its cookies.
+        "--disable-notifications".into(),
         "--disable-blink-features=AutomationControlled".into(),
         // Crashpad cannot write to its default directory when the process
         // is confined by a sandbox, and a renderer that cannot record a
@@ -312,10 +349,14 @@ fn launch(opts: &BrowserOptions, user_agent: &str) -> Result<Process, String> {
             .arg(format!("--user-data-dir={}", profile_path.display()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot launch Chromium ({}): {e}", describe(opts)))?,
     );
+    let stderr = child.0.stderr.take().expect("piped Chromium stderr");
+    // Block on the pipe while idle, without a polling timer. EOF ends the reader
+    // when Chromium exits; do not join it before killing/reaping the child.
+    std::thread::spawn(move || forward_browser_stderr(stderr));
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = child

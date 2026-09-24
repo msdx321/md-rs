@@ -39,7 +39,7 @@ RUN apt-get update \
 FROM runtime-base AS runtime
 # CI overrides the builder context with a tested binary, skipping Rust stages.
 COPY --from=builder /usr/local/bin/md-rs /usr/local/bin/md-rs
-ENV MEDIA_HOST=0.0.0.0 MEDIA_PORT=8080 CHROME_PATH=/usr/bin/chromium RUST_LOG=info
+ENV MEDIA_HOST=0.0.0.0 MEDIA_PORT=8080 CHROME_PATH=/usr/bin/chromium RUST_LOG=warn,md_rs=info
 WORKDIR /data
 VOLUME ["/data"]
 EXPOSE 8080
