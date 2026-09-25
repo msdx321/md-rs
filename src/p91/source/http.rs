@@ -254,7 +254,7 @@ impl Session {
         if generation.warmed.load(Ordering::Acquire) {
             return Ok(());
         }
-        log::debug!("warming the 91Porn session via {listing_url}");
+        log::debug!("warming the 91Porn session via a listing request");
         fetch.text(listing_url, Some(referer)).await?;
         self.mark_warm(fetch)
     }

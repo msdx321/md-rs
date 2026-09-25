@@ -145,7 +145,7 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard, request: Download
     // Already on disk from an earlier run or a crash after merge. Without
     // ffmpeg the merge produces a `.ts`, so both extensions are checked.
     if let Some((path, size)) = existing_output(&final_path).await {
-        log::info!("[{id}] output already exists at {}", path.display());
+        log::debug!("[{id}] output already exists at {}", path.display());
         finish_completed(&ctx, &cfg, &card, &title, &path, size).await;
         return;
     }
@@ -677,7 +677,7 @@ async fn download_segments(
     let mut attempt = 0;
     while !failed.is_empty() && attempt < 3 && !rejected.load(Ordering::Relaxed) {
         attempt += 1;
-        log::debug!(
+        log::warn!(
             "[{id}] retry round={attempt}/3 failed_segments={}",
             failed.len()
         );

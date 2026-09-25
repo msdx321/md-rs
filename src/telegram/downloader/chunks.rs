@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use futures_util::{Stream, StreamExt};
 use grammers_client::Client;
 use grammers_client::media::Media;
-use log::{debug, trace, warn};
+use log::{debug, trace};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -339,7 +339,7 @@ async fn fetch_chunk_with<S: Stream<Item = anyhow::Result<Vec<u8>>>>(
         match result {
             Ok(Some(chunk)) if chunk.len() as u64 == expected => return Ok(chunk),
             Ok(Some(chunk)) => {
-                warn!(
+                debug!(
                     "msg={msg_id}: chunk {idx}: short read {} B (expected {expected}), attempt {}/{}",
                     chunk.len(),
                     attempt + 1,
@@ -352,7 +352,7 @@ async fn fetch_chunk_with<S: Stream<Item = anyhow::Result<Vec<u8>>>>(
                 backoff = RETRY_DELAY_SECS;
             }
             Ok(None) => {
-                warn!(
+                debug!(
                     "msg={msg_id}: chunk {idx}: stream ended early, attempt {}/{}",
                     attempt + 1,
                     CHUNK_RETRY_LIMIT
@@ -362,7 +362,7 @@ async fn fetch_chunk_with<S: Stream<Item = anyhow::Result<Vec<u8>>>>(
             }
             Err(e) => {
                 backoff = flood_wait_secs(&e.to_string()).unwrap_or(RETRY_DELAY_SECS);
-                warn!(
+                debug!(
                     "msg={msg_id}: chunk {idx}: fetch error: {e}; attempt {}/{} backoff={backoff}s",
                     attempt + 1,
                     CHUNK_RETRY_LIMIT
@@ -427,7 +427,8 @@ pub(super) async fn download_unknown_size(
     file.flush().await?;
     file.sync_data().await?;
     debug!(
-        "msg={msg_id}: transfer complete bytes={downloaded} elapsed_ms={}",
+        "msg={msg_id}: transfer ended success={} bytes={downloaded} elapsed_ms={}",
+        outcome.is_ok(),
         started.elapsed().as_millis()
     );
     outcome

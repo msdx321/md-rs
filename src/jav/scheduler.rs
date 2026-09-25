@@ -141,7 +141,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     let _guard = match ctx.daily_lock.try_lock() {
         Ok(guard) => guard,
         Err(_) => {
-            log::warn!("a daily job is already running — ignoring the {trigger} trigger");
+            log::debug!("a daily job is already running — ignoring the {trigger} trigger");
             return Ok(DailyReport::default());
         }
     };
@@ -283,7 +283,12 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     if let Err(error) = ctx.prune_history().await {
         log::warn!("cannot prune JAV history after job: {error:#}");
     }
-    log::info!("daily job finished — {summary}");
+    let level = if report.failed > 0 || links.iter().any(|link| link.error.is_some()) {
+        log::Level::Warn
+    } else {
+        log::Level::Info
+    };
+    log::log!(level, "daily job finished — {summary}");
     ctx.set_scheduler(|s| {
         s.running = false;
         s.last_run_at = Some(now_rfc3339());

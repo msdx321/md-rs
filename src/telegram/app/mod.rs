@@ -221,7 +221,7 @@ pub(crate) async fn run_downloader(
             if !completed || work_shutdown.is_cancelled() {
                 continue;
             }
-            info!(
+            debug!(
                 "cycle {cycle_no} complete in {:.1}s",
                 cycle_started.elapsed().as_secs_f64()
             );

@@ -109,7 +109,7 @@ pub async fn resolve_stream(
         .await
         .map_err(|e| anyhow::anyhow!("cannot read the playlist {playlist_url}: {e}"))?;
 
-    log::info!(
+    log::debug!(
         "playlist: {} segments, {:.1} min, resolution {:?}",
         info.segments.len(),
         info.total_duration / 60.0,

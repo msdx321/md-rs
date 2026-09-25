@@ -5,7 +5,7 @@ use std::time::Duration;
 use grammers_client::Client;
 use grammers_client::media::Media;
 use indicatif::{MultiProgress, ProgressBar};
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use rustc_hash::FxHashMap as HashMap;
 use tokio::sync::Mutex;
 
@@ -47,7 +47,7 @@ pub(crate) async fn download_media_inner(
             }),
         )
     {
-        info!("msg={msg_id}: {reason}");
+        debug!("msg={msg_id}: {reason}");
         return Ok(false);
     }
     let source_name = msg
@@ -79,7 +79,7 @@ pub(crate) async fn download_media_inner(
             )
             .await?;
             if !forgotten {
-                debug!("msg={msg_id}: already downloaded (file_unique_id), skipped");
+                trace!("msg={msg_id}: already downloaded (file_unique_id), skipped");
                 return Ok(false);
             }
             cache.remove(&fid);
@@ -100,7 +100,7 @@ pub(crate) async fn download_media_inner(
                 "download destination is not a file: {}",
                 final_path.display()
             );
-            debug!("msg={msg_id}: file already exists, marking complete");
+            trace!("msg={msg_id}: file already exists, marking complete");
             super::finalize::remember_file_id(msg_id, &fid, file_ids, web_state).await;
             let size = metadata.len();
             web_state
@@ -160,7 +160,13 @@ pub(crate) async fn download_media_inner(
             break;
         }
         if attempt > 0 {
-            info!("msg={msg_id}: retry {}/{}", attempt + 1, RETRY_LIMIT);
+            if let Some(error) = &last_err {
+                warn!(
+                    "msg={msg_id}: retry {}/{} in {RETRY_DELAY_SECS}s after: {error:#}",
+                    attempt + 1,
+                    RETRY_LIMIT
+                );
+            }
             if sleep_cancellable(shutdown, Duration::from_secs(RETRY_DELAY_SECS)).await {
                 break;
             }
@@ -225,7 +231,10 @@ pub(crate) async fn download_media_inner(
                 // Keep the partial file so the next attempt resumes; only the
                 // unfetched chunks need re-downloading.
                 if !shutdown.is_cancelled() {
-                    warn!("msg={msg_id}: {e:#}");
+                    debug!(
+                        "msg={msg_id}: transfer attempt {} failed: {e:#}",
+                        attempt + 1
+                    );
                 }
                 last_err = Some(e);
                 pb.finish_and_clear();
@@ -245,9 +254,9 @@ pub(crate) async fn download_media_inner(
             .unwrap_or(0);
 
         if total > 0 && actual != total {
-            warn!("msg={msg_id}: size mismatch ({actual} vs {total}) - retrying");
+            debug!("msg={msg_id}: size mismatch ({actual} vs {total})");
             discard_partial(&paths, &web_state.database).await;
-            last_err = Some(anyhow::anyhow!("size mismatch"));
+            last_err = Some(anyhow::anyhow!("size mismatch ({actual} vs {total})"));
             continue;
         }
 

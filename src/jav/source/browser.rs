@@ -466,7 +466,7 @@ fn mint_in_context(
             },
         )
         .map_err(|e| format!("cannot set browser user agent: {e}"))?;
-    log::info!("solving the Cloudflare challenge at {}", opts.target_url);
+    log::debug!("waiting for Cloudflare clearance in the mint tab");
     let navigation = transport
         .call_method_on_target(
             session.clone(),

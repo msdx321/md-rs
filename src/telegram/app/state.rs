@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::info;
+use log::{debug, info};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use tokio::sync::Mutex;
 
@@ -51,13 +51,13 @@ pub(super) fn log_config_summary(
         cfg.chat.len(),
         cfg.save_path.display()
     );
-    info!("config: media_types=[{}]", cfg.media_types.join(","));
+    debug!("config: media_types=[{}]", cfg.media_types.join(","));
     for c in &cfg.chat {
         let retry = data_chats
             .get(&c.chat_id)
             .map(|d| d.ids_to_retry.len())
             .unwrap_or(0);
-        info!(
+        debug!(
             "config: chat '{}' from msg {} ({} id(s) queued for retry){}",
             c.chat_id,
             data_chats
@@ -93,7 +93,7 @@ pub(super) async fn log_shutdown_summary(
             .get(&c.chat_id)
             .map(|d| d.ids_to_retry.len())
             .unwrap_or(0);
-        info!(
+        debug!(
             "shutdown: chat '{}' last_read={} ({} id(s) to retry) - partial downloads kept as .part for resume",
             c.chat_id,
             data_chats

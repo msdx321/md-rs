@@ -148,11 +148,7 @@ pub(crate) async fn download_video_with(
         return;
     }
 
-    log::info!(
-        "[{id}] resolved hd={} source={}",
-        resolved.hd,
-        resolved.source_url
-    );
+    log::debug!("[{id}] resolved hd={}", resolved.hd);
     ctx.update_task(&id, |t| {
         t.title = title.clone();
         t.path = final_path.to_string_lossy().to_string();
@@ -166,7 +162,7 @@ pub(crate) async fn download_video_with(
     });
 
     if let Some((path, size)) = existing_output(&final_path).await {
-        log::info!("[{id}] output already exists at {}", path.display());
+        log::debug!("[{id}] output already exists at {}", path.display());
         finish_completed(&ctx, &card, &title, &path, size).await;
         return;
     }

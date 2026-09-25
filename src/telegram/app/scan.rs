@@ -6,7 +6,7 @@ use anyhow::Context;
 use grammers_client::Client;
 use grammers_session::types::PeerRef;
 use indicatif::MultiProgress;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -189,7 +189,7 @@ async fn finish_chat(
             runtime.web_state.history_cutoff(),
         )
         .await?;
-        info!(
+        debug!(
             "chat {chat_id}: scan complete - last_read advanced to {}, {} id(s) pending retry",
             outcome.last_id,
             data_chats
@@ -234,7 +234,7 @@ async fn process_chat(
     let mut last_id = last_read_message_id;
     let stats = Arc::new(ChatStats::default());
 
-    info!(
+    debug!(
         "chat {}: beginning scan (from msg {}, {} id(s) to retry)",
         chat_cfg.chat_id,
         last_id,
@@ -301,12 +301,15 @@ async fn process_chat(
             continue;
         };
         if !media_matches_config(&media, cfg) {
-            debug!("msg {msg_id}: media type not in config, skip");
+            trace!(
+                "chat={} msg={msg_id}: media type not in config, skipped",
+                chat_cfg.chat_id
+            );
             continue;
         }
 
         if !filter_fn(&msg) {
-            debug!("msg {msg_id}: filtered out");
+            trace!("chat={} msg={msg_id}: filtered out", chat_cfg.chat_id);
             continue;
         }
 
@@ -326,6 +329,7 @@ async fn process_chat(
 
         let mp = runtime.mp.clone();
         let web_state = runtime.web_state.clone();
+        let chat_id = chat_cfg.chat_id.clone();
         tasks.spawn(async move {
             let _permit = permit;
             match download_media_inner(
@@ -349,9 +353,12 @@ async fn process_chat(
                 }
                 Err(e) => {
                     if shutdown.is_cancelled() {
-                        debug!("msg {}: interrupted - kept for resume", msg.id());
+                        debug!(
+                            "chat={chat_id} msg={}: interrupted - kept for resume",
+                            msg.id()
+                        );
                     } else {
-                        warn!("msg {}: download failed - {e:#}", msg.id());
+                        error!("chat={chat_id} msg={}: download failed - {e:#}", msg.id());
                         stats.failed.fetch_add(1, Ordering::Relaxed);
                         live_retry.lock().await.insert(msg.id());
                     }
@@ -385,7 +392,7 @@ async fn drain_chat(chat_cfg: &ChatConfig, scan: ChatScan, shutdown: &Shutdown) 
         match result {
             Ok(()) => {}
             Err(e) if e.is_cancelled() => {}
-            Err(e) => warn!("download task panicked: {e}"),
+            Err(e) => error!("chat={}: download task panicked: {e}", chat_cfg.chat_id),
         }
     }
 
@@ -395,7 +402,15 @@ async fn drain_chat(chat_cfg: &ChatConfig, scan: ChatScan, shutdown: &Shutdown) 
     } else {
         last_read_message_id
     };
-    info!(
+    let level = if stats.failed.load(Ordering::Relaxed) > 0 {
+        log::Level::Warn
+    } else if stats.downloaded.load(Ordering::Relaxed) > 0 || !completed {
+        log::Level::Info
+    } else {
+        log::Level::Debug
+    };
+    log::log!(
+        level,
         "chat {}: scanned {} msg(s) - downloaded {}, skipped {}, failed {}, last_id={}{}",
         chat_cfg.chat_id,
         stats.scanned.load(Ordering::Relaxed),
@@ -535,7 +550,7 @@ fn drain_finished_tasks(tasks: &mut JoinSet<()>) {
         match result {
             Ok(()) => {}
             Err(e) if e.is_cancelled() => {}
-            Err(e) => warn!("download task panicked: {e}"),
+            Err(e) => error!("download task panicked: {e}"),
         }
     }
 }

@@ -1,4 +1,10 @@
 //! Keep recent application logs available to the UI as well as the terminal.
+//!
+//! Level policy: ERROR for failed operations/panics; WARN for recovery or degraded
+//! results; INFO for lifecycle events and useful outcomes; DEBUG for configuration
+//! and execution diagnostics; TRACE for individual messages, chunks and read requests.
+//! Log terminal failures at the owning task boundary, not again at every layer.
+//! Never add credentials, signed source URLs or request bodies to diagnostics.
 use std::{
     collections::VecDeque,
     sync::{
@@ -98,10 +104,14 @@ pub(crate) async fn request_log(request: Request, next: Next) -> Response {
     let status = response.status();
     let level = if status.is_server_error() {
         log::Level::Error
-    } else if status.is_client_error() {
+    } else if matches!(status.as_u16(), 401 | 403 | 408 | 429) {
         log::Level::Warn
-    } else {
+    } else if status.is_client_error() || !matches!(method.as_str(), "GET" | "HEAD") {
+        // Validation errors, missing resources and stale UI actions are expected.
         log::Level::Debug
+    } else {
+        // Polling, static assets and SSE connections should not bury diagnostics.
+        log::Level::Trace
     };
     if log_success || status.is_client_error() || status.is_server_error() {
         log::log!(
