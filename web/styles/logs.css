@@ -1,12 +1,14 @@
-.logs-panel { margin-top: 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.logs-panel { margin-top: 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
 .logs-panel summary { padding: 18px 24px; cursor: pointer; font-weight: 600; }
+.logs-panel summary:hover { background: var(--panel-2); }
+.logs-panel[open] summary { border-bottom: 1px solid var(--border); margin-bottom: 20px; }
 .logs-panel summary span { margin-left: 10px; font-size: 12px; font-weight: 400; }
 .logs-body { padding: 0 24px 24px; }
 .logs-toolbar { display: flex; align-items: end; gap: 12px; }
 .logs-search { flex: 1; }
 .logs-meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 14px 0 10px; font-size: 12px; color: var(--muted); }
 .logs-status-error { color: var(--err); }
-.logs-output { height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); overflow-anchor: none; }
+.logs-output { height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--input-bg); overflow-anchor: none; scrollbar-color: var(--border-strong) transparent; }
 .log-entry { display: grid; grid-template-columns: 180px 52px minmax(0, 1fr); gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--border); font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .log-entry:last-child { border-bottom: 0; }
 .log-time, .log-target { color: var(--muted); }

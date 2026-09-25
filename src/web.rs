@@ -31,6 +31,11 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
             include_str!("../web/scripts/settings.js"),
         ),
         (
+            "settings-presets.js",
+            "text/javascript",
+            include_str!("../web/scripts/settings-presets.js"),
+        ),
+        (
             "settings.css",
             "text/css",
             include_str!("../web/styles/settings.css"),

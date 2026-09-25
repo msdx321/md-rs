@@ -1,5 +1,6 @@
 import { $, api, bindTabs, connectEvents, pollWhenVisible, scheduleRender, bytes, historyPeriod, dateTime, esc, toast, runAction } from "./shared.js";
 import { createVideoLibrary } from './video-library.js';
+import { bindSettingPresets, presets } from './settings-presets.js';
 
 // ── tabs ──────────────────────────────────────────────────────────────────
 bindTabs(document.querySelectorAll('[role="tab"]'), (tab) => {
@@ -156,6 +157,12 @@ const FIELDS = ['cookie', 'user_agent', 'site_base',
   'segment_concurrency',
   'browser_enabled', 'browser_path', 'browser_profile_dir'];
 
+const syncPresets = bindSettingPresets({
+  resolution: [['highest', 'Best available'], ['lowest', 'Smallest available'], ...presets.resolution.filter(([value]) => value > 0)],
+  max_pages: presets.pages,
+  concurrent_videos: presets.concurrency,
+  segment_concurrency: presets.concurrency,
+});
 let savedSettings = null;
 let settingsSaving = false;
 const queueSettings = scheduleRender(updateSettingsControls);
@@ -320,6 +327,7 @@ function populateSettings(cfg) {
   configuredLinks(cfg).forEach(addLinkRow);
   updateLinkButtons();
   for (const key of FIELDS) $(key).value = String(cfg[key] ?? '');
+  syncPresets();
   updateSettingsControls();
 }
 async function loadSettings() {

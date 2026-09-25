@@ -8,7 +8,7 @@
           <div class="field"><label for="telegram_download_path">Telegram download directory</label><input id="telegram_download_path" required></div>
           <div class="field"><label for="jav_download_path">JAV download directory</label><input id="jav_download_path" required></div>
           <div class="field"><label for="p91_download_path">91Porn download directory</label><input id="p91_download_path" required></div>
-          <div class="field"><label for="temp_path">Temporary directory</label><input id="temp_path" required><span class="hint">Shared by both modules while downloads are in progress.</span></div>
+          <div class="field"><label for="temp_path">Temporary directory</label><input id="temp_path" required><span class="hint">Shared by all modules while downloads are in progress.</span></div>
           <div class="field"><label for="history_retention_days">Keep history for (days)</label><input id="history_retention_days" type="number" min="1" max="36500" required><span class="hint">Downloaded files are kept. After history expires, older media can be downloaded again.</span></div>
         </div>
       </section>
@@ -16,7 +16,7 @@
         <h2>Download speed</h2>
         <p>Limit the combined speed of all downloads, with optional limits for each module. Changes apply to active downloads.</p>
         <div class="form">
-          <div class="field"><label for="download_limit_mb_per_sec">Combined limit (MB/s)</label><input id="download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Shared across Telegram and JAV. 0 = unlimited.</span></div>
+          <div class="field"><label for="download_limit_mb_per_sec">Combined limit (MB/s)</label><input id="download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Shared across Telegram, JAV and 91Porn. 0 = unlimited.</span></div>
           <div class="field"><label for="telegram_download_limit_mb_per_sec">Telegram limit (MB/s)</label><input id="telegram_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all Telegram downloads. 0 = no separate limit.</span></div>
           <div class="field"><label for="jav_download_limit_mb_per_sec">JAV limit (MB/s)</label><input id="jav_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all JAV downloads. 0 = no separate limit.</span></div>
           <div class="field"><label for="p91_download_limit_mb_per_sec">91Porn limit (MB/s)</label><input id="p91_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all 91Porn downloads. 0 = no separate limit.</span></div>
@@ -27,12 +27,12 @@
         <h2>Minimum video resolution</h2>
         <p>Skip videos below a minimum shorter-side dimension: landscape 1920 × 1080 and portrait 1080 × 1920 both count as 1080p. Photos and other files are unaffected.</p>
         <div class="form">
-          <div class="field"><label for="min_video_resolution">Global minimum (pixels)</label><input id="min_video_resolution" type="number" min="0" max="16384" step="1" required><span class="hint">For example, 720 or 1080. 0 = no filtering.</span></div>
+          <div class="field"><label for="min_video_resolution">Global minimum (pixels)</label><input id="min_video_resolution" type="number" min="0" max="16384" step="1" required><span class="hint">Choose a quality level or enter a custom pixel threshold. 0 = no filtering.</span></div>
           <div class="field"><label for="telegram_min_video_resolution">Telegram override (pixels)</label><input id="telegram_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="telegram-resolution-hint"><span class="hint" id="telegram-resolution-hint"></span></div>
           <div class="field"><label for="jav_min_video_resolution">JAV override (pixels)</label><input id="jav_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="jav-resolution-hint"><span class="hint" id="jav-resolution-hint"></span></div>
           <div class="field"><label for="p91_min_video_resolution">91Porn override (pixels)</label><input id="p91_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="p91-resolution-hint"><span class="hint" id="p91-resolution-hint"></span></div>
         </div>
-        <p class="hint">Leave an override blank to use the global minimum; enter 0 to disable filtering for that service. Changes apply to new attempts, including resumes, not active downloads or existing files. Unknown resolutions are allowed. JAV checks the stream selected by its quality preference; 91Porn probes MP4 metadata, not the HD badge.</p>
+        <p class="hint">Choose “Use global” to inherit the global minimum or “No filtering” to disable it for that service. Changes apply to new attempts, including resumes, not active downloads or existing files. Unknown resolutions are allowed. JAV checks the stream selected by its quality preference; 91Porn probes MP4 metadata, not the HD badge.</p>
       </section>
       <section class="settings-card" data-schedule="telegram">
         <h2>Telegram schedule</h2>

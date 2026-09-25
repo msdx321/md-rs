@@ -1,7 +1,16 @@
 import { $, api, scheduleRender } from './shared.js';
+import { bindSettingPresets, presets } from './settings-presets.js';
 const paths = ['host', 'telegram_download_path', 'jav_download_path', 'p91_download_path', 'temp_path'];
 const numbers = ['port', 'history_retention_days', 'min_video_resolution', 'download_limit_mb_per_sec', 'telegram_download_limit_mb_per_sec', 'jav_download_limit_mb_per_sec', 'p91_download_limit_mb_per_sec'];
 const modules = ['telegram', 'jav', 'p91'];
+const syncPresets = bindSettingPresets({
+  download_limit_mb_per_sec: [[0, 'Unlimited'], ...presets.speed],
+  min_video_resolution: presets.resolution,
+  ...Object.fromEntries(modules.flatMap(name => [
+    [`${name}_download_limit_mb_per_sec`, [[0, 'No separate limit'], ...presets.speed]],
+    [`${name}_min_video_resolution`, [['', 'Use global minimum'], ...presets.resolution]],
+  ])),
+});
 let current;
 let saving = false;
 let saved = '';
@@ -40,9 +49,10 @@ function update() {
     const input = $(`${name}_min_video_resolution`);
     const inherited = input.value.trim() === '';
     input.placeholder = `Use global (${describe(global)})`;
+    $(`${name}_min_video_resolution-preset`).options[0].textContent = `Use global (${describe(global)})`;
     $(`${name}-resolution-hint`).textContent = inherited
       ? `Using global: ${describe(global)}.`
-      : `Override: ${describe(Number(input.value))}. Clear to use global.`;
+      : `Override: ${describe(Number(input.value))}. Select “Use global” to inherit.`;
   }
   const dirty = changed();
   $('save-settings').disabled = saving || !dirty;
@@ -56,6 +66,7 @@ function render(config) {
   for (const key of [...paths, ...numbers]) $(key).value = config[key];
   for (const name of modules) $(`${name}_min_video_resolution`).value = config[`${name}_min_video_resolution`] ?? '';
   for (const name of modules) for (const [key, value] of Object.entries(config.schedules[name])) $(`${name}-${key}`).value = String(value);
+  syncPresets();
   visibility();
   update();
 }

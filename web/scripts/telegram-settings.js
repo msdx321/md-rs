@@ -1,4 +1,17 @@
 import { $, api, scheduleRender } from './shared.js';
+import { bindSettingPresets, presets } from './settings-presets.js';
+
+const syncPresets = bindSettingPresets({
+  max_download_task: presets.concurrency,
+  download_connections: presets.concurrency,
+  'formats-video': [['all', 'All video formats'], ['mp4', 'MP4 only'], ['mp4, mkv', 'MP4 and MKV']],
+  'formats-audio': [['all', 'All audio formats'], ['mp3', 'MP3 only'], ['mp3, flac', 'MP3 and FLAC']],
+  'formats-document': [['all', 'All document formats'], ['pdf', 'PDF only'], ['pdf, zip', 'PDF and ZIP']],
+  file_path_prefix: [['', 'No subfolders'], ['chat_title', 'By chat'], ['chat_title, media_datetime', 'By chat and date'], ['chat_title, media_type', 'By chat and media type']],
+  file_name_prefix: [['', 'Message ID (default)'], ['message_id, file_name', 'Message ID + original filename'], ['file_name', 'Original filename'], ['message_id, caption', 'Message ID + caption']],
+  file_name_prefix_split: [['_', 'Underscore ( _ )'], ['-', 'Hyphen ( - )'], [' ', 'Space'], ['', 'No separator']],
+  date_format: [['%Y_%m', 'Year and month · 2026_09'], ['%Y-%m-%d', 'Full date · 2026-09-15'], ['%Y', 'Year · 2026']],
+});
 
 const form = $('settings-form');
 const fields = $('settings-fields');
@@ -113,6 +126,7 @@ function show(config, resetBaseline = true) {
   for (const kind of formats) $('formats-' + kind).value = config.file_formats[kind].join(', ');
   form.querySelectorAll('[name="media_type"]').forEach((input) => { input.checked = config.media_types.includes(input.value); });
   saved = JSON.stringify(read());
+  syncPresets();
   update();
 }
 
