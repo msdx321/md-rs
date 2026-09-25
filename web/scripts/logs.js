@@ -4,6 +4,7 @@ const panel = $('logs-panel');
 const output = $('logs-output');
 const search = $('logs-search');
 const level = $('logs-level');
+const levelKey = 'media-downloader-log-level';
 const source = $('logs-module');
 const status = $('logs-status');
 const pause = $('logs-pause');
@@ -20,6 +21,14 @@ let loading = false;
 let error = false;
 let cursor = 0;
 let session = '';
+
+function restoreLevel() {
+  try {
+    const saved = localStorage.getItem(levelKey) || '';
+    level.value = [...level.options].some(option => option.value === saved) ? saved : '';
+  } catch {}
+}
+restoreLevel();
 
 source.value = ['telegram', 'jav', 'p91'].find(module => document.body.classList.contains(module)) || '';
 
@@ -128,7 +137,10 @@ async function refresh() {
 
 panel.addEventListener('toggle', refresh);
 search.addEventListener('input', render);
-level.addEventListener('change', render);
+level.addEventListener('change', () => {
+  try { localStorage.setItem(levelKey, level.value); } catch {}
+  render();
+});
 source.addEventListener('change', () => { showScope(); render(); });
 pause.addEventListener('click', () => {
   paused = !paused;
@@ -138,5 +150,9 @@ pause.addEventListener('click', () => {
   if (!paused) refresh();
 });
 document.addEventListener('visibilitychange', refresh);
-window.addEventListener('pageshow', refresh);
+window.addEventListener('pageshow', () => {
+  restoreLevel();
+  if (loaded) render();
+  refresh();
+});
 pollWhenVisible(refresh, 2000);
