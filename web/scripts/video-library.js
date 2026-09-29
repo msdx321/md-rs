@@ -16,11 +16,13 @@ export function createVideoLibrary({ apiBase, progress, detail, loadStatus }) {
   }, (error) => { $('tasks-banner').textContent = 'Could not load tasks: ' + error.message; });
 
   function renderTasks() {
-    tasks = tasks.filter((t) => !['completed', 'cancelled'].includes(t.state));
+    // A completed row leaves the table on its own. A cancelled one stays: the
+    // server keeps it until it is dismissed, and the dismiss button below is
+    // the only thing that can do that.
+    tasks = tasks.filter((t) => t.state !== 'completed');
     $('btn-clear-failed').disabled = clearingFailed || !tasks.some((t) => t.state === 'failed');
     const active = tasks.filter((t) => !['completed', 'failed', 'skipped', 'cancelled'].includes(t.state)).length;
     $('task-count').textContent = active ? `(${active})` : '';
-    $('stat-active').textContent = tasks.filter((t) => t.state === 'running').length;
     $('tasks-empty').style.display = tasks.length ? 'none' : 'block';
     const nextRows = document.createElement('tbody');
     nextRows.innerHTML = tasks.map((t) => {

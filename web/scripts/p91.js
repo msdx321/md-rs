@@ -79,7 +79,7 @@ async function loadPopular(requestedPage = page) {
           : '<div class="thumb"></div>'}
         <div class="body">
           <div class="title" title="${esc(v.title)}">
-            <span class="rank">#${(data.page - 1) * 24 + (v.rank ?? i + 1)}</span> ${esc(v.title)}
+            <span class="rank">#${(data.page - 1) * data.per_page + (v.rank ?? i + 1)}</span> ${esc(v.title)}
           </div>
           <div class="row">
             <span class="muted">${v.hd ? '<span class="tag">HD</span> ' : ''}${v.original ? '<span class="tag">91</span> ' : ''}${v.duration_secs ? Math.round(v.duration_secs / 60) + ' min' : ''}</span>

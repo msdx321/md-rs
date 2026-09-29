@@ -96,7 +96,7 @@ async function loadPopular(requestedPage = page) {
           : '<div class="thumb"></div>'}
         <div class="body">
           <div class="title" title="${esc(v.title)}">
-            <span class="rank">#${(data.page - 1) * 24 + i + 1}</span> ${esc(v.title)}
+            <span class="rank">#${(data.page - 1) * data.per_page + (v.rank ?? i + 1)}</span> ${esc(v.title)}
           </div>
           <div class="row">
             <span class="muted">${v.rank != null ? 'rank #' + v.rank : ''}</span>
@@ -245,9 +245,17 @@ function addLinkRow(link = { url: '', daily_quota: 10 }) {
       sortInput.append(option);
     }
     sortInput.value = sort;
-    urlInput.value = sortedLink(urlInput.value, '');
+  };
+  // Lifting `sort` out of the URL rewrites the field, and rewriting it
+  // normalizes the whole query string (`?tag=a b` becomes `?tag=a+b`), which
+  // moves the caret to the end. Do it once the value is committed rather than
+  // on every keystroke.
+  const liftSortFromUrl = () => {
+    const normalized = sortedLink(urlInput.value, '');
+    if (normalized !== urlInput.value) urlInput.value = normalized;
   };
   syncSort();
+  liftSortFromUrl();
   const updateSummary = () => {
     row.querySelector('[data-link-name]').textContent = urlInput.value.trim() || 'New ranking link';
     const quota = row.querySelector('[data-link-quota]').value;
@@ -255,6 +263,11 @@ function addLinkRow(link = { url: '', daily_quota: 10 }) {
     row.querySelector('[data-link-preview]').textContent = `${sortInput.selectedOptions[0].textContent} · ${quotaText}`;
   };
   urlInput.addEventListener('input', syncSort);
+  urlInput.addEventListener('change', () => {
+    syncSort();
+    liftSortFromUrl();
+    updateSummary();
+  });
   sortInput.addEventListener('change', updateSummary);
   updateSummary();
   row.addEventListener('input', updateSummary);

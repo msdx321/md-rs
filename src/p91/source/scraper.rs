@@ -57,6 +57,12 @@ pub struct VideoCard {
     pub original: bool,
 }
 
+/// Cards the site puts on one listing page. The daily job just concatenates
+/// pages, so only the UI needs this: it turns a card's per-page `rank` into a
+/// position in the overall ranking. Reported to the browser rather than
+/// duplicated there, so the two cannot drift apart.
+pub const LISTING_PAGE_SIZE: usize = 24;
+
 /// Turn a `H:MM:SS` / `M:SS` duration badge into seconds.
 pub fn parse_duration(text: &str) -> Option<u64> {
     let text = text.trim();

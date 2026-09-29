@@ -262,6 +262,7 @@ async fn list_videos(
 
     Ok(Json(json!({
         "page": page,
+        "per_page": scraper::LISTING_PAGE_SIZE,
         "link": query.link,
         "videos": videos,
         "title_filter_active": !cfg.title_filter.trim().is_empty(),
