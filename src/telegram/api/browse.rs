@@ -132,7 +132,11 @@ pub(super) async fn list(
             .load_optional_off_thread()
             .await?
             .unwrap_or_default();
-        cfg.save_path = state.common.borrow().telegram_download_path.clone();
+        {
+            let common = state.common.borrow();
+            cfg.save_path = common.telegram_download_path.clone();
+            cfg.temp_path = common.temp_path.join("telegram");
+        }
         let mut messages = session
             .client
             .search_messages(peer)
