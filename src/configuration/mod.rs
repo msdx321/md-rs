@@ -53,6 +53,37 @@ impl<T> ConfigFile<T> {
 // Normalizing a read writes the file, so it must serialize with saves.
 static CONFIG_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+impl<T> ConfigFile<T> {
+    /// A handle is plain `'static` data, so it can be copied into a blocking
+    /// task without borrowing the (`const`) item it came from.
+    fn duplicate(&self) -> Self {
+        Self {
+            keep_defaults: self.keep_defaults,
+            groups: self.groups,
+            path: self.path,
+            model: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: DeserializeOwned + Serialize + Default + Send + 'static> ConfigFile<T> {
+    /// Reading normalizes the file, which may rewrite and fsync it. Startup can
+    /// afford that inline; the scan loop and the HTTP handlers cannot, because
+    /// the config directory is often a network mount.
+    pub async fn load_optional_off_thread(&self) -> anyhow::Result<Option<T>> {
+        let file = self.duplicate();
+        tokio::task::spawn_blocking(move || file.load_optional()).await?
+    }
+}
+
+impl<T: Serialize + Default + Send + 'static> ConfigFile<T> {
+    /// Hands the config back so callers can keep using it after the write.
+    pub async fn save_off_thread(&self, config: T) -> anyhow::Result<T> {
+        let file = self.duplicate();
+        tokio::task::spawn_blocking(move || file.save(&config).map(|()| config)).await?
+    }
+}
+
 impl<T: DeserializeOwned + Serialize + Default> ConfigFile<T> {
     pub fn load_optional(&self) -> anyhow::Result<Option<T>> {
         let _io = CONFIG_IO.lock().unwrap_or_else(|error| error.into_inner());

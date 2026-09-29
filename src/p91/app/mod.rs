@@ -183,7 +183,7 @@ impl AppCtx {
             !self.jobs.is_closed(),
             "service shutting down; settings rejected"
         );
-        FILE.save(&cfg)?;
+        let cfg = FILE.save_off_thread(cfg).await?;
         self.apply_config(cfg);
         Ok(())
     }

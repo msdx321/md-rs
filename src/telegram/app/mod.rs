@@ -44,8 +44,8 @@ pub(crate) async fn run_downloader(
     web_state.set_status("running").await;
 
     let data = crate::telegram::storage::load(&web_state.database).await?;
-    std::fs::create_dir_all(&cfg.save_path)?;
-    std::fs::create_dir_all("sessions")?;
+    tokio::fs::create_dir_all(&cfg.save_path).await?;
+    tokio::fs::create_dir_all("sessions").await?;
 
     let session = Arc::new(SqliteSession::open(SESSION_FILE).await?);
     let SenderPool {
@@ -148,7 +148,7 @@ pub(crate) async fn run_downloader(
         // applies the cycle's capacity without disturbing an active download.
         {
             let _edit = web_state.config_update.lock().await;
-            cfg = FILE.load_optional()?.unwrap_or(cfg);
+            cfg = FILE.load_optional_off_thread().await?.unwrap_or(cfg);
             cfg.save_path = schedule.borrow().telegram_download_path.clone();
             cfg.temp_path = schedule.borrow().temp_path.join("telegram");
             for (chat_id, cursor) in
@@ -164,7 +164,7 @@ pub(crate) async fn run_downloader(
             }
         }
         runtime.downloads = Arc::new(DownloadSlots::new());
-        std::fs::create_dir_all(&cfg.save_path)?;
+        tokio::fs::create_dir_all(&cfg.save_path).await?;
         if let Some(trigger) = scan_due.take() {
             cycle_no += 1;
             let cycle_started = Instant::now();
@@ -234,11 +234,11 @@ pub(crate) async fn run_downloader(
             _ = settings_rx.changed() => {},
             due = timer.tick() => { scan_due = due.then_some("scheduled"); }
             request = download_rx.recv() => {
-                cfg = FILE.load_optional()?.unwrap_or(cfg);
+                cfg = FILE.load_optional_off_thread().await?.unwrap_or(cfg);
             cfg.save_path = schedule.borrow().telegram_download_path.clone();
             cfg.temp_path = schedule.borrow().temp_path.join("telegram");
                 runtime.downloads = Arc::new(DownloadSlots::new());
-                std::fs::create_dir_all(&cfg.save_path)?;
+                tokio::fs::create_dir_all(&cfg.save_path).await?;
                 match request {
                     Some(ChatRequest::Scan) => { scan_due = Some("manual"); }
                     Some(ChatRequest::Once(target, message_id)) => {
@@ -349,7 +349,10 @@ async fn subscribe_chat(
     let channel_name = channel_name.unwrap_or_else(|| chat_id.clone());
     state.set_channel_name(&chat_id, &channel_name).await;
     let _edit = state.config_update.lock().await;
-    let mut next = FILE.load_optional()?.unwrap_or_else(|| cfg.clone());
+    let mut next = FILE
+        .load_optional_off_thread()
+        .await?
+        .unwrap_or_else(|| cfg.clone());
     if next.chat.iter().any(|chat| chat.chat_id == chat_id) {
         return Ok((chat_id, false, channel_name));
     }
@@ -357,7 +360,7 @@ async fn subscribe_chat(
         chat_id: chat_id.clone(),
         download_filter: None,
     });
-    FILE.save(&next)?;
+    let next = FILE.save_off_thread(next).await?;
     *cfg = next;
     Ok((chat_id, true, channel_name))
 }

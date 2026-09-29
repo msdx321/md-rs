@@ -189,7 +189,11 @@ async fn snapshot(cfg: Config, state: &ApiState) -> Result<Settings, Error> {
 
 pub(super) async fn get(State(state): State<Arc<ApiState>>) -> Result<Json<Settings>, Error> {
     let _edit = state.config_update.lock().await;
-    let cfg = FILE.load_optional().map_err(internal)?.unwrap_or_default();
+    let cfg = FILE
+        .load_optional_off_thread()
+        .await
+        .map_err(internal)?
+        .unwrap_or_default();
     Ok(Json(snapshot(cfg, &state).await?))
 }
 
@@ -199,7 +203,11 @@ pub(super) async fn put(
 ) -> Result<Json<Settings>, Error> {
     settings.validate()?;
     let _edit = state.config_update.lock().await;
-    let mut cfg = FILE.load_optional().map_err(internal)?.unwrap_or_default();
+    let mut cfg = FILE
+        .load_optional_off_thread()
+        .await
+        .map_err(internal)?
+        .unwrap_or_default();
     let original = settings.original_chat.as_ref().map(|chats| {
         chats
             .iter()

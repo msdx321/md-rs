@@ -214,7 +214,7 @@ impl AppCtx {
         let credentials_changed = cfg.cookie != previous.cookie
             || cfg.user_agent != previous.user_agent
             || cfg.site_base != previous.site_base;
-        FILE.save(&cfg)?;
+        let cfg = FILE.save_off_thread(cfg).await?;
         if browser_changed || credentials_changed {
             let mut gate = self.cookies.gate.lock().await;
             if browser_changed {
