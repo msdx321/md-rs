@@ -9,9 +9,9 @@ const source = $('logs-module');
 const status = $('logs-status');
 const pause = $('logs-pause');
 const rowCache = new Map();
-const dateFormatter = new Intl.DateTimeFormat(undefined, {
-  year: 'numeric', month: 'numeric', day: 'numeric',
-  hour: 'numeric', minute: 'numeric', second: 'numeric',
+const dateFormatter = new Intl.DateTimeFormat('en-GB', {
+  day: '2-digit', month: 'short', year: 'numeric',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const entryKey = entry => entry.id + ':' + entry.timestamp;
 let entries = [];
