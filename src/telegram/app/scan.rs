@@ -483,14 +483,14 @@ pub(super) async fn run_message_download(
 
 /// Dialogs read so far, shared by the lookups of one scan cycle. The listing
 /// is paged only as far as the requested chat, and never twice per cycle.
-pub(super) struct DialogLookup {
+pub(crate) struct DialogLookup {
     dialogs: grammers_client::client::DialogIter,
     exhausted: bool,
     seen: HashMap<i64, (PeerRef, Option<String>)>,
 }
 
 impl DialogLookup {
-    pub(super) fn new(client: &Client) -> Self {
+    pub(crate) fn new(client: &Client) -> Self {
         Self {
             dialogs: client.iter_dialogs(),
             exhausted: false,
@@ -520,7 +520,7 @@ impl DialogLookup {
     }
 }
 
-pub(super) async fn resolve_chat(
+pub(crate) async fn resolve_chat(
     client: &Client,
     chat_id: &str,
     dialogs: &mut DialogLookup,

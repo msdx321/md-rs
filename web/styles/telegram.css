@@ -12,4 +12,12 @@
 .media-options input { width: 18px; min-height: 18px; height: 18px; flex-shrink: 0; margin: 0; accent-color: var(--accent); }
 .subscribed-chats { grid-column: 1 / -1; }
 .history-note { margin: 0 0 18px; }
+#browse-form { align-items: end; margin-top: 18px; }
+#browse-form .field { flex: 1; min-width: min(100%, 220px); }
+#browse-note { flex: 1; }
+.card .browse-thumb { position: relative; display: grid; place-items: center; text-align: center; aspect-ratio: 16/9; }
+#browse-grid .card .body { padding: 14px; gap: 10px; }
+.browse-thumb > span { padding: 16px; }
+.browse-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+#browse-banner { margin-bottom: 18px; }
 table[data-resizable="telegram-history"] { min-width: 1000px; }

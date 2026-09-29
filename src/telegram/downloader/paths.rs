@@ -72,9 +72,9 @@ pub(crate) fn ensure_contained(root: &Path, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(super) struct MediaPaths {
+pub(crate) struct MediaPaths {
     pub(super) temp: PathBuf,
-    pub(super) final_path: PathBuf,
+    pub(crate) final_path: PathBuf,
     temp_root: PathBuf,
     final_root: PathBuf,
 }
@@ -96,7 +96,7 @@ impl MediaPaths {
 }
 
 /// Build safe paths while retaining the exact mapping for ordinary filenames.
-pub(super) fn build_media_paths(
+pub(crate) fn build_media_paths(
     msg: &grammers_client::message::Message,
     media: &Media,
     cfg: &Config,

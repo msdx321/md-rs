@@ -32,11 +32,26 @@
 
 <section class="panel">
   <nav role="tablist" aria-label="Download activity">
+    <button id="browse-tab" type="button" role="tab" aria-selected="false" aria-controls="telegram-browse" tabindex="-1">Browse chat</button>
     <button id="active-tab" class="active" type="button" role="tab" aria-selected="true" aria-controls="telegram-tasks">Tasks <span id="task-count"></span></button>
     <button id="completed-tab" type="button" role="tab" aria-selected="false" aria-controls="completed-downloads" tabindex="-1">History</button>
     <button id="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="telegram-settings" tabindex="-1">Settings</button>
     <button id="downloads-tab" type="button" role="tab" aria-selected="false" aria-controls="telegram-downloads" tabindex="-1">Add downloads</button>
   </nav>
+  <div id="telegram-browse" role="tabpanel" aria-labelledby="browse-tab" tabindex="0" hidden>
+    <p class="hint">Preview photos and videos without starting downloads or changing scan positions. Individual downloads use your media preferences.</p>
+    <form id="browse-form" class="actions toolbar">
+      <div class="field"><label for="browse-chat">Chat</label><select id="browse-chat"><option value="">Other chat…</option></select></div>
+      <div id="browse-custom-field" class="field"><label for="browse-custom">Username or chat ID</label><input id="browse-custom" placeholder="@channel or -1001234567890" autocomplete="off" spellcheck="false" maxlength="512"></div>
+      <button id="btn-browse" class="primary" type="submit" disabled>Browse</button>
+    </form>
+    <p id="browse-login-note" class="empty">Connect Telegram above to browse chats.</p>
+    <div id="browse-banner" role="status" aria-live="polite" hidden></div>
+    <div class="actions toolbar"><span id="browse-note" class="muted" role="status">Choose a chat to preview its media.</span><div class="actions">
+      <button id="browse-prev" type="button" disabled>Previous</button><span id="browse-page" class="muted">Page 1</span><button id="browse-next" type="button" disabled>Next</button>
+    </div></div>
+    <div id="browse-grid" class="grid"></div>
+  </div>
   <div id="telegram-tasks" class="active" role="tabpanel" aria-labelledby="active-tab" tabindex="0">
     <div class="actions toolbar"><button id="btn-pause" disabled>Pause all</button><button id="btn-resume" disabled>Resume all</button><button id="btn-cancel" class="danger" disabled title="Delete partial files and retry data, then pause Telegram">Cancel all</button></div><div id="tasks-banner" role="status"></div>
     {{task_table}}

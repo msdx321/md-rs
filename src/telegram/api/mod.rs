@@ -1,6 +1,7 @@
 //! Telegram commands, login, and live status API.
 use crate::telegram::storage::history;
 use tokio_util::sync::CancellationToken;
+mod browse;
 mod history_api;
 mod login;
 mod settings;
@@ -138,6 +139,8 @@ pub struct ApiState {
     pub(crate) database: crate::storage::Database,
     login: Mutex<login::Login>,
     download_tx: mpsc::Sender<ChatRequest>,
+    browse: Mutex<browse::SessionRef>,
+    thumbnail_id: AtomicU64,
     paused: AtomicBool,
     last_progress_publish_ms: AtomicU64,
     /// Bumped whenever retained history changes, so clients refetch only then.
@@ -303,6 +306,8 @@ impl ApiState {
             config_update: Mutex::new(()),
             settings_changed: watch::channel(()).0,
             download_tx,
+            browse: Mutex::new(std::sync::Weak::new()),
+            thumbnail_id: AtomicU64::new(now_millis()),
             paused: AtomicBool::new(false),
             last_progress_publish_ms: AtomicU64::new(0),
             // Distinct across restarts so reconnecting clients refetch.
@@ -645,6 +650,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/events", get(events))
         .route("/api/config", get(settings::get).put(settings::put))
+        .route("/api/media", get(browse::list))
+        .route("/api/media/download", post(browse::download))
+        .route("/api/thumbnails/{id}", get(browse::image))
         .route(
             "/api/history",
             get(history_api::list).delete(history_api::clear),
@@ -718,16 +726,25 @@ async fn queue_request(
     payload: DownloadPayload,
     subscribe: bool,
 ) -> (StatusCode, Json<ApiResponse>) {
+    let (target, message_id) = match ChatTarget::parse(&payload.chat_link) {
+        Ok(parsed) => parsed,
+        Err(message) => return api_response(StatusCode::BAD_REQUEST, message),
+    };
+    queue_target(state, target, message_id, subscribe).await
+}
+
+async fn queue_target(
+    state: Arc<ApiState>,
+    target: ChatTarget,
+    message_id: Option<i32>,
+    subscribe: bool,
+) -> (StatusCode, Json<ApiResponse>) {
     if state.login.lock().await.snapshot.step != "ready" {
         return api_response(
             StatusCode::CONFLICT,
             "Connect Telegram before adding downloads",
         );
     }
-    let (target, message_id) = match ChatTarget::parse(&payload.chat_link) {
-        Ok(parsed) => parsed,
-        Err(message) => return api_response(StatusCode::BAD_REQUEST, message),
-    };
     let label = match &target {
         ChatTarget::DialogId(id) => state.channel_name(&id.to_string()).await,
         ChatTarget::Username(username) => state.channel_name(username).await,

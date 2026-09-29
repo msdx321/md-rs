@@ -1,6 +1,6 @@
 import "./telegram-settings.js";
 import { createSnapshotRefresh } from "./snapshot-refresh.js";
-import { api, bindTabs, bindHistoryPagination, connectEvents, scheduleRender, reconcileRows, historyPeriod, dateTime, label, sizeLabel } from "./shared.js";
+import { api, bindTabs, bindHistoryPagination, connectEvents, scheduleRender, reconcileRows, historyPeriod, dateTime, label, sizeLabel, bytes, esc, toast } from "./shared.js";
 
 const statusEl = document.querySelector("#status");
 const requestEl = document.querySelector("#request-status");
@@ -32,6 +32,132 @@ const historyPager = bindHistoryPagination(renderHistoryPage);
 
 bindTabs(tabEls, (tab) => {
   if (tab.id === 'completed-tab') loadHistory();
+  if (tab.id === 'browse-tab') loadBrowseChats();
+});
+
+// Browsing has its own cursors; it never changes the downloader's scan position.
+const browseChat = document.querySelector('#browse-chat');
+const browseCustom = document.querySelector('#browse-custom');
+const browseGrid = document.querySelector('#browse-grid');
+const browseBanner = document.querySelector('#browse-banner');
+let browseNames = {};
+let browseRequest;
+let browseLoading = false;
+let browseCurrentChat = '';
+let browseCursors = [0];
+let browsePage = 0;
+let browseNext = null;
+const browseQueued = new Set();
+function updateBrowseControls() {
+  const ready = loginStep?.step === 'ready';
+  document.querySelector('#btn-browse').disabled = !ready || browseLoading;
+  document.querySelector('#browse-login-note').hidden = ready;
+  document.querySelector('#browse-prev').disabled = !ready || browseLoading || browsePage === 0;
+  document.querySelector('#browse-next').disabled = !ready || browseLoading || browseNext === null;
+  browseGrid.querySelectorAll('button[data-message]').forEach(button => {
+    button.disabled = !ready || browseLoading || paused || cancelling || button.dataset.unavailable === 'true';
+  });
+}
+function updateBrowseChat() {
+  document.querySelector('#browse-custom-field').hidden = Boolean(browseChat.value);
+  browseCustom.required = !browseChat.value;
+}
+browseChat.addEventListener('change', updateBrowseChat);
+async function loadBrowseChats() {
+  try {
+    const cfg = await api('/telegram/api/config');
+    const selected = browseChat.value;
+    browseChat.replaceChildren(...(cfg.chat || []).map(chat => new Option(
+      browseNames[chat.chat_id.replace(/^@/, '').toLowerCase()] || chat.chat_id,
+      chat.chat_id,
+    )), new Option('Other chat…', ''));
+    if ([...browseChat.options].some(option => option.value === selected) && selected) browseChat.value = selected;
+    updateBrowseChat();
+    if (!browseCurrentChat && !browseLoading && loginStep?.step === 'ready' && browseChat.value) loadBrowse(0, true);
+  } catch (error) {
+    browseBanner.textContent = error.message;
+    browseBanner.className = 'banner err';
+    browseBanner.hidden = false;
+  }
+}
+async function loadBrowse(requestedPage = 0, reset = false) {
+  const chat = reset ? (browseChat.value || browseCustom.value.trim()) : browseCurrentChat;
+  if (!chat) return;
+  browseRequest?.abort();
+  const request = new AbortController();
+  browseRequest = request;
+  browseLoading = true;
+  updateBrowseControls();
+  browseBanner.textContent = 'Loading chat media…';
+  browseBanner.className = 'banner';
+  browseBanner.hidden = false;
+  try {
+    const before = reset ? 0 : requestedPage > browsePage ? browseNext : browseCursors[requestedPage];
+    const query = new URLSearchParams({ chat, before });
+    const data = await api('/telegram/api/media?' + query, { signal: request.signal });
+    if (browseRequest !== request) return;
+    if (reset) {
+      browseCursors = [0];
+      browseQueued.clear();
+    }
+    browseCursors[requestedPage] = before;
+    browseCurrentChat = data.chat_id;
+    browsePage = requestedPage;
+    browseNext = data.next_before;
+    document.querySelector('#browse-page').textContent = `Page ${browsePage + 1}`;
+    document.querySelector('#browse-note').textContent = `${data.chat_name} · ${data.media.length} items on this page`;
+    browseGrid.innerHTML = data.media.map(item => {
+      const queued = browseQueued.has(`${data.chat_id}:${item.message_id}`);
+      const title = item.caption || `${label(item.media_type)} · Message ${item.message_id}`;
+      const duration = item.duration_secs > 0 ? ` · ${Math.floor(item.duration_secs / 60)}:${String(item.duration_secs % 60).padStart(2, '0')}` : '';
+      return `<div class="card">
+        <div class="thumb browse-thumb"><span class="muted">${label(item.media_type)} preview unavailable</span>${item.image_url ? `<img alt="" src="${esc(item.image_url)}" loading="lazy">` : ''}</div>
+        <div class="body"><div class="title" title="${esc(title)}">${esc(title)}</div>
+          <div class="muted">${label(item.media_type)} · ${bytes(item.size)}${duration}</div>
+          <div class="row"><span class="muted">#${item.message_id}</span><button class="tiny" type="button" data-message="${item.message_id}" data-unavailable="${item.downloaded || queued}">${item.downloaded ? 'Downloaded' : queued ? 'Queued' : 'Download'}</button></div>
+        </div></div>`;
+    }).join('') || '<div class="empty">No photos or videos found in this chat.</div>';
+    browseGrid.querySelectorAll('img').forEach(image => {
+      image.addEventListener('error', () => image.remove(), { once: true });
+      image.addEventListener('load', () => { image.previousElementSibling.hidden = true; }, { once: true });
+    });
+    browseBanner.hidden = true;
+  } catch (error) {
+    if (browseRequest !== request || error.name === 'AbortError') return;
+    browseBanner.textContent = error.message;
+    browseBanner.className = 'banner err';
+    browseBanner.hidden = false;
+  } finally {
+    if (browseRequest === request) {
+      browseLoading = false;
+      updateBrowseControls();
+    }
+  }
+}
+document.querySelector('#browse-form').addEventListener('submit', event => {
+  event.preventDefault();
+  loadBrowse(0, true);
+});
+document.querySelector('#browse-prev').onclick = () => loadBrowse(browsePage - 1);
+document.querySelector('#browse-next').onclick = () => loadBrowse(browsePage + 1);
+browseGrid.addEventListener('click', async event => {
+  const button = event.target.closest('button[data-message]');
+  if (!button || button.disabled) return;
+  const chat = browseCurrentChat;
+  const message = Number(button.dataset.message);
+  button.dataset.unavailable = 'true';
+  button.disabled = true;
+  try {
+    const result = await api('/telegram/api/media/download', {
+      method: 'POST', body: JSON.stringify({ chat_id: chat, message_id: message }),
+    });
+    browseQueued.add(`${chat}:${message}`);
+    button.textContent = 'Queued';
+    toast(result.message, 'ok');
+  } catch (error) {
+    button.dataset.unavailable = 'false';
+    toast(error.message, 'err');
+  } finally { updateBrowseControls(); }
 });
 
 formEl.addEventListener("submit", async (event) => {
@@ -187,16 +313,24 @@ completedEl.addEventListener('click', (event) => {
 
 function render(snapshot) {
   const channelNames = snapshot.channel_names || {};
+  browseNames = channelNames;
+  for (const option of browseChat.options) {
+    if (option.value) option.textContent = channelNames[option.value.replace(/^@/, '').toLowerCase()] || option.value;
+  }
   const namesSignature = JSON.stringify(channelNames);
   if (namesSignature !== channelNamesSignature) {
     channelNamesSignature = namesSignature;
     window.dispatchEvent(new CustomEvent('telegram:channel-names', { detail: channelNames }));
   }
+  const wasReady = loginStep?.step === 'ready';
   renderLogin(snapshot.login);
+  if (!wasReady && snapshot.login?.step === 'ready'
+    && document.querySelector('#browse-tab').getAttribute('aria-selected') === 'true') loadBrowseChats();
   historyPeriod("telegram", snapshot.history_retention_days);
   paused = snapshot.paused;
   cancelling = snapshot.cancelling;
   updateControls();
+  updateBrowseControls();
   statusEl.textContent = cancelling ? 'Cancelling' : paused ? 'Paused' : snapshot.next_run_at ? `Next run: ${dateTime(snapshot.next_run_at)}` : label(snapshot.status);
   statusEl.className = 'pill ' + (snapshot.status === 'running' && !paused && !cancelling ? 'ok' : '');
   const loginBadge = document.querySelector('#pill-login');
@@ -310,3 +444,5 @@ const queueSnapshot = scheduleRender(render);
 connectEvents("/telegram/events", {
   message: (event) => queueSnapshot(JSON.parse(event.data)),
 });
+
+if (location.hash === '#browse') document.querySelector('#browse-tab').click();

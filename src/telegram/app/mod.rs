@@ -1,6 +1,6 @@
 mod auth;
 mod cancellation;
-mod scan;
+pub(crate) mod scan;
 pub(crate) mod setup;
 mod shutdown;
 mod state;
@@ -74,6 +74,10 @@ pub(crate) async fn run_downloader(
 
     let file_ids: Arc<Mutex<HashMap<String, u64>>> =
         Arc::new(Mutex::new(data.downloaded_file_ids.into_iter().collect()));
+
+    let _browse_session = web_state
+        .enable_browsing(client.clone(), file_ids.clone())
+        .await;
 
     let mut data_chats: HashMap<String, ChatData> = data
         .chat
