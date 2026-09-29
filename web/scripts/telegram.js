@@ -28,6 +28,7 @@ let paused = false;
 let historyBusy = false;
 let channelNamesSignature = null;
 let historyRevision = null;
+let requestStatus = null;
 const historyPager = bindHistoryPagination(renderHistoryPage);
 
 bindTabs(tabEls, (tab) => {
@@ -338,8 +339,11 @@ function render(snapshot) {
   loginBadge.textContent = ready ? 'Connected' : 'Login required';
   loginBadge.className = 'pill ' + (ready ? 'ok' : 'err');
   document.querySelector('#task-count').textContent = snapshot.active.length ? `(${snapshot.active.length})` : '';
-  requestEl.textContent = snapshot.request_status;
-  requestEl.classList.toggle("is-error", snapshot.request_status.startsWith("Could not"));
+  if (snapshot.request_status !== requestStatus) {
+    requestStatus = snapshot.request_status;
+    requestEl.textContent = requestStatus;
+    requestEl.classList.toggle("is-error", requestStatus.startsWith("Could not"));
+  }
   filesEl.textContent = snapshot.downloaded_files.toLocaleString();
   bytesEl.textContent = sizeLabel(snapshot.downloaded_bytes);
   activeEl.textContent = snapshot.active_count;
@@ -365,8 +369,7 @@ function render(snapshot) {
       <td><span class="tag ${state}">${label(state)}</span></td>
       <td><div class="bar" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${percent.toFixed(1)}%"></i></div><span class="muted">${percent.toFixed(0)}%</span></td>
       <td class="muted task-speed"></td>
-      <td class="muted"><span class="truncate detail"></span></td>
-      <td></td>`;
+      <td class="muted"><span class="truncate detail"></span></td>`;
     setText('.file', item.file_name, row);
     row.querySelector('.file').title = item.file_name;
     setText('.source', [item.source_name, `Message ${item.msg_id}`].filter(Boolean).join(' · '), row);

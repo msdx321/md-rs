@@ -21,3 +21,4 @@
 .browse-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 #browse-banner { margin-bottom: 18px; }
 table[data-resizable="telegram-history"] { min-width: 1000px; }
+table[data-resizable="telegram-tasks"] { min-width: 890px; }

@@ -54,7 +54,21 @@
   </div>
   <div id="telegram-tasks" class="active" role="tabpanel" aria-labelledby="active-tab" tabindex="0">
     <div class="actions toolbar"><button id="btn-pause" disabled>Pause all</button><button id="btn-resume" disabled>Resume all</button><button id="btn-cancel" class="danger" disabled title="Delete partial files and retry data, then pause Telegram">Cancel all</button></div><div id="tasks-banner" role="status"></div>
-    {{task_table}}
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Download records"><table class="task-table" data-resizable="telegram-tasks">
+      <colgroup>
+        <col>
+        <col class="task-source">
+        <col class="task-state">
+        <col class="task-progress">
+        <col class="task-speed">
+        <col class="task-detail">
+      </colgroup>
+      <thead>
+        <tr><th data-min-width="160">Title</th><th>Source</th><th>State</th><th data-min-width="130">Progress</th><th>Speed</th><th>Detail</th></tr>
+      </thead>
+      <tbody id="tasks-body"></tbody>
+    </table></div>
+    <div class="empty" id="tasks-empty">No tasks. Completed downloads appear in History.</div>
   </div>
   <div id="telegram-downloads" role="tabpanel" aria-labelledby="downloads-tab" tabindex="0" hidden>
   <p id="download-login-note" class="empty">Connect Telegram above to add downloads.</p>
