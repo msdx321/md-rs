@@ -222,7 +222,8 @@ function patchNode(current, next) {
 
 export function historyPeriod(module, days) {
   document.querySelectorAll(`[data-history-days="${module}"]`).forEach(el => {
-    const text = `· ${days} days`;
+    // Stat cards show the period on its own line; inline labels continue a sentence.
+    const text = el.closest('.stat') ? `Last ${days} days` : `· ${days} days`;
     if (el.textContent !== text) el.textContent = text;
   });
 }
