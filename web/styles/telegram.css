@@ -14,8 +14,8 @@
 .history-note { margin: 0 0 18px; }
 #browse-form { align-items: end; margin-top: 18px; }
 #browse-form .field { flex: 1; min-width: min(100%, 220px); }
-#browse-note { flex: 1; }
-.card .browse-thumb { position: relative; display: grid; place-items: center; text-align: center; aspect-ratio: 16/9; }
+#browse-note { flex: 1 1 220px; }
+.card .browse-thumb { position: relative; display: grid; place-items: center; text-align: center; }
 #browse-grid .card .body { padding: 14px; gap: 10px; }
 .browse-thumb > span { padding: 16px; }
 .browse-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }

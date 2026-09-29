@@ -26,7 +26,7 @@ export function bindSettingPresets(fields) {
     custom.className = 'preset-custom';
     const customLabel = document.createElement('label');
     customLabel.htmlFor = id;
-    customLabel.textContent = `Custom ${label.textContent.toLowerCase()}`;
+    customLabel.textContent = `Custom ${label.textContent.replace(/^(?!Telegram)[A-Z](?=[a-z])/, (letter) => letter.toLowerCase())}`;
     input.before(select, custom);
     custom.append(customLabel, input);
     const showCustom = () => { custom.hidden = select.value !== 'custom'; };

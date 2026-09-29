@@ -99,7 +99,7 @@ async function loadPopular(requestedPage = page) {
             <span class="rank">#${(data.page - 1) * data.per_page + (v.rank ?? i + 1)}</span> ${esc(v.title)}
           </div>
           <div class="row">
-            <span class="muted">${v.rank != null ? 'rank #' + v.rank : ''}</span>
+            <span></span>
             <button class="tiny" data-id="${esc(v.id)}" data-url="${esc(v.url)}"
                     data-title="${esc(v.title)}" data-rank="${v.rank ?? ''}"
                     ${v.downloaded || v.in_progress ? 'disabled' : ''}>

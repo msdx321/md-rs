@@ -41,6 +41,7 @@ button.tiny { padding: 6px 10px; min-height: 36px; font-size: 12px; }
 [role="tabpanel"].active { display: block; }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .toolbar { margin: 0 0 18px; }
+.actions .actions { margin-top: 0; }
 .pill, .tag { display: inline-block; max-width: 100%; overflow-wrap: anywhere; border-radius: 999px; padding: 3px 10px; color: var(--muted); background: var(--panel-2); font-size: 12px; }
 .pill.ok, .tag.completed { color: var(--ok); background: var(--ok-soft); }
 .tag.running { color: var(--accent); background: var(--accent-soft); }
@@ -92,6 +93,7 @@ tbody tr:hover, tbody tr:focus-within { background: var(--panel-2); }
 .muted { color: var(--muted); }
 .form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
 .field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.field > button { align-self: flex-start; }
 .field label { font-weight: 550; font-size: 13px; }
 label.field { font-weight: 600; font-size: 13px; }
 label.field input, label.field .hint { font-weight: 400; }
@@ -221,6 +223,7 @@ code { padding: 1px 5px; border-radius: 4px; background: var(--panel-2); }
 .settings-card h3 + .form { margin-top: 16px; }
 .settings-card .form { gap: 20px; }
 .settings-card .hint { margin-top: 0; line-height: 1.65; }
+.settings-card .form + .hint { margin-top: 16px; }
 .preset-custom { display: grid; gap: 7px; padding: 10px; border-radius: 10px; background: var(--panel-2); }
 .field .preset-custom label { font-size: 12px; font-weight: 500; color: var(--muted); }
 .settings-advanced { background: var(--panel); margin-top: 20px; border: 1px solid var(--border); border-radius: 14px; }
@@ -291,6 +294,7 @@ input:disabled, select:disabled, textarea:disabled { color: var(--muted); backgr
   .actions.toolbar { gap: 8px; }
   .actions.toolbar button { flex-grow: 1; padding-inline: 10px; }
   [role="tablist"] { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; margin-bottom: 20px; }
+  [role="tablist"] button:last-child:nth-child(odd) { grid-column: 1 / -1; }
   .settings-savebar { bottom: max(8px, env(safe-area-inset-bottom)); padding: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { button, input, select, textarea { transition: none; } }
