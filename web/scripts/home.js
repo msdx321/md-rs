@@ -144,6 +144,13 @@ function renderSummary() {
   }
 }
 
+// Queued tasks have neither bytes nor speed yet; show only what is known.
+function libraryTransfer(task) {
+  if (task.state === 'paused') return 'Paused';
+  if (task.state === 'running') return `${bytes(task.downloaded_bytes)} · ${bytes(task.speed_kbps * 1024)}/s`;
+  return task.downloaded_bytes ? bytes(task.downloaded_bytes) : '';
+}
+
 // Adapt provider snapshots into one presentation model at the UI boundary.
 function activeDownloads() {
   return [
@@ -159,14 +166,14 @@ function activeDownloads() {
       detail: `${label(task.state)} · ${label(task.phase)}`,
       progress: task.total_segments ? task.done_segments / task.total_segments * 100
         : task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
-      status: task.state === 'paused' ? 'Paused' : `${bytes(task.downloaded_bytes)} · ${bytes(task.speed_kbps * 1024)}/s`,
+      status: libraryTransfer(task),
     })),
     ...(p91Tasks || []).filter((task) => !terminal.has(task.state)).map((task) => ({
       id: `p91:${task.id}`,
       source: '91Porn', name: task.title || task.id,
       detail: `${label(task.state)} · ${label(task.phase)}`,
       progress: task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
-      status: task.state === 'paused' ? 'Paused' : `${bytes(task.downloaded_bytes)} · ${bytes(task.speed_kbps * 1024)}/s`,
+      status: libraryTransfer(task),
     })),
   ];
 }
