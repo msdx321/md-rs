@@ -6,6 +6,7 @@
 //! URLs with query strings.
 
 use std::error::Error;
+use std::sync::LazyLock;
 
 use regex::Regex;
 use url::Url;
@@ -89,22 +90,38 @@ pub(crate) fn byte_range_end(start: u64, length: u64) -> Result<u64, &'static st
         .ok_or("invalid HLS byte range")
 }
 
-/// Extract a quoted attribute such as `URI="init.mp4"`.
-fn extract_attr(attrs: &str, name: &str) -> Option<String> {
-    let re = Regex::new(&format!(
+/// Pattern for a quoted attribute such as `URI="init.mp4"`.
+fn quoted_pattern(name: &str) -> Regex {
+    Regex::new(&format!(
         r#"(?:^|,)\s*{}=\"([^\"]+)\""#,
         regex::escape(name)
     ))
-    .ok()?;
-    re.captures(attrs)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+    .expect("quoted attribute pattern is valid")
 }
 
-/// Extract an unquoted attribute such as `METHOD=AES-128`.
-fn extract_unquoted_attr(attrs: &str, name: &str) -> Option<String> {
-    let re = Regex::new(&format!(r#"(?:^|,)\s*{}=([^,\s]+)"#, regex::escape(name))).ok()?;
-    re.captures(attrs)
+/// Pattern for an unquoted attribute such as `METHOD=AES-128`.
+fn unquoted_pattern(name: &str) -> Regex {
+    Regex::new(&format!(r#"(?:^|,)\s*{}=([^,\s]+)"#, regex::escape(name)))
+        .expect("unquoted attribute pattern is valid")
+}
+
+// A playlist may carry one `#EXT-X-KEY` per segment, so building a pattern per
+// lookup would scale with the media length. Every attribute this parser reads
+// is known up front, so each pattern is compiled once.
+static ATTR_URI: LazyLock<Regex> = LazyLock::new(|| quoted_pattern("URI"));
+static ATTR_KEYFORMAT: LazyLock<Regex> = LazyLock::new(|| quoted_pattern("KEYFORMAT"));
+static ATTR_AUDIO: LazyLock<Regex> = LazyLock::new(|| quoted_pattern("AUDIO"));
+static ATTR_GROUP_ID: LazyLock<Regex> = LazyLock::new(|| quoted_pattern("GROUP-ID"));
+static ATTR_METHOD: LazyLock<Regex> = LazyLock::new(|| unquoted_pattern("METHOD"));
+static ATTR_IV: LazyLock<Regex> = LazyLock::new(|| unquoted_pattern("IV"));
+static ATTR_TYPE: LazyLock<Regex> = LazyLock::new(|| unquoted_pattern("TYPE"));
+static ATTR_DEFAULT: LazyLock<Regex> = LazyLock::new(|| unquoted_pattern("DEFAULT"));
+static ATTR_AUTOSELECT: LazyLock<Regex> = LazyLock::new(|| unquoted_pattern("AUTOSELECT"));
+
+/// Read one attribute out of an `#EXT-X-…` attribute list.
+fn extract_attr(attrs: &str, pattern: &Regex) -> Option<String> {
+    pattern
+        .captures(attrs)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
 }
@@ -134,18 +151,18 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
                 sequence = value.trim().parse()?;
             } else if line.starts_with("#EXT-X-KEY:") {
                 let attrs = line.strip_prefix("#EXT-X-KEY:").unwrap_or_default();
-                match extract_unquoted_attr(attrs, "METHOD").as_deref() {
+                match extract_attr(attrs, &ATTR_METHOD).as_deref() {
                     Some("NONE") => {
                         key_url = None;
                         iv = None;
                     }
                     Some("AES-128") => {
-                        if extract_attr(attrs, "KEYFORMAT").is_some_and(|v| v != "identity") {
+                        if extract_attr(attrs, &ATTR_KEYFORMAT).is_some_and(|v| v != "identity") {
                             return Err("unsupported HLS key format".into());
                         }
-                        let uri = extract_attr(attrs, "URI").ok_or("AES key URI is missing")?;
+                        let uri = extract_attr(attrs, &ATTR_URI).ok_or("AES key URI is missing")?;
                         key_url = Some(base_url.join(&uri)?.to_string());
-                        iv = extract_unquoted_attr(attrs, "IV")
+                        iv = extract_attr(attrs, &ATTR_IV)
                             .map(|value| {
                                 parse_hex(&value)
                                     .filter(|bytes| !bytes.is_empty() && bytes.len() <= 16)
@@ -157,7 +174,7 @@ pub fn parse_media_m3u8(text: &str, base_url: &Url) -> Result<M3u8Info, Box<dyn 
                 }
             } else if line.starts_with("#EXT-X-MAP") {
                 let attrs = line.strip_prefix("#EXT-X-MAP:").unwrap_or_default().trim();
-                if let Some(uri) = extract_attr(attrs, "URI") {
+                if let Some(uri) = extract_attr(attrs, &ATTR_URI) {
                     let resolved = base_url.join(&uri)?;
                     let mut range = None;
                     let mut quoted = false;
@@ -322,7 +339,7 @@ pub fn parse_master_variants(text: &str, base_url: &Url) -> Vec<Variant> {
                                 lines[i]
                                     .strip_prefix("#EXT-X-STREAM-INF:")
                                     .unwrap_or_default(),
-                                "AUDIO",
+                                &ATTR_AUDIO,
                             ),
                         });
                     }
@@ -348,20 +365,22 @@ pub fn select_audio_uri(
         .lines()
         .filter_map(|line| line.trim().strip_prefix("#EXT-X-MEDIA:"))
         .filter(|attrs| {
-            extract_unquoted_attr(attrs, "TYPE").as_deref() == Some("AUDIO")
-                && extract_attr(attrs, "GROUP-ID").as_deref() == Some(group)
+            extract_attr(attrs, &ATTR_TYPE).as_deref() == Some("AUDIO")
+                && extract_attr(attrs, &ATTR_GROUP_ID).as_deref() == Some(group)
         })
         .collect();
-    renditions.sort_by_key(|attrs| {
+    // Cached keys: a comparison-time lookup would re-scan each rendition
+    // O(n log n) times instead of once.
+    renditions.sort_by_cached_key(|attrs| {
         (
-            extract_unquoted_attr(attrs, "DEFAULT").as_deref() != Some("YES"),
-            extract_unquoted_attr(attrs, "AUTOSELECT").as_deref() != Some("YES"),
+            extract_attr(attrs, &ATTR_DEFAULT).as_deref() != Some("YES"),
+            extract_attr(attrs, &ATTR_AUTOSELECT).as_deref() != Some("YES"),
         )
     });
     let attrs = renditions
         .first()
         .ok_or("HLS audio group has no renditions")?;
-    extract_attr(attrs, "URI")
+    extract_attr(attrs, &ATTR_URI)
         .map(|uri| base_url.join(&uri).map(String::from).map_err(Into::into))
         .transpose()
 }

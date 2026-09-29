@@ -856,6 +856,10 @@ async fn fetch_segment(
         writer.finish()?;
         Ok(())
     });
+    // Bytes this attempt contributed to the shared counter. A failed or
+    // interrupted segment is re-fetched from its start, so its bytes are
+    // returned rather than left inflating the reported total.
+    let attempt_bytes = AtomicU64::new(0);
     let transfer = while_running(ctx, id, async {
         let mut prefix = Vec::with_capacity(8192);
         let mut length = 0u64;
@@ -873,6 +877,7 @@ async fn fetch_segment(
                     )
                     .await;
                 bytes.fetch_add(part.len() as u64, Ordering::Relaxed);
+                attempt_bytes.fetch_add(part.len() as u64, Ordering::Relaxed);
                 length += part.len() as u64;
                 if prefix.len() < 8192 {
                     prefix.extend_from_slice(&part[..part.len().min(8192 - prefix.len())]);
@@ -898,11 +903,17 @@ async fn fetch_segment(
     drop(send);
     // Drain the writer on success, error AND pause/cancel before releasing the
     // download lease or touching its directory. Only a complete body is renamed.
-    let written = writer.await.context("segment writer failed")?;
-    transfer?;
-    written?;
-    tokio::fs::rename(&tmp, path).await?;
-    Ok(())
+    let written = writer.await.context("segment writer failed");
+    // The transfer's own error stays more useful than a closed-queue writer error.
+    let outcome = match (transfer, written) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) | (Ok(()), Ok(Err(error))) => Err(error),
+        (Ok(()), Ok(Ok(()))) => tokio::fs::rename(&tmp, path).await.map_err(Into::into),
+    };
+    if outcome.is_err() {
+        bytes.fetch_sub(attempt_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+    outcome
 }
 
 #[cfg(test)]

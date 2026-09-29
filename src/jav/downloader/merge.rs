@@ -255,6 +255,10 @@ pub(super) fn merge_segments(
         }
         anyhow::bail!("ffmpeg merge failed: {}", message.trim());
     }
+    // ffmpeg is done with the assembled inputs. Release them before staging or
+    // copying the result, so peak disk use does not carry both at once.
+    drop(video);
+    drop(audio);
     validate_output(staged.path(), Some(info.total_duration))?;
     anyhow::ensure!(running(), "merge interrupted");
     let staged = if local {
@@ -269,6 +273,15 @@ pub(super) fn merge_segments(
     staged
         .persist(final_path)
         .context("cannot publish merged MP4")?;
+    // Syncing the file only makes its contents durable; the rename that
+    // published it lives in the parent directory and needs its own flush.
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+        log::warn!(
+            "published {} but could not flush its directory: {error}",
+            final_path.display()
+        );
+    }
     Ok(final_path.to_path_buf())
 }
 
