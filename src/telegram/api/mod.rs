@@ -142,6 +142,9 @@ pub struct ApiState {
     last_progress_publish_ms: AtomicU64,
     /// Bumped whenever retained history changes, so clients refetch only then.
     history_revision: AtomicU64,
+    /// Serializes history writes through their cache updates. Acquire before
+    /// database or stats locks, and release the database before locking stats.
+    history_write: Mutex<()>,
     pause_tx: watch::Sender<bool>,
     request_status: Mutex<String>,
     status: Mutex<DashboardStatus>,
@@ -188,7 +191,48 @@ pub(crate) struct ChatScanReport {
 #[derive(Default)]
 struct DashboardStats {
     completed: Vec<CompletedDownload>,
+    /// Running total of `completed`, so publishing a snapshot never rescans
+    /// the whole retained history.
+    completed_bytes: u64,
     active: BTreeMap<i32, DownloadStat>,
+}
+
+impl DashboardStats {
+    fn new(completed: Vec<CompletedDownload>) -> Self {
+        Self {
+            completed_bytes: completed.iter().map(|item| item.bytes).sum(),
+            completed,
+            active: BTreeMap::new(),
+        }
+    }
+
+    fn insert_completed(&mut self, at: usize, item: CompletedDownload) {
+        self.completed_bytes = self.completed_bytes.saturating_add(item.bytes);
+        self.completed.insert(at, item);
+    }
+
+    /// Every edit to `completed` goes through here so the cached total cannot
+    /// drift from the list. Returns how many entries were removed.
+    fn retain_completed(&mut self, keep: impl Fn(&CompletedDownload) -> bool) -> usize {
+        let before = self.completed.len();
+        let mut total = 0u64;
+        self.completed.retain(|item| {
+            let keep = keep(item);
+            if keep {
+                total = total.saturating_add(item.bytes);
+            }
+            keep
+        });
+        self.completed_bytes = total;
+        before - self.completed.len()
+    }
+
+    fn clear_completed(&mut self) -> usize {
+        self.completed_bytes = 0;
+        let removed = self.completed.len();
+        self.completed.clear();
+        removed
+    }
 }
 
 struct DownloadStat {
@@ -263,6 +307,7 @@ impl ApiState {
             last_progress_publish_ms: AtomicU64::new(0),
             // Distinct across restarts so reconnecting clients refetch.
             history_revision: AtomicU64::new(now_millis()),
+            history_write: Mutex::new(()),
             pause_tx,
             request_status: Mutex::new(
                 "Paste a Telegram message or chat link to begin".to_string(),
@@ -272,10 +317,9 @@ impl ApiState {
                 next_run_at: None,
             }),
             scan: Mutex::new(ScanStatus::default()),
-            stats: Mutex::new(DashboardStats {
-                completed: history::load(&database, now_millis(), days).await?,
-                ..DashboardStats::default()
-            }),
+            stats: Mutex::new(DashboardStats::new(
+                history::load(&database, now_millis(), days).await?,
+            )),
             channel_names: Mutex::new(BTreeMap::new()),
             updates,
             database,
@@ -400,6 +444,7 @@ impl ApiState {
         if let Some(item) = item
             && completed
         {
+            let _history = self.history_write.lock().await;
             let mut completed = CompletedDownload {
                 id: 0,
                 msg_id,
@@ -417,7 +462,7 @@ impl ApiState {
                     let at = stats
                         .completed
                         .partition_point(|item| (item.completed_at, item.id) <= key);
-                    stats.completed.insert(at, completed);
+                    stats.insert_completed(at, completed);
                     self.history_changed();
                 }
                 Err(error) => warn!("cannot save download history: {error:#}"),
@@ -443,8 +488,10 @@ impl ApiState {
     }
 
     pub(crate) async fn prune_history(&self) {
-        let mut stats = self.stats.lock().await;
+        let _history = self.history_write.lock().await;
         let now = now_millis();
+        // Serialize durable pruning with completion and manual history edits,
+        // without holding the stats lock during database I/O.
         if let Err(error) = self
             .database
             .connection()
@@ -460,11 +507,18 @@ impl ApiState {
         let days = self.common.borrow().history_retention_days;
         let cutoff = now.saturating_sub(history::retention_ms(days));
         // Forgotten paths still need pruning when the visible history is empty.
-        match history::delete_expired(&*self.database.connection().await, now, days).await {
+        let pruned = {
+            let connection = self.database.connection().await;
+            history::delete_expired(&connection, now, days).await
+        };
+        match pruned {
             Ok(()) => {
-                let before = stats.completed.len();
-                stats.completed.retain(|item| item.completed_at > cutoff);
-                if stats.completed.len() != before {
+                let removed = self
+                    .stats
+                    .lock()
+                    .await
+                    .retain_completed(|item| item.completed_at > cutoff);
+                if removed > 0 {
                     self.history_changed();
                 }
             }
@@ -554,9 +608,7 @@ impl ApiState {
             channel_names: self.channel_names.lock().await.clone(),
             history_revision: self.history_revision.load(Ordering::Relaxed),
             downloaded_files: stats.completed.len() as u64,
-            downloaded_bytes: format_byte(
-                stats.completed.iter().map(|item| item.bytes as f64).sum(),
-            ),
+            downloaded_bytes: format_byte(stats.completed_bytes as f64),
             active_count: stats.active.len(),
             active,
         }

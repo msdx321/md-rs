@@ -35,7 +35,7 @@ pub struct State {
     pub last_daily_run: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct HistorySummary {
     pub completed: usize,
     pub failed: usize,

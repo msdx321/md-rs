@@ -2,9 +2,24 @@
 use super::{HistorySummary, Record, State};
 use crate::storage::{Connection, Database, params};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Status snapshots are rebuilt on every task transition, for every connected
+/// client, and each rebuild parses a timestamp per retained record. Reusing a
+/// recent result removes that scan; the retention cutoff moves with wall-clock
+/// time, which this window keeps invisible.
+const SUMMARY_TTL: Duration = Duration::from_secs(1);
+
+struct CachedSummary {
+    days: u32,
+    computed_at: Instant,
+    summary: HistorySummary,
+}
 
 pub struct Repository {
     state: Mutex<State>,
+    /// Dropped by every durable write, so it can only be stale by `SUMMARY_TTL`.
+    summary: Mutex<Option<CachedSummary>>,
     database: Database,
     state_write: tokio::sync::Mutex<()>,
 }
@@ -14,6 +29,7 @@ impl Repository {
         let state = Self::load_state(&database).await?;
         Ok(Self {
             state: Mutex::new(state),
+            summary: Mutex::new(None),
             database,
             state_write: tokio::sync::Mutex::new(()),
         })
@@ -39,10 +55,30 @@ impl Repository {
     }
 
     pub fn history_summary(&self, days: u32) -> HistorySummary {
-        self.state
+        {
+            let cached = self.summary.lock().expect("summary lock poisoned");
+            if let Some(entry) = cached.as_ref()
+                && entry.days == days
+                && entry.computed_at.elapsed() < SUMMARY_TTL
+            {
+                return entry.summary.clone();
+            }
+        }
+        let summary = self
+            .state
             .lock()
             .expect("state lock poisoned")
-            .history_summary(days)
+            .history_summary(days);
+        *self.summary.lock().expect("summary lock poisoned") = Some(CachedSummary {
+            days,
+            computed_at: Instant::now(),
+            summary: summary.clone(),
+        });
+        summary
+    }
+
+    fn invalidate_summary(&self) {
+        *self.summary.lock().expect("summary lock poisoned") = None;
     }
 
     pub fn is_completed(&self, id: &str) -> bool {
@@ -62,6 +98,7 @@ impl Repository {
             .lock()
             .expect("state lock poisoned")
             .upsert(record);
+        self.invalidate_summary();
         Ok(())
     }
 
@@ -72,6 +109,7 @@ impl Repository {
             .await?;
         tx.commit().await?;
         self.state.lock().expect("state lock poisoned").forget(id);
+        self.invalidate_summary();
         Ok(())
     }
 
@@ -93,6 +131,8 @@ impl Repository {
         tx.commit().await?;
         let mut state = self.state.lock().expect("state lock poisoned");
         state.records.retain(|record| !ids.contains(&record.id));
+        drop(state);
+        self.invalidate_summary();
         Ok(ids.len())
     }
 
@@ -127,6 +167,7 @@ impl Repository {
             .expect("state lock poisoned")
             .records
             .retain(|record| !ids.contains(&record.id));
+        self.invalidate_summary();
         Ok(())
     }
 
@@ -137,6 +178,7 @@ impl Repository {
             .lock()
             .expect("state lock poisoned")
             .last_daily_run = Some(date.to_string());
+        self.invalidate_summary();
         Ok(())
     }
 }

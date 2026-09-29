@@ -4,6 +4,7 @@ pub fn retention_ms(days: u32) -> u64 {
     u64::from(days) * 24 * 60 * 60 * 1000
 }
 
+#[derive(Clone)]
 pub struct CompletedDownload {
     pub id: i64,
     pub msg_id: i32,
