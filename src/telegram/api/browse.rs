@@ -26,7 +26,10 @@ pub(crate) struct Session {
     client: Client,
     file_ids: Arc<Mutex<FxHashMap<String, u64>>>,
     thumbnails: Mutex<BTreeMap<u64, PhotoSize>>,
+    /// Thumbnail downloads queue here. Page listings have their own permits so
+    /// a page of loading thumbnails can never make the next listing "busy".
     requests: Semaphore,
+    listings: Semaphore,
 }
 
 impl ApiState {
@@ -41,6 +44,7 @@ impl ApiState {
             file_ids,
             thumbnails: Mutex::new(BTreeMap::new()),
             requests: Semaphore::new(4),
+            listings: Semaphore::new(2),
         });
         *self.browse.lock().await = Arc::downgrade(&session);
         session
@@ -110,7 +114,7 @@ pub(super) async fn list(
         ));
     }
     let session = session(&state).await?;
-    let _permit = session.requests.try_acquire().map_err(|_| {
+    let _permit = session.listings.try_acquire().map_err(|_| {
         error(
             StatusCode::TOO_MANY_REQUESTS,
             "Telegram preview is busy. Try again shortly.",
