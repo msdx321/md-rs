@@ -162,18 +162,28 @@ pub(super) async fn list(
                 Media::Document(document) => (document.id().to_string(), "video"),
                 _ => continue,
             };
+            let cutoff = state.history_cutoff();
             let mut downloaded = session
                 .file_ids
                 .lock()
                 .await
                 .get(&fid)
-                .is_some_and(|time| *time > state.history_cutoff());
+                .is_some_and(|time| *time > cutoff);
+            let paths =
+                crate::telegram::downloader::paths::build_media_paths(&message, &media, &cfg)?;
+            let final_path = paths.final_path.to_string_lossy();
+            if !downloaded {
+                // File IDs are a bounded dedup cache, not the completion ledger.
+                let stats = state.stats.lock().await;
+                downloaded = stats
+                    .completed
+                    .iter()
+                    .any(|item| item.path == final_path.as_ref() && item.completed_at > cutoff);
+            }
             if downloaded {
-                let paths =
-                    crate::telegram::downloader::paths::build_media_paths(&message, &media, &cfg)?;
                 downloaded = !crate::telegram::storage::history::was_forgotten(
                     &*state.database.connection().await,
-                    &paths.final_path.to_string_lossy(),
+                    &final_path,
                 )
                 .await?;
             }
