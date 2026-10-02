@@ -111,10 +111,13 @@ async function loadBrowse(requestedPage = 0, reset = false) {
       const queued = browseQueued.has(`${data.chat_id}:${item.message_id}`);
       const title = item.caption || `${label(item.media_type)} · Message ${item.message_id}`;
       const duration = item.duration_secs > 0 ? ` · ${Math.floor(item.duration_secs / 60)}:${String(item.duration_secs % 60).padStart(2, '0')}` : '';
+      const resolution = item.media_type === 'video'
+        ? ` · ${item.width > 0 && item.height > 0 ? `${Math.min(item.width, item.height)}p` : 'Resolution unknown'}`
+        : '';
       return `<div class="card">
         <div class="thumb browse-thumb"><span class="muted">${label(item.media_type)} preview unavailable</span>${item.image_url ? `<img alt="" src="${esc(item.image_url)}" loading="lazy">` : ''}</div>
         <div class="body"><div class="title" title="${esc(title)}">${esc(title)}</div>
-          <div class="muted">${label(item.media_type)} · ${bytes(item.size)}${duration}</div>
+          <div class="muted">${label(item.media_type)} · ${bytes(item.size)}${duration}${resolution}</div>
           <div class="row"><span class="muted">#${item.message_id}</span><button class="tiny" type="button" data-message="${item.message_id}" data-unavailable="${item.downloaded || queued}">${item.downloaded ? 'Downloaded' : queued ? 'Queued' : 'Download'}</button></div>
         </div></div>`;
     }).join('') || '<div class="empty">No photos or videos found in this chat.</div>';

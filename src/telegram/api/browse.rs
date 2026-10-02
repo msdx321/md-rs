@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Semaphore};
 
 use super::{ApiState, ChatTarget};
-use crate::telegram::downloader::{media_duration_value, media_file_size_value};
+use crate::telegram::downloader::{
+    media_duration_value, media_file_size_value, media_resolution_value,
+};
 
 const PAGE_SIZE: usize = 24;
 const MAX_THUMB_BYTES: usize = 128 * 1024;
@@ -79,6 +81,8 @@ struct Card {
     media_type: &'static str,
     size: i64,
     duration_secs: i64,
+    width: i64,
+    height: i64,
     image_url: Option<String>,
     downloaded: bool,
 }
@@ -186,6 +190,7 @@ pub(super) async fn list(
             } else {
                 None
             };
+            let (width, height) = media_resolution_value(&message);
             cards.push(Card {
                 message_id: message.id(),
                 caption: message.text().chars().take(1024).collect(),
@@ -193,6 +198,8 @@ pub(super) async fn list(
                 media_type,
                 size: media_file_size_value(&message),
                 duration_secs: media_duration_value(&message),
+                width,
+                height,
                 image_url,
                 downloaded,
             });
