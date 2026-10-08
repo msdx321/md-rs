@@ -5,6 +5,7 @@ const output = $('logs-output');
 const search = $('logs-search');
 const level = $('logs-level');
 const levelKey = 'media-downloader-log-level';
+const levelRank = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
 const source = $('logs-module');
 const status = $('logs-status');
 const pause = $('logs-pause');
@@ -72,7 +73,7 @@ function render() {
   const follow = output.scrollTop < 40;
   const scrollTop = output.scrollTop;
   const query = search.value.trim().toLowerCase();
-  const visible = entries.filter(entry => (!level.value || entry.level === level.value)
+  const visible = entries.filter(entry => (!level.value || levelRank[entry.level] >= levelRank[level.value])
     && (!source.value || entry.target.split('::').includes(source.value))
     && (!query || (entry.target + ' ' + entry.message).toLowerCase().includes(query)));
   const retained = new Set();
