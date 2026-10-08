@@ -9,6 +9,21 @@ use anyhow::Context;
 
 use crate::jav::source::stream::m3u8::M3u8Info;
 
+#[derive(Debug)]
+pub(super) struct CorruptInput(String);
+
+impl std::fmt::Display for CorruptInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "ffmpeg reported corrupt input packets: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CorruptInput {}
+
 pub(super) fn require_tools() -> anyhow::Result<()> {
     for tool in ["ffmpeg", "ffprobe"] {
         let output = Command::new(tool)
@@ -20,15 +35,15 @@ pub(super) fn require_tools() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn probe(path: &Path) -> anyhow::Result<serde_json::Value> {
+fn probe(path: &Path, probe_size: u64, analyze_duration: u64) -> anyhow::Result<serde_json::Value> {
     let output = Command::new("ffprobe")
+        .arg("-probesize")
+        .arg(probe_size.to_string())
+        .arg("-analyzeduration")
+        .arg(analyze_duration.to_string())
         .args([
             "-v",
             "error",
-            "-probesize",
-            "50000000",
-            "-analyzeduration",
-            "30000000",
             "-show_entries",
             "stream=codec_type,codec_name,profile,duration,nb_frames",
             "-of",
@@ -46,7 +61,7 @@ fn probe(path: &Path) -> anyhow::Result<serde_json::Value> {
 }
 
 pub(super) fn validate_output(path: &Path, duration: Option<f64>) -> anyhow::Result<()> {
-    let probe = probe(path)?;
+    let probe = probe(path, 50_000_000, 30_000_000)?;
     let streams = probe["streams"]
         .as_array()
         .context("no media streams found")?;
@@ -122,7 +137,26 @@ pub(super) fn merge_segments(
         .transpose()?;
     // Inspect the continuous track, not just its first segment: audio can start
     // later in a muxed HLS stream. AAC-LC already works in MP4 and Emby.
-    let input = probe(audio.as_ref().unwrap_or(&video).path())?;
+    let audio_input = audio.as_ref().unwrap_or(&video).path();
+    let mut probe_size = 50_000_000;
+    let mut analyze_duration = 30_000_000;
+    let mut input = probe(audio_input, probe_size, analyze_duration)?;
+    if !input["streams"]
+        .as_array()
+        .is_some_and(|streams| streams.iter().any(|stream| stream["codec_type"] == "audio"))
+    {
+        anyhow::ensure!(running(), "merge interrupted");
+        // A bounded initial probe can miss audio that starts late. Expand both
+        // limits for this input, and use the same limits when ffmpeg opens it.
+        probe_size = std::fs::metadata(audio_input)?.len().max(probe_size);
+        analyze_duration = ((info.total_duration + 30.0) * 1_000_000.0)
+            .clamp(30_000_000.0, i64::MAX as f64) as u64;
+        log::info!(
+            "merging {}: no audio in initial probe; scanning up to {probe_size} bytes and {analyze_duration} microseconds",
+            final_path.display()
+        );
+        input = probe(audio_input, probe_size, analyze_duration)?;
+    }
     let audio_stream = input["streams"]
         .as_array()
         .and_then(|streams| {
@@ -130,7 +164,7 @@ pub(super) fn merge_segments(
                 .iter()
                 .find(|stream| stream["codec_type"] == "audio")
         })
-        .context("no audio stream found; refusing to produce a silent video")?;
+        .context("no audio stream found after extended probing; the selected HLS tracks may be video-only or damaged; refusing to produce a silent video")?;
     let copy_audio = audio_stream["codec_name"] == "aac" && audio_stream["profile"] == "LC";
     anyhow::ensure!(running(), "merge interrupted");
     // Publish from a staging file beside the destination: temp and downloads
@@ -172,13 +206,11 @@ pub(super) fn merge_segments(
         ]);
         for input in std::iter::once(&video).chain(audio.iter()) {
             command
-                .args([
-                    "-probesize",
-                    "50000000",
-                    "-analyzeduration",
-                    "30000000",
-                    "-i",
-                ])
+                .arg("-probesize")
+                .arg(probe_size.to_string())
+                .arg("-analyzeduration")
+                .arg(analyze_duration.to_string())
+                .arg("-i")
                 .arg(input.path());
         }
         // Audio is mandatory. Optional maps would quietly produce a silent video.
@@ -233,8 +265,14 @@ pub(super) fn merge_segments(
         errors.rewind()?;
         let mut message = String::new();
         errors.read_to_string(&mut message)?;
+        if message.contains("corrupt input packet in stream") {
+            return Err(CorruptInput(message.trim().to_string()).into());
+        }
         if reserve_moov && message.contains("reserved_moov_size") && message.contains("too small") {
-            log::warn!("MP4 metadata exceeded reserved space; retrying with faststart");
+            log::info!(
+                "merging {}: MP4 metadata exceeded reserved space ({moov_size} bytes); retrying with faststart",
+                final_path.display()
+            );
             reserve_moov = false;
             continue;
         }
@@ -245,7 +283,7 @@ pub(super) fn merge_segments(
                 && (line.contains("output stream 0:1;") || line.contains("[aost#0:1/"))
         });
         if !repair_audio_timestamps && audio_dts_error {
-            log::warn!(
+            log::info!(
                 "retrying merge for {} with audio timestamp repair: {}",
                 final_path.display(),
                 message.trim()
@@ -273,6 +311,13 @@ pub(super) fn merge_segments(
     staged
         .persist(final_path)
         .context("cannot publish merged MP4")?;
+    if !reserve_moov || repair_audio_timestamps {
+        log::info!(
+            "merge recovered and output validated for {} (faststart={}, audio timestamp repair={repair_audio_timestamps})",
+            final_path.display(),
+            !reserve_moov
+        );
+    }
     // Syncing the file only makes its contents durable; the rename that
     // published it lives in the parent directory and needs its own flush.
     #[cfg(unix)]

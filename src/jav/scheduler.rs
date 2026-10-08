@@ -253,10 +253,11 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
         report.completed += link.report.completed;
         report.failed += link.report.failed;
         let mut summary = format!(
-            "{}: {}/{} completed",
+            "{}: {}/{} completed, {} failed candidates",
             link.cfg.popular_path,
             link.report.completed,
-            link.cfg.top_n.max(1)
+            link.cfg.top_n.max(1),
+            link.report.failed
         );
         if let Some(error) = &link.error {
             summary.push_str(&format!("; listing failed: {error}"));
@@ -269,7 +270,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
         summaries.push(summary);
     }
     let mut summary = format!(
-        "{trigger}: {}/{} completed, {} attempted, {} failed, {} skipped; {}",
+        "{trigger}: {}/{} completed, {} attempted, {} failed candidates, {} skipped; {}",
         report.completed,
         target,
         report.attempted,
@@ -279,11 +280,15 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
     );
     if stopped {
         summary.push_str("; stopped by user");
+    } else if report.completed == target {
+        summary.push_str("; all quotas reached");
+    } else {
+        summary.push_str("; quotas not reached");
     }
     if let Err(error) = ctx.prune_history().await {
         log::warn!("cannot prune JAV history after job: {error:#}");
     }
-    let level = if report.failed > 0 || links.iter().any(|link| link.error.is_some()) {
+    let level = if !stopped && report.completed < target {
         log::Level::Warn
     } else {
         log::Level::Info

@@ -162,20 +162,44 @@ pub async fn download_video(ctx: Arc<AppCtx>, card: VideoCard, request: Download
     }
 
     // ── run ──────────────────────────────────────────────────────────────
-    let run_result: anyhow::Result<(Outcome, PathBuf)> = match resolved.kind {
-        StreamKind::Hls => {
-            run_hls(
-                &ctx,
-                &fetch,
-                &id,
-                &card.url,
-                &resolved.playlist,
-                &temp_dir,
-                &final_path,
-                &cfg,
-            )
-            .await
+    let mut retried_corruption = false;
+    let run_result = loop {
+        let result = match resolved.kind {
+            StreamKind::Hls => {
+                run_hls(
+                    &ctx,
+                    &fetch,
+                    &id,
+                    &card.url,
+                    &resolved.playlist,
+                    &temp_dir,
+                    &final_path,
+                    &cfg,
+                )
+                .await
+            }
+        };
+        if !retried_corruption
+            && control(&ctx, &id) == TaskState::Running
+            && result
+                .as_ref()
+                .is_err_and(|error| error.is::<merge::CorruptInput>())
+        {
+            log::info!(
+                "[{id}] corrupt input packets detected; downloading fresh HLS segments once"
+            );
+            // All transfer and merge workers have finished. Invalidate the
+            // manifest so prepare_track discards this suspect cache on retry.
+            if let Err(error) = tokio::fs::remove_file(temp_dir.join("playlist.json")).await {
+                break Err(error).context("cannot invalidate corrupt HLS segment cache");
+            }
+            retried_corruption = true;
+            continue;
         }
+        if retried_corruption && matches!(&result, Ok((Outcome::Done, _))) {
+            log::info!("[{id}] recovered from corrupt input packets with fresh HLS segments");
+        }
+        break result;
     };
     let (outcome, produced) = match run_result {
         Ok((outcome, produced)) => (Ok(outcome), produced),
@@ -676,10 +700,13 @@ async fn download_segments(
     // bounded worker pool and dispatch in playlist order.
     let mut attempt = 0;
     while !failed.is_empty() && attempt < 3 && !rejected.load(Ordering::Relaxed) {
+        if control(ctx, id) != TaskState::Running {
+            break;
+        }
         attempt += 1;
-        log::warn!(
-            "[{id}] retry round={attempt}/3 failed_segments={}",
-            failed.len()
+        log::info!(
+            "[{id}] retrying {} segment(s), round={attempt}/3: {last_error}",
+            failed.len(),
         );
         tokio::time::sleep(Duration::from_millis(300 * attempt as u64)).await;
         let state = control(ctx, id);
@@ -710,7 +737,12 @@ async fn download_segments(
                 failed.len()
             )
         }
-        _ => Ok(Outcome::Done),
+        _ => {
+            if attempt > 0 {
+                log::info!("[{id}] segment download recovered after {attempt} retry round(s)");
+            }
+            Ok(Outcome::Done)
+        }
     }
 }
 
@@ -802,6 +834,9 @@ impl SegmentPool<'_> {
                 }
                 Err(e) => {
                     log::error!("[{id}] segment {index} task failed: {e}");
+                    if !self.rejected.load(Ordering::Relaxed) {
+                        *last_error = format!("segment {index} task failed: {e}");
+                    }
                     failed.push(index);
                 }
             }
