@@ -86,7 +86,7 @@ function renderRun(prefix, scheduler, signature) {
   signature.value = current;
   const result = scheduler.last_result || '';
   // The scheduler also sends free-form progress and error messages.
-  const match = result.match(/^(manual|scheduled): (\d+)\/(\d+) completed, (\d+) attempted, (\d+) failed, (\d+) skipped; ([\s\S]*)$/);
+  const match = result.match(/^(manual|scheduled): (\d+)\/(\d+) completed, (\d+) attempted, (\d+) (failed(?: candidates)?), (\d+) skipped; ([\s\S]*)$/);
   const structured = !scheduler.running && match !== null;
   $(`${prefix}-run-counts`).hidden = !structured;
   $(`${prefix}-run-details`).hidden = !structured;
@@ -94,13 +94,13 @@ function renderRun(prefix, scheduler, signature) {
     $(`${prefix}-status`).textContent = scheduler.running ? 'Scheduled job running' : result || 'Ready for downloads';
     return;
   }
-  const [, trigger, completed, target, attempted, failed, skipped, details] = match;
+  const [, trigger, completed, target, attempted, failed, failureLabel, skipped, details] = match;
   const stopped = details.endsWith('stopped by user');
   $(`${prefix}-status`).textContent = `Last ${trigger} run${stopped ? ' · Stopped' : Number(completed) < Number(target) ? ' · Incomplete' : ''}`;
   const counts = [
     [`${completed} / ${target} completed`, 'completed'],
     [`${attempted} attempted`, ''],
-    [`${failed} failed`, Number(failed) ? 'failed' : ''],
+    [`${failed} ${failureLabel}`, Number(failed) ? 'failed' : ''],
     [`${skipped} skipped`, ''],
   ];
   $(`${prefix}-run-counts`).replaceChildren(...counts.map(([text, kind]) => {
