@@ -21,7 +21,7 @@ grammers-mtsender = { git = "https://codeberg.org/Lonami/grammers", package = "g
 grammers-session = { git = "https://codeberg.org/Lonami/grammers", package = "grammers-session" }
 headless_chrome = "1.0.22"
 indicatif = "0.18"
-libsql = { version = "0.9.30", default-features = false, features = ["core"] }
+libsql = { version = "0.10.0", default-features = false, features = ["core"] }
 log = "0.4"
 percent-encoding = "2"
 regex = "1"

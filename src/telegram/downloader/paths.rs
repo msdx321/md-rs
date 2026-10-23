@@ -5,7 +5,7 @@ use grammers_client::media::Media;
 use crate::telegram::config::Config;
 use crate::telegram::format::{truncate_filename, validate_title};
 
-use super::metadata::media_kind_and_ext;
+use super::metadata::{media_kind_and_ext, message_date_value};
 
 /// Remote strings are single components, never paths (including on Windows).
 pub(super) fn safe_component(value: &str) -> String {
@@ -110,7 +110,7 @@ pub(crate) fn build_media_paths(
     media_paths(
         msg.id(),
         &chat_title,
-        msg.date().naive_utc(),
+        message_date_value(msg).naive_utc(),
         msg.text(),
         media,
         cfg,

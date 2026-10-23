@@ -17,6 +17,7 @@ use crate::telegram::config::{ChatConfig, Config};
 use crate::telegram::downloader::{
     download_media_inner, file_extension_value, media_duration_value, media_file_name_value,
     media_file_size_value, media_matches_config, media_resolution_value, media_type_value,
+    message_date_value,
 };
 use crate::telegram::filter::{Parser, Value, VarLookup};
 use crate::telegram::storage::ChatData;
@@ -586,7 +587,7 @@ impl VarLookup for MessageVars<'_> {
     fn get_var(&self, name: &str) -> Option<Value> {
         let msg = self.0;
         Some(match name {
-            "message_date" => Value::DateTime(msg.date().naive_utc()),
+            "message_date" => Value::DateTime(message_date_value(msg).naive_utc()),
             "message_id" | "id" => Value::Int(msg.id() as i64),
             "message_caption" | "caption" => Value::Str(msg.text().to_string()),
             "sender_name" => Value::Str(
