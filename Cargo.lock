@@ -216,6 +216,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base16ct"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -391,9 +397,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.12.0"
+version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 dependencies = [
  "serde",
 ]
@@ -616,9 +622,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.0"
+version = "1.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
 dependencies = [
  "cfg-if",
 ]
@@ -654,6 +660,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "crypto-bigint"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+dependencies = [
+ "cpubits",
+ "ctutils",
+ "num-traits",
+ "rand_core 0.10.1",
+ "serdect",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -670,6 +689,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "crypto-primes"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3633a51a39c69ebbaa4feaa694bd83d241e4093901c84a0963b19d9bb3f0cf8f"
+dependencies = [
+ "crypto-bigint",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -982,12 +1011,13 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "flate2"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -1189,16 +1219,18 @@ dependencies = [
 
 [[package]]
 name = "glass_pumpkin"
-version = "2.0.0-rc0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec260059e5d59a4899d78dff8bf59abf81f8f5b3b44e9d3ba25c9dade1390a36"
+checksum = "6ff9ef01d1ba41822349a2a9970e706dc6035637957cdddecf32482a8a90e86e"
 dependencies = [
+ "crypto-bigint",
+ "crypto-primes",
  "getrandom 0.4.3",
  "num-bigint",
  "num-integer",
  "num-traits",
- "once_cell",
  "rand_core 0.10.1",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1209,27 +1241,27 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "grammers-client"
-version = "0.10.0"
-source = "git+https://codeberg.org/Lonami/grammers#c34290345a4636ff689cec312e655419e5972609"
+version = "0.11.0"
+source = "git+https://codeberg.org/Lonami/grammers#dfffb7144f8a57aeda4dcd041ebb5a71a0ed63ef"
 dependencies = [
- "chrono",
  "futures-util",
  "grammers-crypto",
  "grammers-mtsender",
  "grammers-session",
  "grammers-tl-types",
- "log",
+ "jiff",
  "md5",
  "mime_guess",
  "pin-project-lite",
  "tokio",
+ "tracing",
  "url",
 ]
 
 [[package]]
 name = "grammers-crypto"
-version = "0.10.0"
-source = "git+https://codeberg.org/Lonami/grammers#c34290345a4636ff689cec312e655419e5972609"
+version = "0.11.0"
+source = "git+https://codeberg.org/Lonami/grammers#dfffb7144f8a57aeda4dcd041ebb5a71a0ed63ef"
 dependencies = [
  "aes",
  "ctr",
@@ -1245,8 +1277,8 @@ dependencies = [
 
 [[package]]
 name = "grammers-mtproto"
-version = "0.10.0"
-source = "git+https://codeberg.org/Lonami/grammers#c34290345a4636ff689cec312e655419e5972609"
+version = "0.11.0"
+source = "git+https://codeberg.org/Lonami/grammers#dfffb7144f8a57aeda4dcd041ebb5a71a0ed63ef"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -1254,15 +1286,15 @@ dependencies = [
  "getrandom 0.4.3",
  "grammers-crypto",
  "grammers-tl-types",
- "log",
  "num-bigint",
  "sha1 0.11.0",
+ "tracing",
 ]
 
 [[package]]
 name = "grammers-mtsender"
-version = "0.10.0"
-source = "git+https://codeberg.org/Lonami/grammers#c34290345a4636ff689cec312e655419e5972609"
+version = "0.11.0"
+source = "git+https://codeberg.org/Lonami/grammers#dfffb7144f8a57aeda4dcd041ebb5a71a0ed63ef"
 dependencies = [
  "bytes",
  "grammers-crypto",
@@ -1271,28 +1303,28 @@ dependencies = [
  "grammers-tl-types",
  "hickory-resolver",
  "locate-locale",
- "log",
  "os_info",
  "tokio",
  "tokio-socks",
+ "tracing",
  "url",
 ]
 
 [[package]]
 name = "grammers-session"
-version = "0.10.0"
-source = "git+https://codeberg.org/Lonami/grammers#c34290345a4636ff689cec312e655419e5972609"
+version = "0.11.0"
+source = "git+https://codeberg.org/Lonami/grammers#dfffb7144f8a57aeda4dcd041ebb5a71a0ed63ef"
 dependencies = [
  "grammers-tl-types",
- "libsql 0.9.30",
- "log",
+ "libsql",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "grammers-tl-gen"
-version = "0.10.0"
-source = "git+https://codeberg.org/Lonami/grammers#c34290345a4636ff689cec312e655419e5972609"
+version = "0.11.0"
+source = "git+https://codeberg.org/Lonami/grammers#dfffb7144f8a57aeda4dcd041ebb5a71a0ed63ef"
 dependencies = [
  "grammers-tl-parser",
 ]
@@ -1300,15 +1332,15 @@ dependencies = [
 [[package]]
 name = "grammers-tl-parser"
 version = "1.2.2"
-source = "git+https://codeberg.org/Lonami/grammers#c34290345a4636ff689cec312e655419e5972609"
+source = "git+https://codeberg.org/Lonami/grammers#dfffb7144f8a57aeda4dcd041ebb5a71a0ed63ef"
 dependencies = [
  "crc32fast",
 ]
 
 [[package]]
 name = "grammers-tl-types"
-version = "0.10.0"
-source = "git+https://codeberg.org/Lonami/grammers#c34290345a4636ff689cec312e655419e5972609"
+version = "0.11.0"
+source = "git+https://codeberg.org/Lonami/grammers#dfffb7144f8a57aeda4dcd041ebb5a71a0ed63ef"
 dependencies = [
  "grammers-tl-gen",
  "grammers-tl-parser",
@@ -1350,9 +1382,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-net"
-version = "0.26.1"
+version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2295ed2f9c31e471e1428a8f88a3f0e1f4b27c15049592138d1eebe9c35b183"
+checksum = "c480823ed7c2c5d0f09c41020cb6b7c28029ce60ec42dc942158dcf22f8e0a4d"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -1374,9 +1406,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-proto"
-version = "0.26.1"
+version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bab31817bfb44672a252e97fe81cd0c18d1b2cf892108922f6818820df8c643"
+checksum = "12b92608f679a6fa515dd1d15c1ff89443026e391200a2c840c7afcba482893d"
 dependencies = [
  "data-encoding",
  "idna",
@@ -1394,9 +1426,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-resolver"
-version = "0.26.1"
+version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0d58d28879ceecde6607729660c2667a081ccdc082e082675042793960f178c"
+checksum = "3f3da5255c95d5a716857d54b5b8f4e8d67c3484d3beaaaae2ce25063b3ba981"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -1765,27 +1797,56 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jiff"
-version = "0.2.29"
+version = "0.2.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34f877a98676d2fb664698d74cc6a51ce6c484ce8c770f05d0108ec9090aeb46"
+checksum = "b2b005715dcbeb0089a3c0dab99f2ff1cc3b2525323552703d648585d342a383"
 dependencies = [
  "defmt",
+ "jiff-core",
  "jiff-static",
+ "jiff-tzdb-platform",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "windows-link",
+]
+
+[[package]]
+name = "jiff-core"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e52fe76043ccecc9005d2305ebaadf7d7fc0cc89ca6baa10a94d6bc68c7128c"
+dependencies = [
+ "defmt",
+ "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.29"
+version = "0.2.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0666b5ab5ecaca213fc2a85b8c0083d9004e84ee2d5f9a7e0017aaf50986f25f"
+checksum = "2cc9817253cf7c7ee4684451bd327e88d6f3658014e54a29198625590650695c"
 dependencies = [
+ "jiff-core",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
+dependencies = [
+ "jiff-tzdb",
 ]
 
 [[package]]
@@ -1888,22 +1949,6 @@ dependencies = [
 
 [[package]]
 name = "libsql"
-version = "0.9.30"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30fe980ac5693ed1f3db490559fb578885e913a018df64af8a1a46e1959a78df"
-dependencies = [
- "async-trait",
- "bitflags 2.13.0",
- "bytes",
- "futures",
- "libsql-sys 0.9.30",
- "parking_lot",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "libsql"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6bca1704194048f0f0bbc8a8e05ba85c0c67628b03bd59346dd2fdd946a1588"
@@ -1912,22 +1957,10 @@ dependencies = [
  "bitflags 2.13.0",
  "bytes",
  "futures",
- "libsql-sys 0.10.0",
+ "libsql-sys",
  "parking_lot",
  "thiserror 1.0.69",
  "tracing",
-]
-
-[[package]]
-name = "libsql-ffi"
-version = "0.9.30"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0be1da6f123ceb2cd23f469883415cab9ee963286a85d61e22afb8b12e15e681"
-dependencies = [
- "bindgen 0.66.1",
- "cc",
- "cmake",
- "glob",
 ]
 
 [[package]]
@@ -1944,25 +1977,12 @@ dependencies = [
 
 [[package]]
 name = "libsql-sys"
-version = "0.9.30"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90725458cc4461bc82f8f7983e80b002ea4f64b5184e1462f252d0dd74b122f5"
-dependencies = [
- "bytes",
- "libsql-ffi 0.9.30",
- "once_cell",
- "tracing",
- "zerocopy 0.7.35",
-]
-
-[[package]]
-name = "libsql-sys"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf4a7f2d76f49442c273a892a574a272b8b35f4bf0b1b25a475f2cc95885fe0f"
 dependencies = [
  "bytes",
- "libsql-ffi 0.10.0",
+ "libsql-ffi",
  "once_cell",
  "tracing",
  "zerocopy 0.7.35",
@@ -2053,7 +2073,7 @@ dependencies = [
  "grammers-session",
  "headless_chrome",
  "indicatif",
- "libsql 0.10.0",
+ "libsql",
  "log",
  "percent-encoding",
  "regex",
@@ -2072,9 +2092,9 @@ dependencies = [
 
 [[package]]
 name = "md5"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
+checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 
 [[package]]
 name = "memchr"
@@ -2106,9 +2126,9 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
-version = "0.8.9"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
@@ -2178,12 +2198,13 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.4.6"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2957,6 +2978,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serdect"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
+dependencies = [
+ "base16ct",
+ "serde",
+]
+
+[[package]]
 name = "servo_arc"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2989,9 +3020,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -3199,7 +3230,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -3311,9 +3342,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.2"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -4194,6 +4225,12 @@ dependencies = [
  "quote",
  "syn 2.0.118",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

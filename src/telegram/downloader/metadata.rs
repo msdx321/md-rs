@@ -2,6 +2,15 @@ use grammers_client::media::Media;
 
 use crate::telegram::config::Config;
 
+/// grammers reports dates as `jiff::Timestamp`; the rest of the app uses chrono.
+pub(crate) fn message_date_value(
+    msg: &grammers_client::message::Message,
+) -> chrono::DateTime<chrono::Utc> {
+    let date = msg.date();
+    chrono::DateTime::from_timestamp(date.as_second(), date.subsec_nanosecond() as u32)
+        .unwrap_or_default()
+}
+
 pub(crate) fn media_type_value(msg: &grammers_client::message::Message) -> String {
     match msg.media() {
         Some(Media::Photo(_)) => "photo".into(),

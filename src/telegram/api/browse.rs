@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use super::{ApiState, ChatTarget};
 use crate::telegram::downloader::{
-    media_duration_value, media_file_size_value, media_resolution_value,
+    media_duration_value, media_file_size_value, media_resolution_value, message_date_value,
 };
 
 const PAGE_SIZE: usize = 24;
@@ -204,7 +204,7 @@ pub(super) async fn list(
             cards.push(Card {
                 message_id: message.id(),
                 caption: message.text().chars().take(1024).collect(),
-                date: message.date().to_rfc3339(),
+                date: message_date_value(&message).to_rfc3339(),
                 media_type,
                 size: media_file_size_value(&message),
                 duration_secs: media_duration_value(&message),
