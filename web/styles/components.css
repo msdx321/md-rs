@@ -190,6 +190,7 @@ code { padding: 1px 5px; border-radius: 4px; background: var(--panel-2); }
 .telegram, [data-module="telegram"] { --module-accent: light-dark(#126dba, #8acbff); --module-soft: light-dark(#eaf5ff, #1d3851); }
 .jav, [data-module="jav"] { --module-accent: light-dark(#7450ba, #c4a9ff); --module-soft: light-dark(#f3edff, #352b4c); }
 .p91, [data-module="p91"] { --module-accent: light-dark(#087b70, #7fd9c7); --module-soft: light-dark(#e6f6f1, #1c3937); }
+.pornhub, [data-module="pornhub"] { --module-accent: light-dark(#a34a00, #ffb37a); --module-soft: light-dark(#fff1e5, #3d2a1b); }
 * { box-sizing: border-box; }
 .theme-switch { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font: inherit; min-height: 40px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); background: var(--panel); cursor: pointer; }
 .theme-switch::before { content: ''; width: 14px; height: 14px; flex-shrink: 0; border: 1.5px solid currentColor; border-radius: 50%; background: linear-gradient(90deg, currentColor 50%, transparent 50%); }

@@ -8,6 +8,7 @@
           <div class="field"><label for="telegram_download_path">Telegram download directory</label><input id="telegram_download_path" required></div>
           <div class="field"><label for="jav_download_path">JAV download directory</label><input id="jav_download_path" required></div>
           <div class="field"><label for="p91_download_path">91Porn download directory</label><input id="p91_download_path" required></div>
+          <div class="field"><label for="pornhub_download_path">Pornhub download directory</label><input id="pornhub_download_path" required></div>
           <div class="field"><label for="temp_path">Temporary directory</label><input id="temp_path" required><span class="hint">Shared by all modules while downloads are in progress.</span></div>
           <div class="field"><label for="history_retention_days">Keep history for (days)</label><input id="history_retention_days" type="number" min="1" max="36500" required><span class="hint">Downloaded files are kept. After history expires, older media can be downloaded again.</span></div>
         </div>
@@ -16,10 +17,11 @@
         <h2>Download speed</h2>
         <p>Limit the combined speed of all downloads, with optional limits for each module. Changes apply to active downloads.</p>
         <div class="form">
-          <div class="field"><label for="download_limit_mb_per_sec">Combined limit (MB/s)</label><input id="download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Shared across Telegram, JAV and 91Porn. 0 = unlimited.</span></div>
+          <div class="field"><label for="download_limit_mb_per_sec">Combined limit (MB/s)</label><input id="download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Shared across Telegram, JAV, 91Porn and Pornhub. 0 = unlimited.</span></div>
           <div class="field"><label for="telegram_download_limit_mb_per_sec">Telegram limit (MB/s)</label><input id="telegram_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all Telegram downloads. 0 = no separate limit.</span></div>
           <div class="field"><label for="jav_download_limit_mb_per_sec">JAV limit (MB/s)</label><input id="jav_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all JAV downloads. 0 = no separate limit.</span></div>
           <div class="field"><label for="p91_download_limit_mb_per_sec">91Porn limit (MB/s)</label><input id="p91_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all 91Porn downloads. 0 = no separate limit.</span></div>
+          <div class="field"><label for="pornhub_download_limit_mb_per_sec">Pornhub limit (MB/s)</label><input id="pornhub_download_limit_mb_per_sec" type="number" min="0" max="4294967295" step="0.000001" required><span class="hint">Across all Pornhub downloads. 0 = no separate limit.</span></div>
         </div>
         <p class="hint">Each module also obeys the combined limit.</p>
       </section>
@@ -31,8 +33,9 @@
           <div class="field"><label for="telegram_min_video_resolution">Telegram override (pixels)</label><input id="telegram_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="telegram-resolution-hint"><span class="hint" id="telegram-resolution-hint"></span></div>
           <div class="field"><label for="jav_min_video_resolution">JAV override (pixels)</label><input id="jav_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="jav-resolution-hint"><span class="hint" id="jav-resolution-hint"></span></div>
           <div class="field"><label for="p91_min_video_resolution">91Porn override (pixels)</label><input id="p91_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="p91-resolution-hint"><span class="hint" id="p91-resolution-hint"></span></div>
+          <div class="field"><label for="pornhub_min_video_resolution">Pornhub override (pixels)</label><input id="pornhub_min_video_resolution" type="number" min="0" max="16384" step="1" aria-describedby="pornhub-resolution-hint"><span class="hint" id="pornhub-resolution-hint"></span></div>
         </div>
-        <p class="hint">Choose “Use global” to inherit the global minimum or “No filtering” to disable it for that service. Changes apply to new attempts, including resumes, not active downloads or existing files. Unknown resolutions are allowed. JAV checks the stream selected by its quality preference; 91Porn probes MP4 metadata, not the HD badge.</p>
+        <p class="hint">Choose “Use global” to inherit the global minimum or “No filtering” to disable it for that service. Changes apply to new attempts, including resumes, not active downloads or existing files. Unknown resolutions are allowed. JAV checks the stream selected by its quality preference; 91Porn probes MP4 metadata, not the HD badge; Pornhub uses the selected MP4 variant's dimensions.</p>
       </section>
       <section class="settings-card" data-schedule="telegram">
         <h2>Telegram schedule</h2>
@@ -65,6 +68,17 @@
           <div class="field"><label for="p91-interval_secs">Interval (seconds)</label><input id="p91-interval_secs" type="number" min="1" max="604800" required><span class="hint">Starts after the previous run finishes.</span></div>
           <div class="field"><label for="p91-daily_time">Daily time</label><input id="p91-daily_time" type="time" required><span class="hint">Uses the server’s local timezone.</span></div>
           <div class="field"><label for="p91-run_on_start">Run on startup</label><select id="p91-run_on_start"><option value="false">No</option><option value="true">Yes</option></select></div>
+        </div>
+      </section>
+      <section class="settings-card" data-schedule="pornhub">
+        <h2>Pornhub schedule</h2>
+        <p>Choose when to check the Recommended feed for new media.</p>
+        <div class="form">
+          <div class="field"><label for="pornhub-enabled">Automatic runs</label><select id="pornhub-enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
+          <div class="field"><label for="pornhub-mode">Run mode</label><select id="pornhub-mode"><option value="periodic">Periodically</option><option value="daily">Daily</option></select></div>
+          <div class="field"><label for="pornhub-interval_secs">Interval (seconds)</label><input id="pornhub-interval_secs" type="number" min="1" max="604800" required><span class="hint">Starts after the previous run finishes.</span></div>
+          <div class="field"><label for="pornhub-daily_time">Daily time</label><input id="pornhub-daily_time" type="time" required><span class="hint">Uses the server’s local timezone.</span></div>
+          <div class="field"><label for="pornhub-run_on_start">Run on startup</label><select id="pornhub-run_on_start"><option value="false">No</option><option value="true">Yes</option></select></div>
         </div>
       </section>
     </div>

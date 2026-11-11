@@ -8,7 +8,8 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
         .route("/", get(|| async { page("home") }))
         .route("/telegram/", get(|| async { page("telegram") }))
         .route("/jav/", get(|| async { page("jav") }))
-        .route("/p91/", get(|| async { page("p91") }));
+        .route("/p91/", get(|| async { page("p91") }))
+        .route("/pornhub/", get(|| async { page("pornhub") }));
     let app = [
         (
             "table-columns.js",
@@ -62,6 +63,7 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
         ),
         ("jav.css", "text/css", include_str!("../web/styles/jav.css")),
         ("p91.css", "text/css", include_str!("../web/styles/p91.css")),
+        ("ph.css", "text/css", include_str!("../web/styles/ph.css")),
         (
             "theme.js",
             "text/javascript",
@@ -101,6 +103,11 @@ pub(crate) fn router(engines: &[crate::runtime::RunningEngine]) -> Router {
             "p91.js",
             "text/javascript",
             include_str!("../web/scripts/p91.js"),
+        ),
+        (
+            "ph.js",
+            "text/javascript",
+            include_str!("../web/scripts/ph.js"),
         ),
     ]
     .into_iter()
@@ -143,6 +150,13 @@ fn page(section: &str) -> Html<String> {
             include_str!("../web/pages/p91.html"),
             "",
         ),
+        "pornhub" => (
+            "Pornhub",
+            "Video sources and scheduled downloads",
+            "P",
+            include_str!("../web/pages/pornhub.html"),
+            "",
+        ),
         _ => (
             "Media Downloader",
             "",
@@ -174,8 +188,9 @@ fn page(section: &str) -> Html<String> {
                 },
             )
     };
+    let asset = if section == "pornhub" { "ph" } else { section };
     let mut assets = format!(
-        r#"<link rel="stylesheet" href="/assets/{section}.css"><script type="module" src="/assets/{section}.js"></script>"#
+        r#"<link rel="stylesheet" href="/assets/{asset}.css"><script type="module" src="/assets/{asset}.js"></script>"#
     );
     if !home {
         assets.push_str(
@@ -188,7 +203,7 @@ fn page(section: &str) -> Html<String> {
         .replace("{{section}}", section)
         .replace("{{page_assets}}", &assets)
         .replace("{{header}}", &header);
-    for name in ["home", "telegram", "jav", "p91", "settings"] {
+    for name in ["home", "telegram", "jav", "p91", "pornhub", "settings"] {
         html = html.replace(
             &format!("{{{{{name}_current}}}}"),
             if name == section {

@@ -4,10 +4,13 @@ import { createSnapshotRefresh, createTaskRefresh } from './snapshot-refresh.js'
 let telegram = null;
 let jav = null;
 let p91 = null;
+let pornhub = null;
 let tasks = null;
 let p91Tasks = null;
+let pornhubTasks = null;
 let history = null;
 let p91History = null;
+let pornhubHistory = null;
 let telegramHistory = null;
 let telegramHistoryRevision = null;
 // Only the newest entries are shown, so each module sends just that many.
@@ -20,6 +23,7 @@ const renderedLists = new Map();
 const activityRows = new Map();
 const javRun = { value: undefined };
 const p91Run = { value: undefined };
+const pornhubRun = { value: undefined };
 let lastTelegramRun;
 
 function telegramChatName(snapshot, chatId) {
@@ -117,7 +121,7 @@ function renderRun(prefix, scheduler, signature) {
 }
 
 function renderSummary() {
-  $('overview-active').textContent = telegram && jav && p91 ? telegram.active_count + jav.active_tasks + p91.active_tasks : '—';
+  $('overview-active').textContent = telegram && jav && p91 && pornhub ? telegram.active_count + jav.active_tasks + p91.active_tasks + pornhub.active_tasks : '—';
   if (telegram) {
     historyPeriod("telegram", telegram.history_retention_days);
     $('overview-telegram-size').textContent = sizeLabel(telegram.downloaded_bytes);
@@ -141,6 +145,14 @@ function renderSummary() {
     $('p91-saved').textContent = bytes(p91.downloaded_bytes);
     renderRun('p91', p91.scheduler, p91Run);
     $('p91-next-run').textContent = !p91.scheduler.enabled ? 'Disabled' : p91.scheduler.next_run_at ? dateTime(p91.scheduler.next_run_at) : 'Waiting for next run';
+  }
+  if (pornhub) {
+    historyPeriod("pornhub", pornhub.history_retention_days);
+    $('overview-pornhub-size').textContent = bytes(pornhub.downloaded_bytes);
+    $('pornhub-transfers').textContent = `${pornhub.active_tasks} active`;
+    $('pornhub-saved').textContent = bytes(pornhub.downloaded_bytes);
+    renderRun('pornhub', pornhub.scheduler, pornhubRun);
+    $('pornhub-next-run').textContent = !pornhub.scheduler.enabled ? 'Disabled' : pornhub.scheduler.next_run_at ? dateTime(pornhub.scheduler.next_run_at) : 'Waiting for next run';
   }
 }
 
@@ -175,6 +187,13 @@ function activeDownloads() {
       progress: task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
       status: libraryTransfer(task),
     })),
+    ...(pornhubTasks || []).filter((task) => !terminal.has(task.state)).map((task) => ({
+      id: `pornhub:${task.id}`,
+      source: 'Pornhub', name: task.title || task.id,
+      detail: `${label(task.state)} · ${label(task.phase)}`,
+      progress: task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
+      status: libraryTransfer(task),
+    })),
   ];
 }
 
@@ -191,6 +210,10 @@ function recentDownloads() {
     ...(p91History || []).map((item) => ({
       id: `p91:${item.id}`,
       source: '91Porn', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
+    })),
+    ...(pornhubHistory || []).map((item) => ({
+      id: `pornhub:${item.id}`,
+      source: 'Pornhub', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
     })),
   ].sort((a, b) => b.date - a.date).slice(0, RECENT_LIMIT);
 }
@@ -268,12 +291,12 @@ function renderActivity() {
   for (const item of downloads) activityRows.set(item.id, item);
   const rows = [...activityRows.values()];
   $('activity-count').textContent = `${rows.length} active`;
-  renderRows($('overview-downloads'), rows, telegram && tasks && p91Tasks ? 'All caught up. New downloads will appear here.' : 'Waiting for all modules…');
+  renderRows($('overview-downloads'), rows, telegram && tasks && p91Tasks && pornhubTasks ? 'All caught up. New downloads will appear here.' : 'Waiting for all modules…');
 }
 function renderHistory() {
-  renderRows($('overview-history'), recentDownloads(), telegramHistory && history && p91History ? 'No downloads recorded yet' : 'Waiting for all modules…');
+  renderRows($('overview-history'), recentDownloads(), telegramHistory && history && p91History && pornhubHistory ? 'No downloads recorded yet' : 'Waiting for all modules…');
 }
-const providers = ['jav', 'p91'];
+const providers = ['jav', 'p91', 'pornhub'];
 const libraryRevisions = new Map();
 const taskErrors = new Set();
 const historyErrors = new Set();
@@ -286,7 +309,9 @@ const taskResources = Object.fromEntries(providers.map((provider) => {
   const showError = (failed) => refreshError(taskErrors, provider, failed, 'activity-error',
     'Download task status is unavailable. Retrying automatically.');
   return [provider, createTaskRefresh((signal) => api(`/${provider}/api/tasks`, { signal }), (data) => {
-    if (provider === 'jav') tasks = data; else p91Tasks = data;
+    if (provider === 'jav') tasks = data;
+    else if (provider === 'p91') p91Tasks = data;
+    else pornhubTasks = data;
     showError(false);
     queueActivity();
   }, () => { showError(true); queueActivity(); })];
@@ -295,7 +320,9 @@ const historyResources = Object.fromEntries(providers.map((provider) => {
   const showError = (failed) => refreshError(historyErrors, provider, failed, 'history-error',
     'Download history is unavailable. Retrying automatically.');
   return [provider, createSnapshotRefresh((signal) => api(`/${provider}/api/history?limit=${RECENT_LIMIT}`, { signal }), (data) => {
-    if (provider === 'jav') history = data.records; else p91History = data.records;
+    if (provider === 'jav') history = data.records;
+    else if (provider === 'p91') p91History = data.records;
+    else pornhubHistory = data.records;
     showError(false);
     queueHistory();
   }, () => { showError(true); queueHistory(); })];
@@ -359,6 +386,20 @@ connectEvents('/p91/api/events', {
   open() { libraryRevisions.delete('p91'); },
   resync() { refreshTasks('p91', true); refreshHistory('p91', true); },
 }, $('p91-connection'));
+connectEvents('/pornhub/api/events', {
+  status(event) { pornhub = JSON.parse(event.data); receiveLibraryStatus('pornhub', pornhub); queueSummary(); },
+  task(event) {
+    const task = JSON.parse(event.data);
+    taskResources.pornhub.receive(task);
+    if (pornhubTasks) {
+      pornhubTasks = pornhubTasks.filter((item) => item.id !== task.id);
+      pornhubTasks.push(task);
+      queueActivity();
+    }
+  },
+  open() { libraryRevisions.delete('pornhub'); },
+  resync() { refreshTasks('pornhub', true); refreshHistory('pornhub', true); },
+}, $('pornhub-connection'));
 // Revisions reconcile cross-tab deletions; polling retries only failed reads.
 pollWhenVisible(() => Promise.all([
   ...[...taskErrors].map((provider) => refreshTasks(provider)),

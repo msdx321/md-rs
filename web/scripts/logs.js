@@ -15,6 +15,8 @@ const dateFormatter = new Intl.DateTimeFormat('en-GB', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const entryKey = entry => entry.id + ':' + entry.timestamp;
+// The UI keeps the provider name while Rust module targets use the `ph` abbreviation.
+const targetModule = () => source.value === 'pornhub' ? 'ph' : source.value;
 let entries = [];
 let loaded = false;
 let paused = false;
@@ -31,7 +33,7 @@ function restoreLevel() {
 }
 restoreLevel();
 
-source.value = ['telegram', 'jav', 'p91'].find(module => document.body.classList.contains(module)) || '';
+source.value = ['telegram', 'jav', 'p91', 'pornhub'].find(module => document.body.classList.contains(module)) || '';
 
 function showScope() {
   $('logs-scope').textContent = source.selectedOptions[0].textContent;
@@ -74,7 +76,7 @@ function render() {
   const scrollTop = output.scrollTop;
   const query = search.value.trim().toLowerCase();
   const visible = entries.filter(entry => (!level.value || levelRank[entry.level] >= levelRank[level.value])
-    && (!source.value || entry.target.split('::').includes(source.value))
+    && (!source.value || entry.target.split('::').includes(targetModule()))
     && (!query || (entry.target + ' ' + entry.message).toLowerCase().includes(query)));
   const retained = new Set();
   let position = output.firstElementChild;

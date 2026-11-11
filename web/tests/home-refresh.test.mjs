@@ -27,19 +27,19 @@ function dashboard(api) {
   return { handlers, elements, poll: () => poll() };
 }
 
-test('home refresh: initial revisions issue four GETs, changes are provider-local, unchanged polling is idle', async () => {
+test('home refresh: initial revisions issue six GETs, changes are provider-local, unchanged polling is idle', async () => {
   const requests = [];
   const home = dashboard(async (path) => {
     requests.push(path);
     return path.includes('/history') ? { records: [] } : [];
   });
-  for (const provider of ['jav', 'p91']) {
+  for (const provider of ['jav', 'p91', 'pornhub']) {
     const events = home.handlers.get(`/${provider}/api/events`);
     events.open();
     events.status({ data: JSON.stringify({ library_revision: 0 }) });
   }
   await tick();
-  assert.deepEqual(requests.sort(), ['/jav/api/history?limit=10', '/jav/api/tasks', '/p91/api/history?limit=10', '/p91/api/tasks']);
+  assert.deepEqual(requests.sort(), ['/jav/api/history?limit=10', '/jav/api/tasks', '/p91/api/history?limit=10', '/p91/api/tasks', '/pornhub/api/history?limit=10', '/pornhub/api/tasks']);
   requests.length = 0;
   const jav = home.handlers.get('/jav/api/events');
   jav.task({ data: JSON.stringify({ id: 'done', state: 'completed' }) });

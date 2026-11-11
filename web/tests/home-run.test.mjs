@@ -46,7 +46,7 @@ test('JAV candidate failures render as badges with the full breakdown in run det
   assert.deepEqual(home.get('jav-run-breakdown').children.map(item => item.textContent), javResult.split('; ').slice(1));
 });
 
-for (const prefix of ['jav', 'p91']) {
+for (const prefix of ['jav', 'p91', 'pornhub']) {
   test(`${prefix} retains support for the original result format`, () => {
     const home = dashboard();
     home.render(prefix, 'manual: 2/2 completed, 2 attempted, 0 failed, 4 skipped; /popular: 2/2 completed');
