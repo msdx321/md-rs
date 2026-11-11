@@ -44,7 +44,14 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             return Err(error);
         }
     };
-    match crate::p91::start(database, updates, limiter).await {
+    match crate::p91::start(database.clone(), updates.clone(), limiter.clone()).await {
+        Ok(engine) => engines.push(engine),
+        Err(error) => {
+            crate::runtime::shutdown_all(engines).await;
+            return Err(error);
+        }
+    };
+    match crate::ph::start(database, updates, limiter).await {
         Ok(engine) => engines.push(engine),
         Err(error) => {
             crate::runtime::shutdown_all(engines).await;

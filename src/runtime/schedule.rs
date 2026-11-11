@@ -32,6 +32,7 @@ pub enum Module {
     Telegram,
     Jav,
     P91,
+    Ph,
 }
 
 pub struct Timer {
@@ -49,6 +50,7 @@ impl Timer {
             Module::Telegram => updates.borrow_and_update().schedules.telegram.clone(),
             Module::Jav => updates.borrow_and_update().schedules.jav.clone(),
             Module::P91 => updates.borrow_and_update().schedules.p91.clone(),
+            Module::Ph => updates.borrow_and_update().schedules.ph.clone(),
         };
         let immediate = config.enabled && config.run_on_start;
         let mut timer = Self {
@@ -82,7 +84,7 @@ impl Timer {
             changed = self.updates.changed() => {
                 if changed.is_err() { std::future::pending::<()>().await; }
                 let common = self.updates.borrow_and_update();
-                let config = match self.module { Module::Telegram => common.schedules.telegram.clone(), Module::Jav => common.schedules.jav.clone(), Module::P91 => common.schedules.p91.clone() };
+                let config = match self.module { Module::Telegram => common.schedules.telegram.clone(), Module::Jav => common.schedules.jav.clone(), Module::P91 => common.schedules.p91.clone(), Module::Ph => common.schedules.ph.clone() };
                 drop(common);
                 if config != self.config { self.config = config; self.finished(); }
                 false

@@ -4,6 +4,7 @@ mod jav;
 mod logging;
 mod migration;
 mod p91;
+mod ph;
 mod runtime;
 mod settings;
 mod storage;

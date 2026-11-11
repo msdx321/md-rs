@@ -54,6 +54,8 @@ pub struct Schedules {
     pub telegram: Schedule,
     pub jav: Schedule,
     pub p91: Schedule,
+    #[serde(rename = "pornhub")]
+    pub ph: Schedule,
 }
 impl Default for Schedules {
     fn default() -> Self {
@@ -67,6 +69,10 @@ impl Default for Schedules {
                 ..Schedule::default()
             },
             p91: Schedule {
+                mode: Mode::Daily,
+                ..Schedule::default()
+            },
+            ph: Schedule {
                 mode: Mode::Daily,
                 ..Schedule::default()
             },

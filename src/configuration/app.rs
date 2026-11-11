@@ -9,6 +9,7 @@ pub const FILE: crate::configuration::ConfigFile<Config> =
             &[
                 "jav_download_path",
                 "p91_download_path",
+                "pornhub_download_path",
                 "telegram_download_path",
                 "temp_path",
             ],
@@ -17,6 +18,7 @@ pub const FILE: crate::configuration::ConfigFile<Config> =
                 "download_limit_mb_per_sec",
                 "jav_download_limit_mb_per_sec",
                 "p91_download_limit_mb_per_sec",
+                "pornhub_download_limit_mb_per_sec",
                 "telegram_download_limit_mb_per_sec",
             ],
             &[
@@ -24,6 +26,7 @@ pub const FILE: crate::configuration::ConfigFile<Config> =
                 "telegram_min_video_resolution",
                 "jav_min_video_resolution",
                 "p91_min_video_resolution",
+                "pornhub_min_video_resolution",
             ],
             &["schedules"],
         ]);
@@ -36,6 +39,8 @@ pub struct Config {
     pub telegram_download_limit_mb_per_sec: f64,
     pub jav_download_limit_mb_per_sec: f64,
     pub p91_download_limit_mb_per_sec: f64,
+    #[serde(rename = "pornhub_download_limit_mb_per_sec")]
+    pub ph_download_limit_mb_per_sec: f64,
 
     /// Minimum shorter-side video dimension in pixels; 0 disables filtering.
     pub min_video_resolution: u32,
@@ -43,10 +48,14 @@ pub struct Config {
     pub telegram_min_video_resolution: Option<u32>,
     pub jav_min_video_resolution: Option<u32>,
     pub p91_min_video_resolution: Option<u32>,
+    #[serde(rename = "pornhub_min_video_resolution")]
+    pub ph_min_video_resolution: Option<u32>,
     pub history_retention_days: u32,
     pub telegram_download_path: std::path::PathBuf,
     pub jav_download_path: std::path::PathBuf,
     pub p91_download_path: std::path::PathBuf,
+    #[serde(rename = "pornhub_download_path")]
+    pub ph_download_path: std::path::PathBuf,
     pub temp_path: std::path::PathBuf,
     pub port: u16,
     pub schedules: crate::configuration::schedule::Schedules,
@@ -61,13 +70,16 @@ impl Default for Config {
             telegram_min_video_resolution: None,
             jav_min_video_resolution: None,
             p91_min_video_resolution: None,
+            ph_min_video_resolution: None,
             download_limit_mb_per_sec: 0.0,
             telegram_download_limit_mb_per_sec: 0.0,
             jav_download_limit_mb_per_sec: 0.0,
             p91_download_limit_mb_per_sec: 0.0,
+            ph_download_limit_mb_per_sec: 0.0,
             telegram_download_path: "downloads/telegram".into(),
             jav_download_path: "downloads/jav".into(),
             p91_download_path: "downloads/p91".into(),
+            ph_download_path: "downloads/ph".into(),
             temp_path: "temp".into(),
             port: 8080,
             schedules: crate::configuration::schedule::Schedules::default(),
@@ -102,6 +114,7 @@ impl Config {
             DownloadModule::Telegram => self.telegram_min_video_resolution,
             DownloadModule::Jav => self.jav_min_video_resolution,
             DownloadModule::P91 => self.p91_min_video_resolution,
+            DownloadModule::Ph => self.ph_min_video_resolution,
         }
         .unwrap_or(self.min_video_resolution)
     }
@@ -112,6 +125,7 @@ impl Config {
             self.telegram_download_limit_mb_per_sec,
             self.jav_download_limit_mb_per_sec,
             self.p91_download_limit_mb_per_sec,
+            self.ph_download_limit_mb_per_sec,
         ] {
             anyhow::ensure!(
                 limit == 0.0 || (0.000001..=u32::MAX as f64).contains(&limit),
@@ -123,6 +137,7 @@ impl Config {
             self.telegram_min_video_resolution,
             self.jav_min_video_resolution,
             self.p91_min_video_resolution,
+            self.ph_min_video_resolution,
         ]
         .into_iter()
         .flatten()
@@ -144,6 +159,7 @@ impl Config {
             &self.telegram_download_path,
             &self.jav_download_path,
             &self.p91_download_path,
+            &self.ph_download_path,
             &self.temp_path,
         ] {
             anyhow::ensure!(
@@ -154,6 +170,7 @@ impl Config {
         self.schedules.telegram.validate()?;
         self.schedules.jav.validate()?;
         self.schedules.p91.validate()?;
+        self.schedules.ph.validate()?;
         Ok(())
     }
 }

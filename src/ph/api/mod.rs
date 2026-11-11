@@ -1,0 +1,536 @@
+//! Pornhub commands, settings, and live status API.
+
+use std::convert::Infallible;
+use std::sync::Arc;
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::sse::Event;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio_stream::wrappers::{BroadcastStream, WatchStream};
+
+use crate::configuration::patch::merge_json;
+use crate::ph::app::{AppCtx, TaskInfo};
+use crate::ph::config::Config;
+use crate::ph::scheduler;
+use crate::ph::source::scraper::{self, VideoCard};
+
+pub fn router(ctx: Arc<AppCtx>) -> Router {
+    Router::new()
+        .route("/api/status", get(status))
+        .route("/api/access/check", post(check_access))
+        .route("/api/config", get(get_config).put(put_config))
+        .route("/api/videos", get(list_videos))
+        .route("/api/thumbnail", get(thumbnail))
+        .route("/api/tasks", get(list_tasks))
+        .route("/api/tasks/failed", delete(clear_failed_tasks))
+        .route("/api/tasks/{id}/pause", post(pause_task))
+        .route("/api/tasks/{id}/resume", post(resume_task))
+        .route("/api/tasks/{id}/cancel", post(cancel_task))
+        .route("/api/tasks/{id}", delete(dismiss_task))
+        .route("/api/download", post(start_download))
+        .route("/api/daily/run", post(run_daily))
+        .route("/api/daily/pause", post(pause_all))
+        .route("/api/daily/cancel", post(cancel_all))
+        .route("/api/tasks/resume-all", post(resume_all))
+        .route("/api/history", get(list_history).delete(clear_history))
+        .route("/api/history/{id}", delete(forget_record))
+        .route("/api/events", get(events))
+        .with_state(ctx)
+}
+
+// ── error type ───────────────────────────────────────────────────────────────
+
+pub struct ApiError(StatusCode, String);
+
+impl ApiError {
+    fn bad_request(msg: impl Into<String>) -> Self {
+        Self(StatusCode::BAD_REQUEST, msg.into())
+    }
+    fn not_found(msg: impl Into<String>) -> Self {
+        Self(StatusCode::NOT_FOUND, msg.into())
+    }
+    fn internal(msg: impl Into<String>) -> Self {
+        Self(StatusCode::INTERNAL_SERVER_ERROR, msg.into())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        ApiError::internal(format!("{e:#}"))
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        ApiError::internal(format!("{e}"))
+    }
+}
+
+type ApiResult<T> = Result<T, ApiError>;
+
+// ── handlers ─────────────────────────────────────────────────────────────────
+
+async fn status(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
+    Json(status_snapshot(&ctx))
+}
+
+fn status_snapshot(ctx: &AppCtx) -> Value {
+    let cfg = ctx.config();
+    let history = ctx.history_summary();
+    let active = ctx.running_task_count();
+    json!({
+        "access_configured": ctx.access_configured(),
+        "account_configured": ctx.account_configured(),
+        "logged_in": ctx.logged_in(),
+        "login_error": ctx.login_error(),
+        "session_ready": ctx.session_ready(),
+        "quality": cfg.quality,
+        "site": cfg.site_base,
+        "save_path": cfg.save_path,
+        "top_n": cfg.listing_links().iter().map(|link| link.daily_quota).sum::<usize>(),
+        "links": cfg.listing_links(),
+        "history_retention_days": ctx.history_retention_days(),
+        "library_revision": ctx.library_revision(),
+        "downloaded": history.completed,
+        "failed_records": history.failed,
+        "downloaded_bytes": history.total_bytes,
+        "active_tasks": active,
+        "last_daily_run": history.last_daily_run,
+        "scheduler": ctx.scheduler_status(),
+        "version": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Fetch the first listing page to confirm the configured site and cookie work.
+async fn check_access(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
+    let (cfg, fetch) = ctx.request_context();
+    let listing = scraper::fetch_popular(
+        ctx.session(),
+        &fetch,
+        &cfg.for_link(&cfg.listing_links()[0]),
+        1,
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("{e:#}")))?;
+    Ok(Json(json!({
+        "ok": true,
+        "videos": listing.cards.len(),
+        "access_configured": ctx.access_configured(),
+        "account_configured": ctx.account_configured(),
+        "logged_in": ctx.logged_in(),
+    })))
+}
+
+async fn get_config(State(ctx): State<Arc<AppCtx>>) -> Json<Config> {
+    Json(ctx.config())
+}
+
+async fn put_config(
+    State(ctx): State<Arc<AppCtx>>,
+    Json(patch): Json<Value>,
+) -> ApiResult<Json<Config>> {
+    let _update = ctx.config_update.lock().await;
+    let current = serde_json::to_value(ctx.config())?;
+    let mut merged = current;
+    merge_json(&mut merged, patch);
+    let cfg: Config = serde_json::from_value(merged)
+        .map_err(|e| ApiError::bad_request(format!("invalid configuration: {e}")))?;
+
+    cfg.validate()
+        .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+    ctx.update_config(cfg.clone()).await?;
+    log::info!("Pornhub configuration updated via the web UI");
+    Ok(Json(cfg))
+}
+
+#[derive(Debug, Deserialize)]
+struct VideosQuery {
+    #[serde(default = "default_page")]
+    page: usize,
+    #[serde(default)]
+    link: usize,
+}
+
+fn default_page() -> usize {
+    1
+}
+
+#[derive(Debug, Serialize)]
+struct VideoView {
+    #[serde(flatten)]
+    card: VideoCard,
+    downloaded: bool,
+    in_progress: bool,
+}
+
+async fn list_videos(
+    State(ctx): State<Arc<AppCtx>>,
+    Query(query): Query<VideosQuery>,
+) -> ApiResult<Json<Value>> {
+    let (cfg, fetch) = ctx.request_context();
+    let links = cfg.listing_links();
+    let link = links
+        .get(query.link)
+        .ok_or_else(|| ApiError::bad_request("unknown listing link"))?;
+    let cfg = cfg.for_link(link);
+    let page = query.page.max(1);
+    let listing = scraper::fetch_popular(ctx.session(), &fetch, &cfg, page)
+        .await
+        .map_err(|e| ApiError::internal(format!("{e:#}")))?;
+
+    let videos: Vec<VideoView> = listing
+        .cards
+        .into_iter()
+        .map(|mut card| {
+            if !card.image_url.is_empty() {
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("url", &card.image_url)
+                    .finish();
+                card.image_url = format!("/pornhub/api/thumbnail?{query}");
+            }
+            let downloaded = ctx.is_completed(&card.id);
+            let in_progress = ctx
+                .task(&card.id)
+                .map(|t| !t.is_terminal())
+                .unwrap_or(false);
+            VideoView {
+                card,
+                downloaded,
+                in_progress,
+            }
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "page": page,
+        "next_page": listing.next_page,
+        "link": query.link,
+        "videos": videos,
+        "title_filter_active": !cfg.title_filter.trim().is_empty(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct ThumbnailQuery {
+    url: String,
+}
+
+async fn thumbnail(
+    State(ctx): State<Arc<AppCtx>>,
+    Query(query): Query<ThumbnailQuery>,
+) -> ApiResult<Response> {
+    let url =
+        url::Url::parse(&query.url).map_err(|_| ApiError::bad_request("invalid thumbnail URL"))?;
+    if url.scheme() != "https"
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !url
+            .host_str()
+            .is_some_and(|host| host.ends_with(".phncdn.com"))
+    {
+        return Err(ApiError::bad_request("unsupported thumbnail URL"));
+    }
+
+    let (cfg, fetch) = ctx.request_context();
+    let result = async {
+        let response = fetch
+            .thumbnail_response(url.as_str(), &cfg.site_base)
+            .await?;
+        anyhow::ensure!(
+            response.status() == StatusCode::OK,
+            "thumbnail request failed"
+        );
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        anyhow::ensure!(
+            matches!(
+                content_type.as_str(),
+                "image/jpeg" | "image/png" | "image/webp" | "image/avif" | "image/gif"
+            ),
+            "unexpected thumbnail content type"
+        );
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            anyhow::ensure!(
+                bytes.len() + chunk.len() <= 2 * 1024 * 1024,
+                "thumbnail too large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        anyhow::ensure!(!bytes.is_empty(), "thumbnail is empty");
+        Ok::<_, anyhow::Error>(
+            (
+                [
+                    ("content-type", content_type.as_str()),
+                    ("cache-control", "private, max-age=300"),
+                    ("x-content-type-options", "nosniff"),
+                ],
+                bytes,
+            )
+                .into_response(),
+        )
+    }
+    .await;
+    result.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "thumbnail unavailable".into()))
+}
+
+async fn list_tasks(State(ctx): State<Arc<AppCtx>>) -> Json<Vec<TaskInfo>> {
+    Json(ctx.visible_tasks())
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadRequest {
+    id: Option<String>,
+    url: Option<String>,
+    title: Option<String>,
+    rank: Option<usize>,
+    /// Internal video id from the listing card, used to detect decoy pages.
+    vid: Option<String>,
+}
+
+async fn start_download(
+    State(ctx): State<Arc<AppCtx>>,
+    Json(req): Json<DownloadRequest>,
+) -> ApiResult<Json<Value>> {
+    let (cfg, fetch) = ctx.request_context();
+    let (id, url) = match (&req.id, &req.url) {
+        (Some(id), Some(url)) => (id.clone(), url.clone()),
+        (Some(id), None) => (id.clone(), cfg.video_url(id)),
+        (None, Some(url)) => {
+            let id = scraper::video_id_from_url(url).ok_or_else(|| {
+                ApiError::bad_request(
+                    "url must look like https://www.pornhub.com/view_video.php?viewkey=…",
+                )
+            })?;
+            (id, url.clone())
+        }
+        (None, None) => return Err(ApiError::bad_request("id or url is required")),
+    };
+
+    // The id is a view key, and it has to agree with the URL so a mismatch
+    // cannot download the wrong video.
+    if id.is_empty() || scraper::video_id_from_url(&url).as_deref() != Some(id.as_str()) {
+        return Err(ApiError::bad_request(
+            "id must be a view key that matches the video URL",
+        ));
+    }
+
+    if ctx.is_completed(&id) {
+        return Ok(Json(json!({
+            "status": "already_downloaded",
+            "id": id,
+        })));
+    }
+
+    let card = VideoCard {
+        id: id.clone(),
+        url,
+        title: req.title.unwrap_or_default(),
+        image_url: String::new(),
+        duration_secs: None,
+        rank: req.rank,
+        vid: req.vid,
+        hd: false,
+    };
+
+    if ctx.jobs.is_closed() {
+        return Err(ApiError::bad_request(
+            "service shutting down; download rejected",
+        ));
+    }
+    let mut info = TaskInfo::new(&card.id, &card.url);
+    info.title = card.title.clone();
+    info.vid = card.vid.clone();
+    if !ctx.register_task(info) {
+        return Ok(Json(json!({ "status": "already_running", "id": id })));
+    }
+
+    let ctx_for_task = Arc::clone(&ctx);
+    ctx.jobs
+        .spawn(async move {
+            crate::ph::downloader::download_video_with(ctx_for_task.clone(), card, cfg, fetch)
+                .await;
+            if let Err(error) = ctx_for_task.prune_history().await {
+                log::warn!("cannot prune Pornhub history after download: {error:#}");
+            }
+        })
+        .ok_or_else(|| ApiError::bad_request("service shutting down; download rejected"))?;
+
+    Ok(Json(json!({ "status": "started", "id": id })))
+}
+
+async fn pause_task(
+    State(ctx): State<Arc<AppCtx>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    ctx.task(&id)
+        .ok_or_else(|| ApiError::not_found("no such task"))?;
+    if !ctx.stop_task(&id, false) {
+        return Err(ApiError::bad_request(
+            "task is finalizing or is not running or queued; pause rejected",
+        ));
+    }
+    Ok(Json(json!({ "status": "pausing", "id": id })))
+}
+
+async fn resume_task(
+    State(ctx): State<Arc<AppCtx>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    if !scheduler::resume_task(Arc::clone(&ctx), &id) {
+        return Err(ApiError::bad_request("task cannot be resumed"));
+    }
+    Ok(Json(json!({ "status": "resumed", "id": id })))
+}
+
+async fn cancel_task(
+    State(ctx): State<Arc<AppCtx>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    ctx.task(&id)
+        .ok_or_else(|| ApiError::not_found("no such task"))?;
+    if !ctx.stop_task(&id, true) {
+        return Err(ApiError::bad_request(
+            "task is finalizing or already finished; cancellation rejected",
+        ));
+    }
+    Ok(Json(json!({ "status": "cancelling", "id": id })))
+}
+
+async fn clear_failed_tasks(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
+    Json(json!({ "count": ctx.clear_failed_tasks() }))
+}
+
+async fn dismiss_task(
+    State(ctx): State<Arc<AppCtx>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    match ctx.task(&id) {
+        Some(task) if !task.is_terminal() => Err(ApiError::bad_request(
+            "cancel the task before dismissing it",
+        )),
+        Some(_) if ctx.drop_task(&id) => Ok(Json(json!({ "status": "dismissed", "id": id }))),
+        Some(_) => Err(ApiError::bad_request("task is still unwinding")),
+        None => Err(ApiError::not_found("no such task")),
+    }
+}
+
+async fn run_daily(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
+    let ctx_for_job = Arc::clone(&ctx);
+    ctx.jobs
+        .spawn(async move {
+            if let Err(e) = scheduler::run_daily(ctx_for_job, "manual").await {
+                log::error!("manual daily run failed: {e:#}");
+            }
+        })
+        .ok_or_else(|| ApiError::bad_request("service shutting down; daily run rejected"))?;
+    Ok(Json(json!({ "status": "started" })))
+}
+
+async fn pause_all(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
+    let rejected = scheduler::pause_active(&ctx);
+    if rejected > 0 {
+        return Err(ApiError::bad_request(format!(
+            "stop rejected for {rejected} finalizing task(s); other eligible tasks were stopped"
+        )));
+    }
+    Ok(Json(json!({ "status": "paused_all" })))
+}
+
+async fn cancel_all(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
+    let rejected = scheduler::cancel_active(&ctx);
+    if rejected > 0 {
+        return Err(ApiError::bad_request(format!(
+            "stop rejected for {rejected} finalizing task(s); other eligible tasks were stopped"
+        )));
+    }
+    Ok(Json(json!({ "status": "cancelled_all" })))
+}
+
+async fn resume_all(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
+    let count = scheduler::resume_all(ctx).await;
+    Json(json!({ "status": "resumed", "count": count }))
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    limit: Option<usize>,
+}
+
+async fn list_history(
+    State(ctx): State<Arc<AppCtx>>,
+    Query(query): Query<HistoryQuery>,
+) -> Json<Value> {
+    let (records, count) = match query.limit {
+        Some(limit) => ctx.history_limited(limit),
+        None => {
+            let records = ctx.history();
+            let count = records.len();
+            (records, count)
+        }
+    };
+    Json(json!({
+        "history_retention_days": ctx.history_retention_days(),
+        "count": count,
+        "records": records,
+    }))
+}
+
+async fn forget_record(
+    State(ctx): State<Arc<AppCtx>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    ctx.forget_record(&id).await?;
+    Ok(Json(json!({ "status": "forgotten", "id": id })))
+}
+
+async fn clear_history(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
+    let removed = ctx.clear_history().await?;
+    Ok(Json(json!({ "status": "cleared", "removed": removed })))
+}
+
+async fn events(State(ctx): State<Arc<AppCtx>>) -> impl IntoResponse {
+    let rx = ctx.subscribe();
+    let tasks = BroadcastStream::new(rx).filter_map(|result| async move {
+        match result {
+            Ok(task) => Some(Ok::<_, Infallible>(
+                Event::default().event("task").data(&*task),
+            )),
+            // Snapshot reconciliation replaces polling when a client falls behind.
+            Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
+        }
+    });
+    // WatchStream emits its current value immediately, flushing the SSE body
+    // even when no tasks are running.
+    let statuses = WatchStream::new(ctx.subscribe_status()).map(move |()| {
+        Ok::<_, Infallible>(
+            Event::default()
+                .event("status")
+                .data(status_snapshot(&ctx).to_string()),
+        )
+    });
+    crate::runtime::web::events(futures_util::stream::select(tasks, statuses))
+}

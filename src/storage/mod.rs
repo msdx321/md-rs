@@ -1,6 +1,7 @@
 //! Application persistence: shared database lifecycle and provider repositories.
 pub mod jav;
 pub mod p91;
+pub mod ph;
 pub mod telegram;
 #[cfg(test)]
 mod tests {
@@ -161,7 +162,7 @@ impl Database {
             .context("missing schema version")?
             .get(0)?;
         anyhow::ensure!(
-            version <= 6,
+            version <= 8,
             "database schema version {version} is newer than this app supports"
         );
         if version == 0 {
@@ -187,6 +188,14 @@ impl Database {
         if version < 6 {
             tx.execute_batch(include_str!("schema-v6.sql")).await?;
             tx.execute_batch("PRAGMA user_version=6").await?;
+        }
+        if version < 7 {
+            tx.execute_batch(include_str!("schema-v7.sql")).await?;
+            tx.execute_batch("PRAGMA user_version=7").await?;
+        }
+        if version < 8 {
+            tx.execute_batch(include_str!("schema-v8.sql")).await?;
+            tx.execute_batch("PRAGMA user_version=8").await?;
         }
         tx.commit().await?;
         Ok(Self(Arc::new(Mutex::new(connection))))
