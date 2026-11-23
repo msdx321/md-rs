@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::ph::config::{Config, FILE};
 use crate::ph::source::http::{DEFAULT_USER_AGENT, Fetcher, Session, build_client};
-use crate::ph::storage::{HistorySummary, Record, Repository};
+use crate::ph::storage::{HistorySummary, Provider, Record, Repository};
 use crate::runtime::download_slots::{DownloadSlot, DownloadSlots};
 use crate::storage::Database;
 
@@ -138,7 +138,7 @@ impl AppCtx {
         common: watch::Receiver<crate::configuration::app::Config>,
         download_limiter: Arc<crate::runtime::download_limiter::DownloadLimiter>,
     ) -> anyhow::Result<Self> {
-        let ledger = Repository::load(database).await?;
+        let ledger = Repository::load(database, Provider::Ph).await?;
         let (events, _) = broadcast::channel(256);
         let session = Session::new();
         session.set_configured(
@@ -307,11 +307,11 @@ impl AppCtx {
     }
 
     pub async fn subscription(&self, source: &str) -> anyhow::Result<Option<String>> {
-        self.ledger.subscription(source).await
+        crate::storage::ph::subscription(&self.ledger, source).await
     }
 
     pub async fn save_subscription(&self, source: &str, state: &str) -> anyhow::Result<()> {
-        self.ledger.save_subscription(source, state).await
+        crate::storage::ph::save_subscription(&self.ledger, source, state).await
     }
 
     pub async fn mark_daily_run(&self, date: &str) -> anyhow::Result<()> {

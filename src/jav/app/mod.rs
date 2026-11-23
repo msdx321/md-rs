@@ -14,7 +14,7 @@ use crate::jav::config::{Config, FILE};
 use crate::jav::source::browser::{BrowserMinter, BrowserOptions};
 use crate::jav::source::cf::{CookieSnapshot, CookieStore, MintFn};
 use crate::jav::source::http::{Fetcher, build_client};
-use crate::jav::storage::{HistorySummary, Record, Repository};
+use crate::jav::storage::{HistorySummary, Provider, Record, Repository};
 use crate::runtime::download_slots::{DownloadSlot, DownloadSlots};
 use crate::storage::Database;
 
@@ -161,7 +161,7 @@ impl AppCtx {
         download_limiter: Arc<crate::runtime::download_limiter::DownloadLimiter>,
     ) -> anyhow::Result<Self> {
         let client = build_client()?;
-        let ledger = Repository::load(database.clone()).await?;
+        let ledger = Repository::load(database.clone(), Provider::Jav).await?;
         let (events, _) = broadcast::channel(256);
         let scheduler = SchedulerStatus::default();
         let (cookies, browser) = build_cookie_plumbing(&cfg, &database).await?;

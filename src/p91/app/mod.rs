@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::p91::config::{Config, FILE};
 use crate::p91::source::http::{DEFAULT_USER_AGENT, Fetcher, Session, build_client};
-use crate::p91::storage::{HistorySummary, Record, Repository};
+use crate::p91::storage::{HistorySummary, Provider, Record, Repository};
 use crate::runtime::download_slots::{DownloadSlot, DownloadSlots};
 use crate::storage::Database;
 
@@ -138,7 +138,7 @@ impl AppCtx {
         common: watch::Receiver<crate::configuration::app::Config>,
         download_limiter: Arc<crate::runtime::download_limiter::DownloadLimiter>,
     ) -> anyhow::Result<Self> {
-        let ledger = Repository::load(database).await?;
+        let ledger = Repository::load(database, Provider::P91).await?;
         let (events, _) = broadcast::channel(256);
         let session = Session::new();
         session.set_configured_cookies(cfg.request_cookie().as_deref(), &cfg.site_base);

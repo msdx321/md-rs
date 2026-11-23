@@ -45,8 +45,12 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("synthetic.db");
         let db = Database::open(&path).await.unwrap();
-        let jav = jav::Repository::load(db.clone()).await.unwrap();
-        let p91 = p91::Repository::load(db.clone()).await.unwrap();
+        let jav = jav::Repository::load(db.clone(), jav::Provider::Jav)
+            .await
+            .unwrap();
+        let p91 = p91::Repository::load(db.clone(), p91::Provider::P91)
+            .await
+            .unwrap();
         let now = chrono::Utc::now();
         let recent = (now - chrono::Duration::hours(1)).to_rfc3339();
         let fixtures = [
@@ -85,8 +89,12 @@ mod tests {
 
         // New connection and caches expose missed deletes from prepared-statement reuse.
         let db = Database::open(&path).await.unwrap();
-        let jav = jav::Repository::load(db.clone()).await.unwrap();
-        let p91 = p91::Repository::load(db.clone()).await.unwrap();
+        let jav = jav::Repository::load(db.clone(), jav::Provider::Jav)
+            .await
+            .unwrap();
+        let p91 = p91::Repository::load(db.clone(), p91::Provider::P91)
+            .await
+            .unwrap();
         assert!(jav.history(7).is_empty());
         assert_eq!(serde_json::to_value(p91.history(7)).unwrap(), p91_history);
         assert_eq!(
@@ -111,8 +119,12 @@ mod tests {
         drop(db);
 
         let db = Database::open(&path).await.unwrap();
-        let jav = jav::Repository::load(db.clone()).await.unwrap();
-        let p91 = p91::Repository::load(db.clone()).await.unwrap();
+        let jav = jav::Repository::load(db.clone(), jav::Provider::Jav)
+            .await
+            .unwrap();
+        let p91 = p91::Repository::load(db.clone(), p91::Provider::P91)
+            .await
+            .unwrap();
         assert_eq!(serde_json::to_value(jav.history(7)).unwrap(), jav_history);
         assert!(p91.history(7).is_empty());
         assert!(!p91.is_completed("recent-1"));
@@ -136,6 +148,7 @@ mod tests {
 }
 
 mod video;
+mod video_repository;
 use std::{path::Path, sync::Arc};
 
 use anyhow::Context;
