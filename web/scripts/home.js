@@ -2,15 +2,8 @@ import { $, api, connectEvents, pollWhenVisible, scheduleRender, reconcileRows, 
 import { createSnapshotRefresh, createTaskRefresh } from './snapshot-refresh.js';
 
 let telegram = null;
-let jav = null;
-let p91 = null;
-let pornhub = null;
-let tasks = null;
-let p91Tasks = null;
-let pornhubTasks = null;
-let history = null;
-let p91History = null;
-let pornhubHistory = null;
+const libraries = Object.entries({ jav: 'JAV', p91: '91Porn', pornhub: 'Pornhub' })
+  .map(([id, name]) => ({ id, name, status: null, tasks: null, history: null, run: {} }));
 let telegramHistory = null;
 let telegramHistoryRevision = null;
 // Only the newest entries are shown, so each module sends just that many.
@@ -21,9 +14,6 @@ const queueActivity = scheduleRender(renderActivity);
 const queueHistory = scheduleRender(renderHistory);
 const renderedLists = new Map();
 const activityRows = new Map();
-const javRun = { value: undefined };
-const p91Run = { value: undefined };
-const pornhubRun = { value: undefined };
 let lastTelegramRun;
 
 function telegramChatName(snapshot, chatId) {
@@ -121,7 +111,8 @@ function renderRun(prefix, scheduler, signature) {
 }
 
 function renderSummary() {
-  $('overview-active').textContent = telegram && jav && p91 && pornhub ? telegram.active_count + jav.active_tasks + p91.active_tasks + pornhub.active_tasks : '—';
+  $('overview-active').textContent = telegram && libraries.every(lib => lib.status)
+    ? libraries.reduce((sum, lib) => sum + lib.status.active_tasks, telegram.active_count) : '—';
   if (telegram) {
     historyPeriod("telegram", telegram.history_retention_days);
     $('overview-telegram-size').textContent = sizeLabel(telegram.downloaded_bytes);
@@ -130,29 +121,16 @@ function renderSummary() {
     $('telegram-next-run').textContent = telegram.paused ? 'Paused' : telegram.next_run_at ? dateTime(telegram.next_run_at) : '—';
     $('telegram-transfers').textContent = telegram.paused ? 'Paused' : `${telegram.active_count} active`;
   }
-  if (jav) {
-    historyPeriod("jav", jav.history_retention_days);
-    $('overview-jav-size').textContent = bytes(jav.downloaded_bytes);
-    $('jav-transfers').textContent = `${jav.active_tasks} active`;
-    $('jav-saved').textContent = bytes(jav.downloaded_bytes);
-    renderRun('jav', jav.scheduler, javRun);
-    $('jav-next-run').textContent = !jav.scheduler.enabled ? 'Disabled' : jav.scheduler.next_run_at ? dateTime(jav.scheduler.next_run_at) : 'Waiting for next run';
-  }
-  if (p91) {
-    historyPeriod("p91", p91.history_retention_days);
-    $('overview-p91-size').textContent = bytes(p91.downloaded_bytes);
-    $('p91-transfers').textContent = `${p91.active_tasks} active`;
-    $('p91-saved').textContent = bytes(p91.downloaded_bytes);
-    renderRun('p91', p91.scheduler, p91Run);
-    $('p91-next-run').textContent = !p91.scheduler.enabled ? 'Disabled' : p91.scheduler.next_run_at ? dateTime(p91.scheduler.next_run_at) : 'Waiting for next run';
-  }
-  if (pornhub) {
-    historyPeriod("pornhub", pornhub.history_retention_days);
-    $('overview-pornhub-size').textContent = bytes(pornhub.downloaded_bytes);
-    $('pornhub-transfers').textContent = `${pornhub.active_tasks} active`;
-    $('pornhub-saved').textContent = bytes(pornhub.downloaded_bytes);
-    renderRun('pornhub', pornhub.scheduler, pornhubRun);
-    $('pornhub-next-run').textContent = !pornhub.scheduler.enabled ? 'Disabled' : pornhub.scheduler.next_run_at ? dateTime(pornhub.scheduler.next_run_at) : 'Waiting for next run';
+  for (const { id, status, run } of libraries) {
+    if (!status) continue;
+    historyPeriod(id, status.history_retention_days);
+    const size = bytes(status.downloaded_bytes);
+    $(`overview-${id}-size`).textContent = size;
+    $(`${id}-saved`).textContent = size;
+    $(`${id}-transfers`).textContent = `${status.active_tasks} active`;
+    renderRun(id, status.scheduler, run);
+    $(`${id}-next-run`).textContent = !status.scheduler.enabled ? 'Disabled'
+      : status.scheduler.next_run_at ? dateTime(status.scheduler.next_run_at) : 'Waiting for next run';
   }
 }
 
@@ -172,28 +150,15 @@ function activeDownloads() {
       detail: `${item.source_name ? `${item.source_name} · ` : ''}${telegram.paused ? 'Paused' : `${sizeLabel(item.downloaded)} / ${sizeLabel(item.total)}`}`,
       progress: item.percent, status: telegram.paused ? 'Paused' : sizeLabel(item.speed),
     })),
-    ...(tasks || []).filter((task) => !terminal.has(task.state)).map((task) => ({
-      id: `jav:${task.id}`,
-      source: 'JAV', name: task.title || task.id,
-      detail: `${label(task.state)} · ${label(task.phase)}`,
-      progress: task.total_segments ? task.done_segments / task.total_segments * 100
-        : task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
-      status: libraryTransfer(task),
-    })),
-    ...(p91Tasks || []).filter((task) => !terminal.has(task.state)).map((task) => ({
-      id: `p91:${task.id}`,
-      source: '91Porn', name: task.title || task.id,
-      detail: `${label(task.state)} · ${label(task.phase)}`,
-      progress: task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
-      status: libraryTransfer(task),
-    })),
-    ...(pornhubTasks || []).filter((task) => !terminal.has(task.state)).map((task) => ({
-      id: `pornhub:${task.id}`,
-      source: 'Pornhub', name: task.title || task.id,
-      detail: `${label(task.state)} · ${label(task.phase)}`,
-      progress: task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
-      status: libraryTransfer(task),
-    })),
+    ...libraries.flatMap(({ id, name, tasks }) => (tasks || [])
+      .filter(task => !terminal.has(task.state))
+      .map(task => ({
+        id: `${id}:${task.id}`, source: name, name: task.title || task.id,
+        detail: `${label(task.state)} · ${label(task.phase)}`,
+        progress: id === 'jav' && task.total_segments ? task.done_segments / task.total_segments * 100
+          : task.total_bytes ? task.downloaded_bytes / task.total_bytes * 100 : null,
+        status: libraryTransfer(task),
+      }))),
   ];
 }
 
@@ -203,18 +168,10 @@ function recentDownloads() {
       id: `telegram:${item.id}`,
       source: 'Telegram', name: item.file_name, detail: `${sizeLabel(item.size)} · Completed`, date: new Date(item.completed_at).getTime(),
     })),
-    ...(history || []).map((item) => ({
-      id: `jav:${item.id}`,
-      source: 'JAV', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
-    })),
-    ...(p91History || []).map((item) => ({
-      id: `p91:${item.id}`,
-      source: '91Porn', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
-    })),
-    ...(pornhubHistory || []).map((item) => ({
-      id: `pornhub:${item.id}`,
-      source: 'Pornhub', name: item.title || item.id, detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
-    })),
+    ...libraries.flatMap(({ id, name, history }) => (history || []).map(item => ({
+      id: `${id}:${item.id}`, source: name, name: item.title || item.id,
+      detail: `${bytes(item.size)} · ${label(item.status)}`, date: Date.parse(item.finished_at),
+    }))),
   ].sort((a, b) => b.date - a.date).slice(0, RECENT_LIMIT);
 }
 
@@ -291,54 +248,17 @@ function renderActivity() {
   for (const item of downloads) activityRows.set(item.id, item);
   const rows = [...activityRows.values()];
   $('activity-count').textContent = `${rows.length} active`;
-  renderRows($('overview-downloads'), rows, telegram && tasks && p91Tasks && pornhubTasks ? 'All caught up. New downloads will appear here.' : 'Waiting for all modules…');
+  renderRows($('overview-downloads'), rows, telegram && libraries.every(lib => lib.tasks) ? 'All caught up. New downloads will appear here.' : 'Waiting for all modules…');
 }
 function renderHistory() {
-  renderRows($('overview-history'), recentDownloads(), telegramHistory && history && p91History && pornhubHistory ? 'No downloads recorded yet' : 'Waiting for all modules…');
+  renderRows($('overview-history'), recentDownloads(), telegramHistory && libraries.every(lib => lib.history) ? 'No downloads recorded yet' : 'Waiting for all modules…');
 }
-const providers = ['jav', 'p91', 'pornhub'];
-const libraryRevisions = new Map();
 const taskErrors = new Set();
 const historyErrors = new Set();
 function refreshError(errors, provider, failed, target, message) {
   if (failed) errors.add(provider); else errors.delete(provider);
   $(target).hidden = !errors.size;
   if (errors.size) $(target).textContent = message;
-}
-const taskResources = Object.fromEntries(providers.map((provider) => {
-  const showError = (failed) => refreshError(taskErrors, provider, failed, 'activity-error',
-    'Download task status is unavailable. Retrying automatically.');
-  return [provider, createTaskRefresh((signal) => api(`/${provider}/api/tasks`, { signal }), (data) => {
-    if (provider === 'jav') tasks = data;
-    else if (provider === 'p91') p91Tasks = data;
-    else pornhubTasks = data;
-    showError(false);
-    queueActivity();
-  }, () => { showError(true); queueActivity(); })];
-}));
-const historyResources = Object.fromEntries(providers.map((provider) => {
-  const showError = (failed) => refreshError(historyErrors, provider, failed, 'history-error',
-    'Download history is unavailable. Retrying automatically.');
-  return [provider, createSnapshotRefresh((signal) => api(`/${provider}/api/history?limit=${RECENT_LIMIT}`, { signal }), (data) => {
-    if (provider === 'jav') history = data.records;
-    else if (provider === 'p91') p91History = data.records;
-    else pornhubHistory = data.records;
-    showError(false);
-    queueHistory();
-  }, () => { showError(true); queueHistory(); })];
-}));
-function refreshTasks(provider, fresh = false) {
-  return Promise.all((provider ? [provider] : providers).map((name) => taskResources[name].refresh({ fresh })));
-}
-function refreshHistory(provider, fresh = false) {
-  return Promise.all((provider ? [provider] : providers).map((name) => historyResources[name].refresh({ fresh })));
-}
-function receiveLibraryStatus(provider, snapshot) {
-  if (!libraryRevisions.has(provider) || libraryRevisions.get(provider) !== snapshot.library_revision) {
-    libraryRevisions.set(provider, snapshot.library_revision);
-    refreshTasks(provider, true);
-    refreshHistory(provider, true);
-  }
 }
 const telegramHistoryResource = createSnapshotRefresh((signal) => api(`/telegram/api/history?limit=${RECENT_LIMIT}`, { signal }), (data) => {
   telegramHistory = data.records;
@@ -358,51 +278,60 @@ connectEvents('/telegram/events', {
     queueSummary(); queueActivity();
   },
 }, $('telegram-connection'));
-connectEvents('/jav/api/events', {
-  status(event) { jav = JSON.parse(event.data); receiveLibraryStatus('jav', jav); queueSummary(); },
-  task(event) {
-    const task = JSON.parse(event.data);
-    taskResources.jav.receive(task);
-    if (tasks) {
-      tasks = tasks.filter((item) => item.id !== task.id);
-      tasks.push(task);
-      queueActivity();
-    }
-  },
-  open() { libraryRevisions.delete('jav'); },
-  resync() { refreshTasks('jav', true); refreshHistory('jav', true); },
-}, $('jav-connection'));
-connectEvents('/p91/api/events', {
-  status(event) { p91 = JSON.parse(event.data); receiveLibraryStatus('p91', p91); queueSummary(); },
-  task(event) {
-    const task = JSON.parse(event.data);
-    taskResources.p91.receive(task);
-    if (p91Tasks) {
-      p91Tasks = p91Tasks.filter((item) => item.id !== task.id);
-      p91Tasks.push(task);
-      queueActivity();
-    }
-  },
-  open() { libraryRevisions.delete('p91'); },
-  resync() { refreshTasks('p91', true); refreshHistory('p91', true); },
-}, $('p91-connection'));
-connectEvents('/pornhub/api/events', {
-  status(event) { pornhub = JSON.parse(event.data); receiveLibraryStatus('pornhub', pornhub); queueSummary(); },
-  task(event) {
-    const task = JSON.parse(event.data);
-    taskResources.pornhub.receive(task);
-    if (pornhubTasks) {
-      pornhubTasks = pornhubTasks.filter((item) => item.id !== task.id);
-      pornhubTasks.push(task);
-      queueActivity();
-    }
-  },
-  open() { libraryRevisions.delete('pornhub'); },
-  resync() { refreshTasks('pornhub', true); refreshHistory('pornhub', true); },
-}, $('pornhub-connection'));
+for (const lib of libraries) {
+  const { id } = lib;
+  const taskError = failed => refreshError(taskErrors, id, failed, 'activity-error',
+    'Download task status is unavailable. Retrying automatically.');
+  const historyError = failed => refreshError(historyErrors, id, failed, 'history-error',
+    'Download history is unavailable. Retrying automatically.');
+  const tasks = createTaskRefresh(signal => api(`/${id}/api/tasks`, { signal }), data => {
+    lib.tasks = data;
+    taskError(false);
+    queueActivity();
+  }, () => { taskError(true); queueActivity(); });
+  const history = createSnapshotRefresh(signal => api(`/${id}/api/history?limit=${RECENT_LIMIT}`, { signal }), data => {
+    lib.history = data.records;
+    historyError(false);
+    queueHistory();
+  }, () => { historyError(true); queueHistory(); });
+
+  function resync() {
+    tasks.refresh({ fresh: true });
+    history.refresh({ fresh: true });
+  }
+  let revision = null;
+  connectEvents(`/${id}/api/events`, {
+    status(event) {
+      lib.status = JSON.parse(event.data);
+      if (revision !== lib.status.library_revision) {
+        revision = lib.status.library_revision;
+        resync();
+      }
+      queueSummary();
+    },
+    task(event) {
+      const task = JSON.parse(event.data);
+      tasks.receive(task);
+      if (lib.tasks) {
+        lib.tasks = lib.tasks.filter(item => item.id !== task.id);
+        lib.tasks.push(task);
+        queueActivity();
+      }
+    },
+    open() { revision = null; },
+    resync,
+  }, $(`${id}-connection`));
+  lib.taskResource = tasks;
+  lib.historyResource = history;
+}
+
 // Revisions reconcile cross-tab deletions; polling retries only failed reads.
-pollWhenVisible(() => Promise.all([
-  ...[...taskErrors].map((provider) => refreshTasks(provider)),
-  ...[...historyErrors].map((provider) => provider === 'telegram'
-    ? telegramHistoryResource.refresh() : refreshHistory(provider)),
-]), 30000);
+pollWhenVisible(() => {
+  const retries = [];
+  for (const lib of libraries) {
+    if (taskErrors.has(lib.id)) retries.push(lib.taskResource.refresh());
+    if (historyErrors.has(lib.id)) retries.push(lib.historyResource.refresh());
+  }
+  if (historyErrors.has('telegram')) retries.push(telegramHistoryResource.refresh());
+  return Promise.all(retries);
+}, 30000);
