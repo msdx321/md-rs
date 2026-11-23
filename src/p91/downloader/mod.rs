@@ -44,13 +44,13 @@ pub(crate) async fn download_video_with(
     card: VideoCard,
     cfg: crate::p91::config::Config,
     fetch: Fetcher,
-) {
+) -> TaskState {
     let Some(_owner) = ctx.jobs.enter() else {
-        return;
+        return TaskState::Paused;
     };
     let id = card.id.clone();
     let Some(_slot) = ctx.download_slot(&id).await else {
-        return;
+        return control(&ctx, &id);
     };
     let mut started = false;
     ctx.update_task(&id, |t| {
@@ -64,7 +64,7 @@ pub(crate) async fn download_video_with(
         t.message = "resolving video".into();
     });
     if !started {
-        return;
+        return control(&ctx, &id);
     }
 
     log::info!("[{id}] download started");
@@ -73,8 +73,7 @@ pub(crate) async fn download_video_with(
     // that output before contacting the source, even if the source is offline.
     let known_path = output_path(&cfg.save_path, &card.id, &card.title);
     if let Some((path, size)) = existing_output(&known_path).await {
-        finish_completed(&ctx, &card, &card.title, &path, size).await;
-        return;
+        return finish_completed(&ctx, &card, &card.title, &path, size).await;
     }
 
     let minimum_resolution = ctx.minimum_video_resolution();
@@ -82,17 +81,13 @@ pub(crate) async fn download_video_with(
     let resolution = tokio::select! {
         biased;
         _ = stopped(&ctx, &id) => {
-            finish_stopped(&ctx, &card).await;
-            return;
+            return finish_stopped(&ctx, &card).await
         }
         result = resolver::resolve(ctx.session(), &fetch, &cfg, &card) => result,
     };
     let resolved = match resolution {
         Ok(resolved) => resolved,
-        Err(error) => {
-            finish_failed(&ctx, &card, &format!("{error:#}")).await;
-            return;
-        }
+        Err(error) => return finish_failed(&ctx, &card, &format!("{error:#}")).await,
     };
 
     let origin = resolver::media_referer(&cfg, &card);
@@ -100,8 +95,7 @@ pub(crate) async fn download_video_with(
         let probe = tokio::select! {
             biased;
             _ = stopped(&ctx, &id) => {
-                finish_stopped(&ctx, &card).await;
-                return;
+                return finish_stopped(&ctx, &card).await;
             }
             result = tokio::time::timeout(
                 Duration::from_secs(20),
@@ -121,8 +115,7 @@ pub(crate) async fn download_video_with(
             crate::runtime::video_resolution::rejection(minimum_resolution, dimensions)
         {
             if !ctx.begin_terminal_commit(&id) {
-                finish_stopped(&ctx, &card).await;
-                return;
+                return finish_stopped(&ctx, &card).await;
             }
             log::info!("[{id}] {reason}");
             ctx.update_task(&id, |task| {
@@ -132,20 +125,19 @@ pub(crate) async fn download_video_with(
                 task.speed_kbps = 0.0;
             });
             ctx.end_terminal_commit(&id);
-            return;
+            return TaskState::Skipped;
         }
     }
 
     let title = resolved.title.clone();
     let final_path = output_path(&cfg.save_path, &card.id, &title);
     if let Err(error) = tokio::fs::create_dir_all(&cfg.save_path).await {
-        finish_failed(
+        return finish_failed(
             &ctx,
             &card,
             &format!("cannot create save directory: {error}"),
         )
         .await;
-        return;
     }
 
     log::debug!("[{id}] resolved hd={}", resolved.hd);
@@ -163,8 +155,7 @@ pub(crate) async fn download_video_with(
 
     if let Some((path, size)) = existing_output(&final_path).await {
         log::debug!("[{id}] output already exists at {}", path.display());
-        finish_completed(&ctx, &card, &title, &path, size).await;
-        return;
+        return finish_completed(&ctx, &card, &title, &path, size).await;
     }
 
     let run = download_file(
@@ -183,20 +174,18 @@ pub(crate) async fn download_video_with(
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0);
-            finish_completed(&ctx, &card, &title, &final_path, size).await;
+            finish_completed(&ctx, &card, &title, &final_path, size).await
         }
-        Ok(Outcome::Paused | Outcome::Cancelled) => {
-            finish_stopped(&ctx, &card).await;
-        }
+        Ok(Outcome::Paused | Outcome::Cancelled) => finish_stopped(&ctx, &card).await,
         Err(error) => {
             // Keep the partial file: a failed transfer is resumable.
-            finish_failed(&ctx, &card, &format!("{error:#}")).await;
+            finish_failed(&ctx, &card, &format!("{error:#}")).await
         }
     }
 }
 
 /// Reconcile the latest accepted stop, including errors returned during flush.
-async fn finish_stopped(ctx: &AppCtx, card: &VideoCard) {
+async fn finish_stopped(ctx: &AppCtx, card: &VideoCard) -> TaskState {
     ctx.update_task(&card.id, |task| {
         if task.state != TaskState::Cancelled {
             task.state = TaskState::Paused;
@@ -218,6 +207,9 @@ async fn finish_stopped(ctx: &AppCtx, card: &VideoCard) {
             task.message = "cancelled".into();
             task.speed_kbps = 0.0;
         });
+        TaskState::Cancelled
+    } else {
+        TaskState::Paused
     }
 }
 
@@ -513,10 +505,9 @@ async fn finish_completed(
     title: &str,
     path: &Path,
     size: u64,
-) {
+) -> TaskState {
     if !ctx.begin_terminal_commit(&card.id) {
-        finish_stopped(ctx, card).await;
-        return;
+        return finish_stopped(ctx, card).await;
     }
     log::info!(
         "[{}] download complete bytes={size} path={}",
@@ -534,28 +525,33 @@ async fn finish_completed(
         finished_at: now_rfc3339(),
         error: None,
     };
-    if let Err(error) = ctx.upsert_record(record).await {
-        log::error!("cannot persist state: {error:#}");
-    }
+    let (state, phase, message) = match ctx.upsert_record(record).await {
+        Ok(()) => (TaskState::Completed, "completed", "completed".to_owned()),
+        Err(error) => {
+            let message = format!("file saved, but history could not be updated: {error:#}");
+            log::error!("[{}] {message}", card.id);
+            (TaskState::Failed, "failed", message)
+        }
+    };
     ctx.update_task(&card.id, |t| {
-        t.state = TaskState::Completed;
+        t.state = state;
         t.title = title.to_string();
         t.downloaded_bytes = size;
         t.total_bytes = size;
-        t.phase = "completed".into();
+        t.phase = phase.into();
         t.total_segments = 1;
         t.done_segments = 1;
         t.speed_kbps = 0.0;
-        t.message = "completed".into();
+        t.message = message;
         t.path = path.to_string_lossy().to_string();
     });
     ctx.end_terminal_commit(&card.id);
+    state
 }
 
-async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) {
+async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) -> TaskState {
     if !ctx.begin_terminal_commit(&card.id) {
-        finish_stopped(ctx, card).await;
-        return;
+        return finish_stopped(ctx, card).await;
     }
     log::error!("[{}] download failed: {message}", card.id);
     let record = Record {
@@ -580,6 +576,7 @@ async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) {
         t.message = message;
     });
     ctx.end_terminal_commit(&card.id);
+    TaskState::Failed
 }
 
 #[cfg(test)]
@@ -950,7 +947,7 @@ mod tests {
                     run.await.unwrap();
                     assert_eq!(
                         ctx.task_state("test"),
-                        Some(if completed {
+                        Some(if completed && !database_error {
                             TaskState::Completed
                         } else {
                             TaskState::Failed

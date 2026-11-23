@@ -199,9 +199,7 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
             let ctx = Arc::clone(&ctx);
             let cfg = link.cfg.clone();
             let fetch = link.fetch.clone();
-            let worker = set.spawn(async move {
-                download_video_with(ctx, card, cfg, fetch).await;
-            });
+            let worker = set.spawn(async move { download_video_with(ctx, card, cfg, fetch).await });
             workers.insert(worker.id(), (index, id));
         }
 
@@ -209,25 +207,17 @@ pub async fn run_daily(ctx: Arc<AppCtx>, trigger: &str) -> anyhow::Result<DailyR
             break;
         };
         let worker_id = match &joined {
-            Ok((id, ())) => *id,
+            Ok((id, _)) => *id,
             Err(error) => error.id(),
         };
         let (index, id) = workers.remove(&worker_id).expect("registered worker");
         let link = &mut links[index];
         link.in_flight -= 1;
         match joined {
-            Ok(_) if ctx.is_completed(&id) => link.report.completed += 1,
-            Ok(_) if ctx.task_state(&id) == Some(TaskState::Skipped) => link.report.skipped += 1,
-            Ok(_) => {
-                if matches!(
-                    ctx.task_state(&id),
-                    Some(TaskState::Paused | TaskState::Cancelled)
-                ) {
-                    stopped = true;
-                } else {
-                    link.report.failed += 1;
-                }
-            }
+            Ok((_, TaskState::Completed)) => link.report.completed += 1,
+            Ok((_, TaskState::Skipped)) => link.report.skipped += 1,
+            Ok((_, TaskState::Paused | TaskState::Cancelled)) => stopped = true,
+            Ok(_) => link.report.failed += 1,
             Err(error) => {
                 link.report.failed += 1;
                 ctx.update_task(&id, |task| {

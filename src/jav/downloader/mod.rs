@@ -346,21 +346,26 @@ async fn finish_completed(
         finished_at: now_rfc3339(),
         error: None,
     };
-    if let Err(e) = ctx.upsert_record(record).await {
-        log::error!("cannot persist state: {e:#}");
-    }
+    let (state, phase, message) = match ctx.upsert_record(record).await {
+        Ok(()) => (TaskState::Completed, "completed", "completed".to_owned()),
+        Err(error) => {
+            let message = format!("file saved, but history could not be updated: {error:#}");
+            log::error!("[{}] {message}", card.id);
+            (TaskState::Failed, "failed", message)
+        }
+    };
     ctx.update_task(&card.id, |t| {
-        t.state = TaskState::Completed;
+        t.state = state;
         t.title = title.to_string();
         t.downloaded_bytes = size;
         t.total_bytes = size;
-        t.phase = "completed".into();
+        t.phase = phase.into();
         if t.total_segments == 0 {
             t.total_segments = 1;
         }
         t.done_segments = t.total_segments;
         t.speed_kbps = 0.0;
-        t.message = "completed".to_string();
+        t.message = message;
         t.path = path.to_string_lossy().to_string();
     });
     ctx.end_terminal_commit(&card.id);
@@ -1709,7 +1714,7 @@ mod tests {
                     run.await.unwrap();
                     assert_eq!(
                         ctx.task_state("test"),
-                        Some(if completed {
+                        Some(if completed && !database_error {
                             TaskState::Completed
                         } else {
                             TaskState::Failed
