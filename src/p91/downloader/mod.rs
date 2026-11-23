@@ -369,12 +369,7 @@ async fn download_file(
         }
         true => {
             let written = downloaded.load(Ordering::Relaxed);
-            if let Some(total) = total {
-                anyhow::ensure!(
-                    written == total,
-                    "incomplete download: {written}/{total} bytes"
-                );
-            }
+            crate::runtime::video_transfer::validate_size(written, total)?;
             if !ctx.begin_terminal_commit(id) {
                 return Ok(stopped_outcome(control(ctx, id)));
             }

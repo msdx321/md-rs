@@ -9,6 +9,7 @@ mod service;
 mod task;
 pub mod video_filename;
 pub mod video_resolution;
+pub mod video_transfer;
 pub mod web;
 
 pub use service::{RunningEngine, shutdown_all};
