@@ -44,6 +44,7 @@ pub struct HistorySummary {
 }
 
 impl State {
+    #[cfg(test)]
     /// True when this video has a completed download on record.
     pub fn is_completed(&self, id: &str) -> bool {
         self.records.iter().any(|r| r.id == id && r.is_completed())

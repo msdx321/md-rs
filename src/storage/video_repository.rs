@@ -35,6 +35,7 @@ impl Provider {
 }
 
 struct Cache {
+    completed: HashSet<String>,
     state: State,
     summary: Option<CachedSummary>,
 }
@@ -51,6 +52,12 @@ impl Repository {
         let state = Self::load_state(&database, provider).await?;
         Ok(Self {
             cache: Mutex::new(Cache {
+                completed: state
+                    .records
+                    .iter()
+                    .filter(|r| r.is_completed())
+                    .map(|r| r.id.clone())
+                    .collect(),
                 state,
                 summary: None,
             }),
@@ -102,8 +109,8 @@ impl Repository {
         self.cache
             .lock()
             .expect("cache lock poisoned")
-            .state
-            .is_completed(id)
+            .completed
+            .contains(id)
     }
 
     /// Commit before updating the cache so failed writes never look durable.
@@ -134,6 +141,11 @@ impl Repository {
         .await?;
         tx.commit().await?;
         let mut cache = self.cache.lock().expect("cache lock poisoned");
+        if record.is_completed() {
+            cache.completed.insert(record.id.clone());
+        } else {
+            cache.completed.remove(&record.id);
+        }
         cache.state.upsert(record);
         cache.summary = None;
         Ok(())
@@ -149,6 +161,7 @@ impl Repository {
         .await?;
         tx.commit().await?;
         let mut cache = self.cache.lock().expect("cache lock poisoned");
+        cache.completed.remove(id);
         cache.state.forget(id);
         cache.summary = None;
         Ok(())
@@ -205,6 +218,9 @@ impl Repository {
         }
         tx.commit().await?;
         let mut cache = self.cache.lock().expect("cache lock poisoned");
+        for id in ids {
+            cache.completed.remove(id);
+        }
         cache
             .state
             .records
