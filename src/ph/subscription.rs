@@ -49,7 +49,7 @@ impl Subscription {
         let mut page = Some(1);
         while let Some(current) = page.filter(|page| *page <= cfg.max_pages) {
             anyhow::ensure!(
-                !ctx.jobs.is_closed() && !ctx.daily_cancel.load(Ordering::Acquire),
+                !ctx.transfers.jobs.is_closed() && !ctx.daily_cancel.load(Ordering::Acquire),
                 "upload scan stopped"
             );
             let listing = scraper::fetch_popular(ctx.session(), fetch, cfg, current).await?;
@@ -83,7 +83,7 @@ impl Subscription {
             "previous uploads were not found within the page limit; increase the scan limit before syncing again"
         );
         anyhow::ensure!(
-            !ctx.jobs.is_closed() && !ctx.daily_cancel.load(Ordering::Acquire),
+            !ctx.transfers.jobs.is_closed() && !ctx.daily_cancel.load(Ordering::Acquire),
             "upload scan stopped"
         );
         fetch.check_current()?;

@@ -89,7 +89,7 @@ async fn status(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
 fn status_snapshot(ctx: &AppCtx) -> Value {
     let cfg = ctx.config();
     let history = ctx.history_summary();
-    let active = ctx.running_task_count();
+    let active = ctx.transfers.running_task_count();
     json!({
         "access_configured": ctx.access_configured(),
         "account_configured": ctx.account_configured(),
@@ -102,7 +102,7 @@ fn status_snapshot(ctx: &AppCtx) -> Value {
         "top_n": cfg.listing_links().iter().map(|link| link.daily_quota).sum::<usize>(),
         "links": cfg.listing_links(),
         "history_retention_days": ctx.history_retention_days(),
-        "library_revision": ctx.library_revision(),
+        "library_revision": ctx.transfers.library_revision(),
         "downloaded": history.completed,
         "failed_records": history.failed,
         "downloaded_bytes": history.total_bytes,
@@ -202,6 +202,7 @@ async fn list_videos(
             }
             let downloaded = ctx.is_completed(&card.id);
             let in_progress = ctx
+                .transfers
                 .task(&card.id)
                 .map(|t| !t.is_terminal())
                 .unwrap_or(false);
@@ -298,7 +299,7 @@ async fn thumbnail(
 }
 
 async fn list_tasks(State(ctx): State<Arc<AppCtx>>) -> Json<Vec<TaskInfo>> {
-    Json(ctx.visible_tasks())
+    Json(ctx.transfers.visible_tasks())
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,7 +357,7 @@ async fn start_download(
         hd: false,
     };
 
-    if ctx.jobs.is_closed() {
+    if ctx.transfers.jobs.is_closed() {
         return Err(ApiError::bad_request(
             "service shutting down; download rejected",
         ));
@@ -364,12 +365,13 @@ async fn start_download(
     let mut info = TaskInfo::new(&card.id, &card.url);
     info.title = card.title.clone();
     info.vid = card.vid.clone();
-    if !ctx.register_task(info) {
+    if !ctx.transfers.register_task(info) {
         return Ok(Json(json!({ "status": "already_running", "id": id })));
     }
 
     let ctx_for_task = Arc::clone(&ctx);
-    ctx.jobs
+    ctx.transfers
+        .jobs
         .spawn(async move {
             crate::ph::downloader::download_video_with(ctx_for_task.clone(), card, cfg, fetch)
                 .await;
@@ -386,9 +388,10 @@ async fn pause_task(
     State(ctx): State<Arc<AppCtx>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    ctx.task(&id)
+    ctx.transfers
+        .task(&id)
         .ok_or_else(|| ApiError::not_found("no such task"))?;
-    if !ctx.stop_task(&id, false) {
+    if !ctx.transfers.stop_task(&id, false) {
         return Err(ApiError::bad_request(
             "task is finalizing or is not running or queued; pause rejected",
         ));
@@ -410,9 +413,10 @@ async fn cancel_task(
     State(ctx): State<Arc<AppCtx>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    ctx.task(&id)
+    ctx.transfers
+        .task(&id)
         .ok_or_else(|| ApiError::not_found("no such task"))?;
-    if !ctx.stop_task(&id, true) {
+    if !ctx.transfers.stop_task(&id, true) {
         return Err(ApiError::bad_request(
             "task is finalizing or already finished; cancellation rejected",
         ));
@@ -421,18 +425,20 @@ async fn cancel_task(
 }
 
 async fn clear_failed_tasks(State(ctx): State<Arc<AppCtx>>) -> Json<Value> {
-    Json(json!({ "count": ctx.clear_failed_tasks() }))
+    Json(json!({ "count": ctx.transfers.clear_failed_tasks() }))
 }
 
 async fn dismiss_task(
     State(ctx): State<Arc<AppCtx>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    match ctx.task(&id) {
+    match ctx.transfers.task(&id) {
         Some(task) if !task.is_terminal() => Err(ApiError::bad_request(
             "cancel the task before dismissing it",
         )),
-        Some(_) if ctx.drop_task(&id) => Ok(Json(json!({ "status": "dismissed", "id": id }))),
+        Some(_) if ctx.transfers.drop_task(&id) => {
+            Ok(Json(json!({ "status": "dismissed", "id": id })))
+        }
         Some(_) => Err(ApiError::bad_request("task is still unwinding")),
         None => Err(ApiError::not_found("no such task")),
     }
@@ -440,7 +446,8 @@ async fn dismiss_task(
 
 async fn run_daily(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>> {
     let ctx_for_job = Arc::clone(&ctx);
-    ctx.jobs
+    ctx.transfers
+        .jobs
         .spawn(async move {
             if let Err(e) = scheduler::run_daily(ctx_for_job, "manual").await {
                 log::error!("manual daily run failed: {e:#}");
@@ -513,7 +520,7 @@ async fn clear_history(State(ctx): State<Arc<AppCtx>>) -> ApiResult<Json<Value>>
 }
 
 async fn events(State(ctx): State<Arc<AppCtx>>) -> impl IntoResponse {
-    let rx = ctx.subscribe();
+    let rx = ctx.transfers.subscribe();
     let tasks = BroadcastStream::new(rx).filter_map(|result| async move {
         match result {
             Ok(task) => Some(Ok::<_, Infallible>(
@@ -525,7 +532,7 @@ async fn events(State(ctx): State<Arc<AppCtx>>) -> impl IntoResponse {
     });
     // WatchStream emits its current value immediately, flushing the SSE body
     // even when no tasks are running.
-    let statuses = WatchStream::new(ctx.subscribe_status()).map(move |()| {
+    let statuses = WatchStream::new(ctx.transfers.subscribe_status()).map(move |()| {
         Ok::<_, Infallible>(
             Event::default()
                 .event("status")

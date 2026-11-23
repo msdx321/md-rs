@@ -45,7 +45,7 @@ pub(crate) async fn download_video_with(
     cfg: crate::ph::config::Config,
     fetch: Fetcher,
 ) -> TaskState {
-    let Some(_owner) = ctx.jobs.enter() else {
+    let Some(_owner) = ctx.transfers.jobs.enter() else {
         return TaskState::Paused;
     };
     let id = card.id.clone();
@@ -53,7 +53,7 @@ pub(crate) async fn download_video_with(
         return control(&ctx, &id);
     };
     let mut started = false;
-    ctx.update_task(&id, |t| {
+    ctx.transfers.update_task(&id, |t| {
         if t.state != TaskState::Queued {
             return;
         }
@@ -96,17 +96,17 @@ pub(crate) async fn download_video_with(
         if let Some(reason) =
             crate::runtime::video_resolution::rejection(minimum_resolution, dimensions)
         {
-            if !ctx.begin_terminal_commit(&id) {
+            if !ctx.transfers.begin_terminal_commit(&id) {
                 return finish_stopped(&ctx, &card).await;
             }
             log::info!("[{id}] {reason}");
-            ctx.update_task(&id, |task| {
+            ctx.transfers.update_task(&id, |task| {
                 task.state = TaskState::Skipped;
                 task.phase = "filtered".into();
                 task.message = reason;
                 task.speed_kbps = 0.0;
             });
-            ctx.end_terminal_commit(&id);
+            ctx.transfers.end_terminal_commit(&id);
             return TaskState::Skipped;
         }
     }
@@ -123,7 +123,7 @@ pub(crate) async fn download_video_with(
     }
 
     log::debug!("[{id}] resolved quality={}", resolved.quality_label());
-    ctx.update_task(&id, |t| {
+    ctx.transfers.update_task(&id, |t| {
         t.title = title.clone();
         t.path = final_path.to_string_lossy().to_string();
         t.source_url = format!("Pornhub ({})", resolved.quality_label());
@@ -164,7 +164,7 @@ pub(crate) async fn download_video_with(
 
 /// Reconcile the latest accepted stop, including errors returned during flush.
 async fn finish_stopped(ctx: &AppCtx, card: &VideoCard) -> TaskState {
-    ctx.update_task(&card.id, |task| {
+    ctx.transfers.update_task(&card.id, |task| {
         if task.state != TaskState::Cancelled {
             task.state = TaskState::Paused;
             task.phase = "paused".into();
@@ -173,14 +173,14 @@ async fn finish_stopped(ctx: &AppCtx, card: &VideoCard) -> TaskState {
         }
     });
     if control(ctx, &card.id) == TaskState::Cancelled {
-        let task = ctx.task(&card.id);
+        let task = ctx.transfers.task(&card.id);
         let path = task
             .filter(|task| !task.path.is_empty())
             .map(|task| PathBuf::from(task.path))
             .unwrap_or_else(|| output_path(&ctx.config().save_path, &card.id, &card.title));
         let _ = tokio::fs::remove_file(part_path(&path)).await;
         let _ = tokio::fs::remove_file(source_path(&path)).await;
-        ctx.update_task(&card.id, |task| {
+        ctx.transfers.update_task(&card.id, |task| {
             task.state = TaskState::Cancelled;
             task.phase = "cancelled".into();
             task.message = "cancelled".into();
@@ -239,12 +239,14 @@ async fn existing_output(path: &Path) -> Option<(PathBuf, u64)> {
 
 /// Current control state of a task (`Cancelled` when it has vanished).
 fn control(ctx: &AppCtx, id: &str) -> TaskState {
-    ctx.task_control(id).unwrap_or(TaskState::Cancelled)
+    ctx.transfers
+        .task_control(id)
+        .unwrap_or(TaskState::Cancelled)
 }
 
 async fn stopped(ctx: &AppCtx, id: &str) -> TaskState {
     // Only state transitions wake this, not every task's progress update.
-    let mut changes = ctx.subscribe_status();
+    let mut changes = ctx.transfers.subscribe_status();
     loop {
         let state = control(ctx, id);
         if state != TaskState::Running || changes.changed().await.is_err() {
@@ -290,7 +292,7 @@ async fn download_file(
             offset > 0 && complete == Some(offset),
             "server rejected the resume offset {offset}"
         );
-        if !ctx.begin_terminal_commit(id) {
+        if !ctx.transfers.begin_terminal_commit(id) {
             return Ok(stopped_outcome(control(ctx, id)));
         }
         tokio::fs::rename(&part, final_path).await?;
@@ -341,7 +343,7 @@ async fn download_file(
                 let bytes = downloaded.load(Ordering::Relaxed);
                 let speed = tracker.sample(Instant::now(), bytes);
                 let total_bytes = total_shared.load(Ordering::Relaxed);
-                ctx.update_task(&id, |t| {
+                ctx.transfers.update_task(&id, |t| {
                     t.downloaded_bytes = bytes;
                     t.total_bytes = total_bytes;
                     t.speed_kbps = speed;
@@ -369,7 +371,7 @@ async fn download_file(
         true => {
             let written = downloaded.load(Ordering::Relaxed);
             crate::runtime::video_transfer::validate_size(written, total)?;
-            if !ctx.begin_terminal_commit(id) {
+            if !ctx.transfers.begin_terminal_commit(id) {
                 return Ok(stopped_outcome(control(ctx, id)));
             }
             tokio::fs::rename(&part, final_path).await?;
@@ -379,7 +381,7 @@ async fn download_file(
     };
     // Publish the final counters before the caller flips the state.
     let written = downloaded.load(Ordering::Relaxed);
-    ctx.update_task(id, |t| {
+    ctx.transfers.update_task(id, |t| {
         t.downloaded_bytes = written;
         if let Some(total) = total {
             t.total_bytes = total;
@@ -413,7 +415,7 @@ async fn transfer(
     let result = async {
         let mut stream = response.bytes_stream();
         // Only state transitions wake this, not every task's progress update.
-        let mut changes = ctx.subscribe_status();
+        let mut changes = ctx.transfers.subscribe_status();
         loop {
             if control(ctx, id) != TaskState::Running {
                 return Ok(false);
@@ -514,7 +516,7 @@ async fn finish_completed(
     path: &Path,
     size: u64,
 ) -> TaskState {
-    if !ctx.begin_terminal_commit(&card.id) {
+    if !ctx.transfers.begin_terminal_commit(&card.id) {
         return finish_stopped(ctx, card).await;
     }
     log::info!(
@@ -541,7 +543,7 @@ async fn finish_completed(
             (TaskState::Failed, "failed", message)
         }
     };
-    ctx.update_task(&card.id, |t| {
+    ctx.transfers.update_task(&card.id, |t| {
         t.state = state;
         t.title = title.to_string();
         t.downloaded_bytes = size;
@@ -553,12 +555,12 @@ async fn finish_completed(
         t.message = message;
         t.path = path.to_string_lossy().to_string();
     });
-    ctx.end_terminal_commit(&card.id);
+    ctx.transfers.end_terminal_commit(&card.id);
     state
 }
 
 async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) -> TaskState {
-    if !ctx.begin_terminal_commit(&card.id) {
+    if !ctx.transfers.begin_terminal_commit(&card.id) {
         return finish_stopped(ctx, card).await;
     }
     log::error!("[{}] download failed: {message}", card.id);
@@ -577,12 +579,12 @@ async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) -> Ta
         log::error!("cannot persist state: {error:#}");
     }
     let message = message.to_string();
-    ctx.update_task(&card.id, |t| {
+    ctx.transfers.update_task(&card.id, |t| {
         t.state = TaskState::Failed;
         t.phase = "failed".into();
         t.speed_kbps = 0.0;
         t.message = message;
     });
-    ctx.end_terminal_commit(&card.id);
+    ctx.transfers.end_terminal_commit(&card.id);
     TaskState::Failed
 }

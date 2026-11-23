@@ -45,7 +45,7 @@ pub(crate) async fn download_video_with(
     cfg: crate::p91::config::Config,
     fetch: Fetcher,
 ) -> TaskState {
-    let Some(_owner) = ctx.jobs.enter() else {
+    let Some(_owner) = ctx.transfers.jobs.enter() else {
         return TaskState::Paused;
     };
     let id = card.id.clone();
@@ -53,7 +53,7 @@ pub(crate) async fn download_video_with(
         return control(&ctx, &id);
     };
     let mut started = false;
-    ctx.update_task(&id, |t| {
+    ctx.transfers.update_task(&id, |t| {
         if t.state != TaskState::Queued {
             return;
         }
@@ -114,17 +114,17 @@ pub(crate) async fn download_video_with(
         if let Some(reason) =
             crate::runtime::video_resolution::rejection(minimum_resolution, dimensions)
         {
-            if !ctx.begin_terminal_commit(&id) {
+            if !ctx.transfers.begin_terminal_commit(&id) {
                 return finish_stopped(&ctx, &card).await;
             }
             log::info!("[{id}] {reason}");
-            ctx.update_task(&id, |task| {
+            ctx.transfers.update_task(&id, |task| {
                 task.state = TaskState::Skipped;
                 task.phase = "filtered".into();
                 task.message = reason;
                 task.speed_kbps = 0.0;
             });
-            ctx.end_terminal_commit(&id);
+            ctx.transfers.end_terminal_commit(&id);
             return TaskState::Skipped;
         }
     }
@@ -141,7 +141,7 @@ pub(crate) async fn download_video_with(
     }
 
     log::debug!("[{id}] resolved hd={}", resolved.hd);
-    ctx.update_task(&id, |t| {
+    ctx.transfers.update_task(&id, |t| {
         t.title = title.clone();
         t.path = final_path.to_string_lossy().to_string();
         t.source_url = format!(
@@ -186,7 +186,7 @@ pub(crate) async fn download_video_with(
 
 /// Reconcile the latest accepted stop, including errors returned during flush.
 async fn finish_stopped(ctx: &AppCtx, card: &VideoCard) -> TaskState {
-    ctx.update_task(&card.id, |task| {
+    ctx.transfers.update_task(&card.id, |task| {
         if task.state != TaskState::Cancelled {
             task.state = TaskState::Paused;
             task.phase = "paused".into();
@@ -195,13 +195,13 @@ async fn finish_stopped(ctx: &AppCtx, card: &VideoCard) -> TaskState {
         }
     });
     if control(ctx, &card.id) == TaskState::Cancelled {
-        let task = ctx.task(&card.id);
+        let task = ctx.transfers.task(&card.id);
         let path = task
             .filter(|task| !task.path.is_empty())
             .map(|task| PathBuf::from(task.path))
             .unwrap_or_else(|| output_path(&ctx.config().save_path, &card.id, &card.title));
         let _ = tokio::fs::remove_file(part_path(&path)).await;
-        ctx.update_task(&card.id, |task| {
+        ctx.transfers.update_task(&card.id, |task| {
             task.state = TaskState::Cancelled;
             task.phase = "cancelled".into();
             task.message = "cancelled".into();
@@ -230,12 +230,14 @@ async fn existing_output(path: &Path) -> Option<(PathBuf, u64)> {
 
 /// Current control state of a task (`Cancelled` when it has vanished).
 fn control(ctx: &AppCtx, id: &str) -> TaskState {
-    ctx.task_control(id).unwrap_or(TaskState::Cancelled)
+    ctx.transfers
+        .task_control(id)
+        .unwrap_or(TaskState::Cancelled)
 }
 
 async fn stopped(ctx: &AppCtx, id: &str) -> TaskState {
     // Only state transitions wake this, not every task's progress update.
-    let mut changes = ctx.subscribe_status();
+    let mut changes = ctx.transfers.subscribe_status();
     loop {
         let state = control(ctx, id);
         if state != TaskState::Running || changes.changed().await.is_err() {
@@ -284,7 +286,7 @@ async fn download_file(
             offset > 0 && complete == Some(offset),
             "server rejected the resume offset {offset}"
         );
-        if !ctx.begin_terminal_commit(id) {
+        if !ctx.transfers.begin_terminal_commit(id) {
             return Ok(stopped_outcome(control(ctx, id)));
         }
         tokio::fs::rename(&part, final_path).await?;
@@ -334,7 +336,7 @@ async fn download_file(
                 let bytes = downloaded.load(Ordering::Relaxed);
                 let speed = tracker.sample(Instant::now(), bytes);
                 let total_bytes = total_shared.load(Ordering::Relaxed);
-                ctx.update_task(&id, |t| {
+                ctx.transfers.update_task(&id, |t| {
                     t.downloaded_bytes = bytes;
                     t.total_bytes = total_bytes;
                     t.speed_kbps = speed;
@@ -362,7 +364,7 @@ async fn download_file(
         true => {
             let written = downloaded.load(Ordering::Relaxed);
             crate::runtime::video_transfer::validate_size(written, total)?;
-            if !ctx.begin_terminal_commit(id) {
+            if !ctx.transfers.begin_terminal_commit(id) {
                 return Ok(stopped_outcome(control(ctx, id)));
             }
             tokio::fs::rename(&part, final_path).await?;
@@ -371,7 +373,7 @@ async fn download_file(
     };
     // Publish the final counters before the caller flips the state.
     let written = downloaded.load(Ordering::Relaxed);
-    ctx.update_task(id, |t| {
+    ctx.transfers.update_task(id, |t| {
         t.downloaded_bytes = written;
         if let Some(total) = total {
             t.total_bytes = total;
@@ -405,7 +407,7 @@ async fn transfer(
     let result = async {
         let mut stream = response.bytes_stream();
         // Only state transitions wake this, not every task's progress update.
-        let mut changes = ctx.subscribe_status();
+        let mut changes = ctx.transfers.subscribe_status();
         loop {
             if control(ctx, id) != TaskState::Running {
                 return Ok(false);
@@ -506,7 +508,7 @@ async fn finish_completed(
     path: &Path,
     size: u64,
 ) -> TaskState {
-    if !ctx.begin_terminal_commit(&card.id) {
+    if !ctx.transfers.begin_terminal_commit(&card.id) {
         return finish_stopped(ctx, card).await;
     }
     log::info!(
@@ -533,7 +535,7 @@ async fn finish_completed(
             (TaskState::Failed, "failed", message)
         }
     };
-    ctx.update_task(&card.id, |t| {
+    ctx.transfers.update_task(&card.id, |t| {
         t.state = state;
         t.title = title.to_string();
         t.downloaded_bytes = size;
@@ -545,12 +547,12 @@ async fn finish_completed(
         t.message = message;
         t.path = path.to_string_lossy().to_string();
     });
-    ctx.end_terminal_commit(&card.id);
+    ctx.transfers.end_terminal_commit(&card.id);
     state
 }
 
 async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) -> TaskState {
-    if !ctx.begin_terminal_commit(&card.id) {
+    if !ctx.transfers.begin_terminal_commit(&card.id) {
         return finish_stopped(ctx, card).await;
     }
     log::error!("[{}] download failed: {message}", card.id);
@@ -569,13 +571,13 @@ async fn finish_failed(ctx: &Arc<AppCtx>, card: &VideoCard, message: &str) -> Ta
         log::error!("cannot persist state: {error:#}");
     }
     let message = message.to_string();
-    ctx.update_task(&card.id, |t| {
+    ctx.transfers.update_task(&card.id, |t| {
         t.state = TaskState::Failed;
         t.phase = "failed".into();
         t.speed_kbps = 0.0;
         t.message = message;
     });
-    ctx.end_terminal_commit(&card.id);
+    ctx.transfers.end_terminal_commit(&card.id);
     TaskState::Failed
 }
 
@@ -668,7 +670,7 @@ mod tests {
             );
             let mut task = TaskInfo::new("test", "http://127.0.0.1/");
             task.state = TaskState::Running;
-            assert!(ctx.register_task(task));
+            assert!(ctx.transfers.register_task(task));
             ctx
         }
 
@@ -714,7 +716,7 @@ mod tests {
                 assert!(matches!(run.await.unwrap().unwrap(), Outcome::Done));
                 assert_eq!(tokio::fs::read(&path).await.unwrap(), b"abcdef");
                 assert!(!part_path(&path).exists());
-                let task = ctx.task("test").unwrap();
+                let task = ctx.transfers.task("test").unwrap();
                 assert_eq!((task.downloaded_bytes, task.total_bytes), (6, 6));
             }
         }
@@ -816,7 +818,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-                ctx.update_task("test", |task| {
+                ctx.transfers.update_task("test", |task| {
                     if cancel {
                         task.state = TaskState::Cancelled;
                     } else {
@@ -886,9 +888,13 @@ mod tests {
                 for database_error in [false, true] {
                     let root = tempfile::tempdir().unwrap();
                     let (ctx, database, card) = lifecycle_fixture(root.path()).await;
-                    assert!(ctx.register_task(TaskInfo::new(&card.id, &card.url)));
+                    assert!(
+                        ctx.transfers
+                            .register_task(TaskInfo::new(&card.id, &card.url))
+                    );
                     let slot = ctx.download_slot(&card.id).await.unwrap();
-                    ctx.update_task(&card.id, |task| task.state = TaskState::Running);
+                    ctx.transfers
+                        .update_task(&card.id, |task| task.state = TaskState::Running);
                     let cfg = ctx.config();
                     let cache = cfg.save_path.clone();
                     tokio::fs::create_dir_all(&cache).await.unwrap();
@@ -906,6 +912,7 @@ mod tests {
                     }
                     let owner_ctx = ctx.clone();
                     let run = ctx
+                        .transfers
                         .jobs
                         .spawn(async move {
                             let _slot = slot;
@@ -931,22 +938,22 @@ mod tests {
                     .await
                     .unwrap();
                     assert!(part_path(&output_path(&cache, "test", "fixture")).exists());
-                    assert!(!ctx.stop_task("test", false));
-                    assert!(!ctx.stop_task("test", true));
+                    assert!(!ctx.transfers.stop_task("test", false));
+                    assert!(!ctx.transfers.stop_task("test", true));
                     assert!(!crate::p91::scheduler::resume_task(ctx.clone(), "test"));
-                    assert_eq!(ctx.task_state("test"), Some(TaskState::Running));
+                    assert_eq!(ctx.transfers.task_state("test"), Some(TaskState::Running));
                     let shutdown = ctx.shutdown();
                     tokio::pin!(shutdown);
                     assert!(futures_util::poll!(&mut shutdown).is_pending());
                     assert!(!run.is_finished());
-                    assert!(!ctx.register_task(TaskInfo::new("new", "u")));
+                    assert!(!ctx.transfers.register_task(TaskInfo::new("new", "u")));
                     drop(gate);
                     tokio::time::timeout(Duration::from_secs(5), &mut shutdown)
                         .await
                         .unwrap();
                     run.await.unwrap();
                     assert_eq!(
-                        ctx.task_state("test"),
+                        ctx.transfers.task_state("test"),
                         Some(if completed && !database_error {
                             TaskState::Completed
                         } else {
@@ -964,9 +971,13 @@ mod tests {
                 for cancel in [false, true] {
                     let root = tempfile::tempdir().unwrap();
                     let (ctx, _, card) = lifecycle_fixture(root.path()).await;
-                    assert!(ctx.register_task(TaskInfo::new(&card.id, &card.url)));
+                    assert!(
+                        ctx.transfers
+                            .register_task(TaskInfo::new(&card.id, &card.url))
+                    );
                     let _slot = ctx.download_slot(&card.id).await.unwrap();
-                    ctx.update_task(&card.id, |task| task.state = TaskState::Running);
+                    ctx.transfers
+                        .update_task(&card.id, |task| task.state = TaskState::Running);
                     let cfg = ctx.config();
                     let cache = cfg.save_path.clone();
                     tokio::fs::create_dir_all(&cache).await.unwrap();
@@ -976,7 +987,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    assert!(ctx.stop_task("test", cancel));
+                    assert!(ctx.transfers.stop_task("test", cancel));
                     if completed {
                         finish_completed(
                             &ctx,
@@ -990,7 +1001,7 @@ mod tests {
                         finish_failed(&ctx, &card, "fixture failure").await;
                     }
                     assert_eq!(
-                        ctx.task_state("test"),
+                        ctx.transfers.task_state("test"),
                         Some(if cancel {
                             TaskState::Cancelled
                         } else {
