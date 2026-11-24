@@ -4,9 +4,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::response::sse::Event;
-use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
@@ -19,6 +18,7 @@ use crate::jav::app::{AppCtx, TaskInfo};
 use crate::jav::config::Config;
 use crate::jav::scheduler;
 use crate::jav::source::scraper::{self, VideoCard};
+use crate::runtime::web::{ApiError, ApiResult};
 
 pub fn router(ctx: Arc<AppCtx>) -> Router {
     Router::new()
@@ -42,42 +42,6 @@ pub fn router(ctx: Arc<AppCtx>) -> Router {
         .route("/api/events", get(events))
         .with_state(ctx)
 }
-
-// ── error type ───────────────────────────────────────────────────────────────
-
-pub struct ApiError(StatusCode, String);
-
-impl ApiError {
-    fn bad_request(msg: impl Into<String>) -> Self {
-        Self(StatusCode::BAD_REQUEST, msg.into())
-    }
-    fn not_found(msg: impl Into<String>) -> Self {
-        Self(StatusCode::NOT_FOUND, msg.into())
-    }
-    fn internal(msg: impl Into<String>) -> Self {
-        Self(StatusCode::INTERNAL_SERVER_ERROR, msg.into())
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
-    }
-}
-
-impl From<anyhow::Error> for ApiError {
-    fn from(e: anyhow::Error) -> Self {
-        ApiError::internal(format!("{e:#}"))
-    }
-}
-
-impl From<serde_json::Error> for ApiError {
-    fn from(e: serde_json::Error) -> Self {
-        ApiError::internal(format!("{e}"))
-    }
-}
-
-type ApiResult<T> = Result<T, ApiError>;
 
 // ── handlers ─────────────────────────────────────────────────────────────────
 
@@ -514,6 +478,7 @@ async fn events(State(ctx): State<Arc<AppCtx>>) -> impl IntoResponse {
 mod tests {
     use super::*;
     use crate::jav::app::TaskState;
+    use axum::http::StatusCode;
 
     #[test]
     fn merge_overlays_nested_objects() {
