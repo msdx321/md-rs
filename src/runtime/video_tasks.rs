@@ -197,6 +197,23 @@ impl VideoTasks {
         })
     }
 
+    /// Control state of a download, treating a dismissed task as cancelled.
+    pub fn control(&self, id: &str) -> TaskState {
+        self.task_control(id).unwrap_or(TaskState::Cancelled)
+    }
+
+    /// Wait until the task leaves the running state and return its control state.
+    pub async fn stopped(&self, id: &str) -> TaskState {
+        // Only state transitions wake this, not every task's progress update.
+        let mut changes = self.subscribe_status();
+        loop {
+            let state = self.control(id);
+            if state != TaskState::Running || changes.changed().await.is_err() {
+                return state;
+            }
+        }
+    }
+
     pub fn running_task_count(&self) -> usize {
         self.tasks
             .lock()

@@ -1,4 +1,4 @@
-//! Buffered writes and size checks for progressive MP4 transfers.
+//! Buffered writes, size checks and task completion for progressive MP4 downloads.
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -7,8 +7,90 @@ use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 
 use super::video_tasks::{TaskState, VideoTasks};
+use crate::storage::video::Record;
 
 const WRITE_BUFFER: usize = 1024 * 1024;
+
+/// How a download run ended.
+pub(crate) enum Outcome {
+    Done,
+    Paused,
+    Cancelled,
+}
+
+pub(crate) fn stopped_outcome(state: TaskState) -> Outcome {
+    if state == TaskState::Cancelled {
+        Outcome::Cancelled
+    } else {
+        Outcome::Paused
+    }
+}
+
+/// Save a completed download and publish it, unless a pause or cancel claimed
+/// the task first. `stopped` runs only in that case.
+pub(crate) async fn finish_completed<Save: Future<Output = anyhow::Result<()>>>(
+    tasks: &VideoTasks,
+    record: Record,
+    save: impl FnOnce(Record) -> Save,
+    stopped: impl Future<Output = TaskState>,
+) -> TaskState {
+    let id = record.id.clone();
+    if !tasks.begin_terminal_commit(&id) {
+        return stopped.await;
+    }
+    let (title, path, size) = (record.title.clone(), record.path.clone(), record.size);
+    log::info!("[{id}] download complete bytes={size} path={path}");
+    let (state, phase, message) = match save(record).await {
+        Ok(()) => (TaskState::Completed, "completed", "completed".to_owned()),
+        Err(error) => {
+            let message = format!("file saved, but history could not be updated: {error:#}");
+            log::error!("[{id}] {message}");
+            (TaskState::Failed, "failed", message)
+        }
+    };
+    tasks.update_task(&id, |t| {
+        t.state = state;
+        t.title = title;
+        t.downloaded_bytes = size;
+        t.total_bytes = size;
+        t.phase = phase.into();
+        t.total_segments = 1;
+        t.done_segments = 1;
+        t.speed_kbps = 0.0;
+        t.message = message;
+        t.path = path;
+    });
+    tasks.end_terminal_commit(&id);
+    state
+}
+
+/// Save a failed download, unless a pause or cancel claimed the task first.
+/// The failure message comes from `record.error`. `stopped` runs only when
+/// the task was claimed.
+pub(crate) async fn finish_failed<Save: Future<Output = anyhow::Result<()>>>(
+    tasks: &VideoTasks,
+    record: Record,
+    save: impl FnOnce(Record) -> Save,
+    stopped: impl Future<Output = TaskState>,
+) -> TaskState {
+    let id = record.id.clone();
+    if !tasks.begin_terminal_commit(&id) {
+        return stopped.await;
+    }
+    let message = record.error.clone().unwrap_or_default();
+    log::error!("[{id}] download failed: {message}");
+    if let Err(error) = save(record).await {
+        log::error!("cannot persist state: {error:#}");
+    }
+    tasks.update_task(&id, |t| {
+        t.state = TaskState::Failed;
+        t.phase = "failed".into();
+        t.speed_kbps = 0.0;
+        t.message = message;
+    });
+    tasks.end_terminal_commit(&id);
+    TaskState::Failed
+}
 
 pub fn validate_size(written: u64, expected: Option<u64>) -> anyhow::Result<()> {
     anyhow::ensure!(written > 0, "empty media response");
@@ -32,7 +114,7 @@ pub(crate) async fn write_body<F: Future<Output = ()>>(
     downloaded: &AtomicU64,
     acquire: impl Fn(usize) -> F,
 ) -> anyhow::Result<bool> {
-    let running = || tasks.task_control(id) == Some(TaskState::Running);
+    let running = || tasks.control(id) == TaskState::Running;
     let mut options = tokio::fs::OpenOptions::new();
     options.create(true).write(true);
     if append {

@@ -147,7 +147,7 @@ mod tests {
     }
 }
 
-mod video;
+pub(crate) mod video;
 mod video_repository;
 use std::{path::Path, sync::Arc};
 
