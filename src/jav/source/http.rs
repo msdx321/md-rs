@@ -114,6 +114,8 @@ fn same_site(a: &str, b: &str) -> bool {
 pub struct Fetcher {
     pub client: wreq::Client,
     pub cookies: Arc<CookieStore>,
+    /// Shared by the playlists, keys and segment workers for one download.
+    media_cookies: Arc<wreq::cookie::Jar>,
     site_base: String,
 }
 
@@ -122,6 +124,7 @@ impl Fetcher {
         Self {
             client,
             cookies,
+            media_cookies: Arc::new(wreq::cookie::Jar::default()),
             site_base,
         }
     }
@@ -157,7 +160,10 @@ impl Fetcher {
         origin: &str,
         range: Option<(u64, u64)>,
     ) -> anyhow::Result<wreq::RequestBuilder> {
-        let mut req = self.client.get(url);
+        let mut req = self
+            .client
+            .get(url)
+            .cookie_provider(self.media_cookies.clone());
         if let Some(referer) = referer_for(origin) {
             req = req.header("referer", referer);
         }
@@ -225,17 +231,19 @@ impl Fetcher {
             let ray = headers.get("cf-ray").and_then(|v| v.to_str().ok());
             let reason = if challenge {
                 "Cloudflare challenge"
-            } else if ray.is_some() && status == wreq::StatusCode::FORBIDDEN {
-                "Cloudflare access denied"
+            } else if status == wreq::StatusCode::FORBIDDEN {
+                "access denied"
             } else if html && status.is_success() {
                 "HTML instead of media"
             } else {
                 "access failed"
             };
+            let ray = ray.map(|id| format!(", cf-ray: {id}")).unwrap_or_default();
             return Err(MediaRejected(format!(
-                "media request for {}: {reason} (HTTP {status}, cf-ray: {}). Clearance cookies are scoped to the issuing site",
-                resp.uri(), ray.unwrap_or("unavailable")
-            )).into());
+                "media request for {}: {reason} (HTTP {status}{ray})",
+                resp.uri()
+            ))
+            .into());
         }
         if !status.is_success() {
             anyhow::bail!("media request for {}: HTTP {status}", resp.uri());
