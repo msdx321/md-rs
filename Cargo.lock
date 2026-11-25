@@ -3158,7 +3158,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -3948,9 +3948,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wreq"
-version = "0.16.3"
+version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2b11a67378558357ed083260fd0bbced0481e4d32e2fb722be9c52b42ee08d4"
+checksum = "b7b694ef977f3cc55d22d4474d765c2ca0b6328123f2927b01aad5570299fcf8"
 dependencies = [
  "btls",
  "btls-sys",
